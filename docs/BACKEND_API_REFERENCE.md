@@ -1,6 +1,11 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-09-28 — **In-product problem reports** (new §12b, admin triage in §13).
+> _Last updated: 2026-09-29 — **Admin view of a reported asset**: new `GET /v1/content/feedback/{report_id}`
+> (§9, ADMIN/SUPERADMIN, cookie- or Bearer-authenticated, `Cache-Control: private, no-store`, audit-logged)
+> streams the asset a feedback report points at; `FeedbackReportAdmin` gains `asset_url`. The owner routes
+> `/v1/content/outputs|uploads/{id}` are unchanged and still 404 for an admin who is not the owner._
+>
+> _Prior (2026-09-28): **In-product problem reports** (new §12b, admin triage in §13).
 > New `POST /v1/feedback` (authenticated, **legal-exempt**, `10/hour` per IP via
 > `RATE_LIMIT_FEEDBACK`) returns `201 {id, status, created_at}`. New admin endpoints are
 > `GET /v1/admin/feedback`, `GET /v1/admin/feedback/{report_id}` and
@@ -1432,7 +1437,7 @@ Provides stable, non-expiring authenticated URLs for user content. The server re
 
 ### Auth: the `apex_content` cookie
 
-Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product. As of issue #142, `content_auth_guard` also consults `TokenRevocationService`: `POST /v1/auth/logout` clears the cookie client-side *and* denylists a presenting access token's own jti, while `logout-all`/password-change/deactivation (§3) reject any token — access or content — issued before that event, closing the exposure window the 24h TTL raise opened.
+Requests here accept either a Bearer access token or the `apex_content` cookie (`HttpOnly`, `Secure`, `SameSite=Lax`, `Path=/v1/content`) — see §2 for how it's minted/re-minted. Its lifetime is `content_cookie_ttl_hours` (default **24h**, configurable up to **168h**/7d) — raised from a 1h default specifically so the cookie survives a suspended PWA: with no API traffic there's no `/v1/auth/refresh` to re-attach it, so a short TTL ages out during suspension and the first batch of `<img>` requests on resume all 401 before any JSON call can trigger recovery. This is deliberately asymmetric with the 15-minute access token (§2.1) — the content token is `type: "content"` (structurally rejected by the access-token decoder), product-scoped, and every request here still performs the full ownership check below regardless of which credential was presented; its blast radius is read access to the bearer's own media on one product (and, for ADMIN/SUPERADMIN, the assets referenced by that product's feedback reports — audit-logged). As of issue #142, `content_auth_guard` also consults `TokenRevocationService`: `POST /v1/auth/logout` clears the cookie client-side *and* denylists a presenting access token's own jti, while `logout-all`/password-change/deactivation (§3) reject any token — access or content — issued before that event, closing the exposure window the 24h TTL raise opened.
 
 ### Response Headers
 
@@ -1480,6 +1485,22 @@ Errors:   404 not_found (ownership check failed or wrong product),
           416 range_not_satisfiable (Range start at/beyond object size),
           502 upstream_error (R2 fetch failed)
 Note:     Only returns uploads owned by the authenticated user and matching the current product.
+```
+
+#### `GET /v1/content/feedback/{report_id}` *(ADMIN / SUPERADMIN)*
+
+```
+Path:     report_id (UUID)
+Headers:  Range?: bytes=<start>-<end>, If-None-Match?: "<etag>"
+Response: 200 Raw bytes | 206 Partial Content | 304 Not Modified (no body)
+Errors:   401 (not authenticated / not an admin),
+          404 feedback_not_found (no such report in this product),
+          404 asset_not_found (no asset_ref, reporter purged, or asset deleted / retention-expired),
+          416 range_not_satisfiable, 502 upstream_error
+Note:     Streams the asset a feedback report points at, resolved as the reporter (owner-scoped)
+          within the request's product. Cache-Control is `private, no-store`. Writes one
+          admin_audit_log row (`feedback.asset.view`, IDs only) when a view starts (no Range, or
+          a Range starting at byte 0). Use FeedbackReportAdmin.asset_url; never the owner URL.
 ```
 
 > **Removed (2026-07-22):** `DELETE /v1/content/{content_id}` — deletion is now typed via
@@ -2469,6 +2490,7 @@ FeedbackReportAdmin: {
   message: string,                         // untrusted — render as text
   user_id: UUID | null, user_email: string | null,   // null once the user is hard-deleted
   job_id: UUID | null, asset_ref: string | null,     // asset_ref may dangle (retention)
+  asset_url: string | null,                          // "/v1/content/feedback/{id}" iff asset_ref is set
   client_path: string | null, app_version: string | null, user_agent: string | null,
   admin_note: string | null,
   resolved_at: datetime | null, resolved_by: UUID | null,  // written once, on entering a terminal status

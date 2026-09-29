@@ -56,6 +56,8 @@ class FeedbackReportAdmin(msgspec.Struct, kw_only=True):
     user_email: str | None
     job_id: UUID | None
     asset_ref: str | None
+    # Relative path (like MediaVariant.url); set iff asset_ref is. Admin-only proxy route.
+    asset_url: str | None
     client_path: str | None
     app_version: str | None
     user_agent: str | None

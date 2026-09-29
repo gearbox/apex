@@ -82,6 +82,7 @@ def _view(report: FeedbackReport | None = None) -> FeedbackReportAdmin:
         user_email=None,
         job_id=None,
         asset_ref=None,
+        asset_url=None,
         client_path=None,
         app_version=None,
         user_agent=None,

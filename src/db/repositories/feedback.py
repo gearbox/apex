@@ -33,6 +33,15 @@ class FeedbackReportRepository:
         """Stage a new report. The id is app-side, so no flush is needed."""
         self._session.add(report)
 
+    async def get(self, report_id: UUID, *, product_id: str) -> FeedbackReport | None:
+        """Fetch one report of this product. No email join, no lock."""
+        result = await self._session.execute(
+            select(FeedbackReport).where(
+                FeedbackReport.id == report_id, FeedbackReport.product_id == product_id
+            )
+        )
+        return result.scalar_one_or_none()
+
     async def list_page(
         self,
         *,

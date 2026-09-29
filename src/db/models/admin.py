@@ -45,10 +45,11 @@ class AdminPermissionGrant(Base):
 
 
 class AdminAuditLog(Base):
-    """Append-only audit log for admin role and permission changes.
+    """Append-only audit log for admin role and permission changes, and content views.
 
-    Covers: role grants/revokes, permission grants/revokes.
-    Written by both API and CLI paths.
+    Covers: role grants/revokes, permission grants/revokes, and an admin
+    viewing a user's asset via a feedback report (``feedback.asset.view``;
+    ``detail`` carries IDs only). Written by both API and CLI paths.
     """
 
     __tablename__ = "admin_audit_log"

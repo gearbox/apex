@@ -5,10 +5,12 @@ resolves ownership, then streams bytes from R2 with Cache-Control
 headers. Presigned URLs are never exposed to the client.
 
 Endpoints:
-  GET /v1/content/outputs/{output_id}  — stream a generated output
-  GET /v1/content/uploads/{image_id}   — stream an uploaded image
+  GET /v1/content/outputs/{output_id}      — stream a generated output
+  GET /v1/content/uploads/{image_id}       — stream an uploaded image
+  GET /v1/content/feedback/{report_id}     — ADMIN/SUPERADMIN: stream the asset a feedback
+                                             report points at (audit-logged, no-store)
 
-Both support HTTP Range (single range only — see src.api.utils.http_range)
+All support HTTP Range (single range only — see src.api.utils.http_range)
 and If-None-Match conditional requests.
 
 Cache-Control stays `private, max-age=<content_url_ttl>, immutable` —
@@ -27,6 +29,9 @@ src/api/security/response_headers.py) plus client-side session isolation
 defence in depth is wanted, shorten `content_url_ttl` instead of reaching
 for `no-store` — that shrinks the residue window while preserving the
 within-session cache benefit.
+
+The feedback route is the exception: one-off admin triage views of other users'
+media send `private, no-store` so an admin device never keeps them in HTTP cache.
 """
 
 from __future__ import annotations
@@ -48,10 +53,15 @@ from litestar.status_codes import (
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
-from src.api.dependencies.auth import get_current_user_id
+from src.api.dependencies.auth import get_current_admin_user, get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.security import content_auth_guard
 from src.api.services.content_proxy import ContentNotFoundError, ContentProxyService
+from src.api.services.feedback import (
+    FeedbackAssetNotFoundError,
+    FeedbackNotFoundError,
+    FeedbackService,
+)
 from src.api.services.storage.exceptions import StorageError, StorageRangeNotSatisfiableError
 from src.api.services.storage.r2 import (
     ALLOWED_CONTENT_TYPES as _STORED_CONTENT_TYPES,
@@ -59,7 +69,15 @@ from src.api.services.storage.r2 import (
 from src.api.services.storage.r2 import (
     R2StorageService,
 )
-from src.api.utils.http_range import ServedRange, Unsatisfiable, parse_range
+from src.api.utils.http_range import (
+    FullBody,
+    ParsedRange,
+    ServedRange,
+    Unsatisfiable,
+    parse_range,
+)
+from src.core.library_ref import LibraryAssetSource
+from src.db.models import User
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
@@ -77,6 +95,19 @@ logger = structlog.get_logger(__name__)
 # before storage). Do NOT unify with that one.
 _INLINE_SAFE_CONTENT_TYPES: frozenset[str] = frozenset(_STORED_CONTENT_TYPES)
 
+_NO_STORE = "private, no-store"
+
+_FEEDBACK_NOT_FOUND = ErrorEnvelope(
+    error="feedback_not_found",
+    message="Feedback report not found",
+    status_code=HTTP_404_NOT_FOUND,
+)
+_ASSET_NOT_FOUND = ErrorEnvelope(
+    error="asset_not_found",
+    message="Asset not found",
+    status_code=HTTP_404_NOT_FOUND,
+)
+
 
 def _if_none_match_satisfied(if_none_match: str, quoted_etag: str) -> bool:
     """Check a raw If-None-Match header value against our quoted ETag.
@@ -89,6 +120,15 @@ def _if_none_match_satisfied(if_none_match: str, quoted_etag: str) -> bool:
         return True
     candidates = (c.strip() for c in if_none_match.split(","))
     return quoted_etag in candidates
+
+
+def _is_view_start(parsed: ParsedRange) -> bool:
+    """True for the request that begins a view: a full body or a range from byte 0.
+
+    Later range chunks of the same ``<video>`` playback are continuations and
+    must not each write an audit row.
+    """
+    return isinstance(parsed, FullBody) or (isinstance(parsed, ServedRange) and parsed.start == 0)
 
 
 class ContentProxyController(Controller):
@@ -176,6 +216,72 @@ class ContentProxyController(Controller):
             if_none_match=request.headers.get("if-none-match"),
         )
 
+    @get(
+        "/feedback/{report_id:uuid}",
+        guards=[content_auth_guard],
+        dependencies={"admin": Provide(get_current_admin_user)},
+    )
+    async def proxy_feedback_asset(
+        self,
+        request: Request[Any, Any, Any],
+        admin: User,
+        product_id: str,
+        report_id: UUID,
+        session: AsyncSession,
+        content_proxy: ContentProxyService,
+        r2_storage: R2StorageService,
+        feedback_service: FeedbackService,
+    ) -> Stream | Response[ErrorEnvelope]:
+        """Stream the asset a feedback report points at — ADMIN/SUPERADMIN, report-scoped.
+
+        Order is security-relevant: admin role (dependency) → report, scoped to
+        the request's product → *owner-scoped* resolve as the reporter → audit
+        → stream. Nothing touches R2 before every check has passed, and the
+        audit row is committed before the response starts streaming (the
+        session must not be relied on once the body is being yielded).
+        """
+        try:
+            target = await feedback_service.get_asset_target_for_admin(
+                report_id, product_id=product_id
+            )
+        except FeedbackNotFoundError:
+            return Response(content=_FEEDBACK_NOT_FOUND, status_code=HTTP_404_NOT_FOUND)
+        except FeedbackAssetNotFoundError:
+            return Response(content=_ASSET_NOT_FOUND, status_code=HTTP_404_NOT_FOUND)
+
+        resolver = (
+            content_proxy.resolve_output
+            if target.source is LibraryAssetSource.OUTPUT
+            else content_proxy.resolve_upload
+        )
+        try:
+            storage_key, etag, size_bytes = await resolver(
+                target.asset_id,
+                user_id=target.owner_id,
+                product_id=product_id,
+                session=session,
+            )
+        except ContentNotFoundError:
+            return Response(content=_ASSET_NOT_FOUND, status_code=HTTP_404_NOT_FOUND)
+
+        range_header = request.headers.get("range")
+        if _is_view_start(parse_range(range_header, size_bytes)):
+            await feedback_service.record_asset_view(
+                target, admin_id=admin.id, product_id=product_id
+            )
+            await session.commit()
+
+        return await self._stream_from_r2(
+            r2_storage,
+            storage_key,
+            etag,
+            size_bytes,
+            content_proxy.ttl,
+            range_header=range_header,
+            if_none_match=request.headers.get("if-none-match"),
+            cache_control=_NO_STORE,
+        )
+
     @staticmethod
     async def _stream_from_r2(
         r2: R2StorageService,
@@ -186,6 +292,7 @@ class ContentProxyController(Controller):
         *,
         range_header: str | None,
         if_none_match: str | None,
+        cache_control: str | None = None,
     ) -> Stream | Response[ErrorEnvelope]:
         """Resolve ownership → conditional GET → single ranged/full R2 GET → response.
 
@@ -200,7 +307,8 @@ class ContentProxyController(Controller):
         (D2) — ranged or full, decided before the call is made.
         """
         quoted_etag = f'"{etag}"'
-        cache_control = f"private, max-age={cache_ttl}, immutable"
+        if cache_control is None:
+            cache_control = f"private, max-age={cache_ttl}, immutable"
 
         if if_none_match is not None and _if_none_match_satisfied(if_none_match, quoted_etag):
             return Response(

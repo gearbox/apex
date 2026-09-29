@@ -24,6 +24,7 @@ logger = structlog.get_logger(__name__)
 
 OUTPUT_PREFIX = "/v1/content/outputs"
 UPLOAD_PREFIX = "/v1/content/uploads"
+FEEDBACK_ASSET_PATH = "/v1/content/feedback"
 
 _MediaRow = GenerationOutput | UserImage
 

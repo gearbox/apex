@@ -12,6 +12,7 @@ the ops payload, not in any log event.
 
 from __future__ import annotations
 
+from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Literal
 
@@ -21,10 +22,13 @@ import structlog
 from src.api.schemas.feedback import FeedbackReportAdmin
 from src.api.schemas.ops_events import FeedbackSubmittedOpsPayload, OpsEventType
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.api.services.media import FEEDBACK_ASSET_PATH
 from src.core.enums import FeedbackCategory, FeedbackStatus
 from src.core.library_ref import LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.uid import new_id
+from src.db.models.admin import AdminAuditLog
 from src.db.models.feedback import FeedbackReport
+from src.db.repositories.admin import AdminRepository
 from src.db.repositories.feedback import FeedbackReportRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
@@ -43,6 +47,8 @@ logger = structlog.get_logger(__name__)
 MESSAGE_MIN_LENGTH = 10
 MESSAGE_MAX_LENGTH = 4000
 USER_AGENT_MAX_LENGTH = 512
+
+FEEDBACK_ASSET_VIEW_ACTION = "feedback.asset.view"
 
 
 class FeedbackError(Exception):
@@ -76,6 +82,10 @@ class FeedbackNotFoundError(FeedbackError):
     """No report with this id in the request's product. → 404"""
 
 
+class FeedbackAssetNotFoundError(FeedbackError):
+    """The report has no asset reference, or its reporter is gone. → 404 asset_not_found"""
+
+
 class InvalidFeedbackTransitionError(FeedbackError):
     """The requested status transition is not allowed. → 409"""
 
@@ -83,6 +93,21 @@ class InvalidFeedbackTransitionError(FeedbackError):
         self.current = current
         self.target = target
         super().__init__(f"Cannot change status from {current.value!r} to {target.value!r}")
+
+
+@dataclass(frozen=True, slots=True)
+class FeedbackAssetTarget:
+    """The asset a report points at, plus the reporter whose scope it resolves under."""
+
+    report_id: UUID
+    source: LibraryAssetSource
+    asset_id: UUID
+    owner_id: UUID
+
+    @property
+    def asset_ref(self) -> str:
+        """``"upload:<uuid>"`` / ``"output:<uuid>"``."""
+        return format_asset_ref(self.source, self.asset_id)
 
 
 class FeedbackService:
@@ -239,6 +264,61 @@ class FeedbackService:
         report, email = row
         return to_admin_view(report, email)
 
+    async def get_asset_target_for_admin(
+        self, report_id: UUID, *, product_id: str
+    ) -> FeedbackAssetTarget:
+        """Resolve which asset, owned by whom, a report of this product refers to.
+
+        The caller must resolve the asset with the *owner-scoped* content
+        resolvers using ``owner_id`` — an admin gains access only to assets a
+        report in their product points at, and a tampered row aimed at
+        someone else's asset still fails that ownership check.
+
+        Raises:
+            FeedbackNotFoundError: No such report in ``product_id``.
+            FeedbackAssetNotFoundError: No asset reference, or the reporter
+                was purged (``user_id`` NULL).
+        """
+        report = await self._repo.get(report_id, product_id=product_id)
+        if report is None:
+            raise FeedbackNotFoundError
+        if report.asset_source is None or report.asset_id is None or report.user_id is None:
+            raise FeedbackAssetNotFoundError
+        return FeedbackAssetTarget(
+            report_id=report.id,
+            source=LibraryAssetSource(report.asset_source),
+            asset_id=report.asset_id,
+            owner_id=report.user_id,
+        )
+
+    async def record_asset_view(
+        self, target: FeedbackAssetTarget, *, admin_id: UUID, product_id: str
+    ) -> None:
+        """Stage one durable audit row for an admin viewing a reported asset.
+
+        Does NOT commit. IDs only — never the report's message, note, client
+        path or user agent.
+        """
+        await AdminRepository(self._session).write_audit(
+            AdminAuditLog(
+                id=new_id(),
+                actor_id=admin_id,
+                target_user_id=target.owner_id,
+                product_id=product_id,
+                action=FEEDBACK_ASSET_VIEW_ACTION,
+                detail=f"report {target.report_id} asset {target.asset_ref}",
+                source="api",
+            )
+        )
+        logger.info(
+            "content.feedback_asset.viewed",
+            report_id=str(target.report_id),
+            asset_ref=target.asset_ref,
+            admin_id=str(admin_id),
+            owner_id=str(target.owner_id),
+            product_id=product_id,
+        )
+
     async def update_by_admin(
         self,
         report_id: UUID,
@@ -305,6 +385,7 @@ def to_admin_view(report: FeedbackReport, user_email: str | None) -> FeedbackRep
         user_email=user_email,
         job_id=report.job_id,
         asset_ref=asset_ref,
+        asset_url=None if asset_ref is None else f"{FEEDBACK_ASSET_PATH}/{report.id}",
         client_path=report.client_path,
         app_version=report.app_version,
         user_agent=report.user_agent,
