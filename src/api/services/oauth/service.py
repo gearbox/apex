@@ -25,7 +25,6 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.security.oauth_tx_cookie import binding_hash
 from src.api.services.oauth.errors import (
-    AccountExistsUnverifiedError,
     AccountInactiveError,
     FlowExpiredError,
     IdentityConflictError,
@@ -61,6 +60,7 @@ if TYPE_CHECKING:
     from src.api.services.oauth.flow_store import OAuthFlowStore
     from src.api.services.oauth.models import CallbackOutcome
     from src.api.services.oauth.registry import OAuthProviderRegistry
+    from src.api.services.session_termination import SessionTerminationService
     from src.core.config import Settings
     from src.core.product import OAuthProvider, ProductConfig
     from src.db.models import User
@@ -114,6 +114,7 @@ class OAuthService:
         identity_repo: UserIdentityRepository,
         user_repo: UserRepository,
         auth_service: AuthService,
+        sessions: SessionTerminationService,
         session: AsyncSession,
         settings: Settings,
     ) -> None:
@@ -122,6 +123,7 @@ class OAuthService:
         self._identities = identity_repo
         self._users = user_repo
         self._auth = auth_service
+        self._sessions = sessions
         self._session = session
         self._settings = settings
 
@@ -184,7 +186,9 @@ class OAuthService:
         """Validate the flow, redeem the code, and resolve login vs. signup.
 
         Performs the identity link / ``last_login_at`` touch (DB) but no Redis
-        writes. The caller must commit before :meth:`issue_redirect`.
+        writes — except that claiming an unverified same-email account
+        (D5') bulk-revokes that user's access tokens (Redis epoch). The caller
+        must commit before :meth:`issue_redirect`.
 
         Returns:
             ``(outcome, return_to)``.
@@ -194,7 +198,6 @@ class OAuthService:
             OAuthFailedError: Token endpoint or id_token verification failed.
             EmailUnverifiedError: The provider did not verify the email.
             AccountInactiveError: The linked account is deactivated.
-            AccountExistsUnverifiedError: Same-email local account is unverified.
             IdentityConflictError: The local account is linked to another subject.
         """
         # 1. Consume the flow first — a replayed state fails even if the rest would pass.
@@ -235,7 +238,8 @@ class OAuthService:
             logger.info("auth.oauth.login_resolved", user_id=str(user.id), provider=provider.value)
             return LoginOutcome(user_id=user.id), flow.return_to
 
-        # 4. Same-email local account → auto-link only if both sides verified.
+        # 4. Same-email local account → link (Google verified the email). A
+        #    never-verified local account is claimed, not rejected (D5').
         local = await self._users.get_active_user_by_email(identity.email, product_id=product.slug)
         if local is not None:
             await self._link_existing(local, identity, product)
@@ -267,11 +271,8 @@ class OAuthService:
     async def _link_existing(
         self, local: User, identity: VerifiedIdentity, product: ProductConfig
     ) -> None:
-        if local.email_verified_at is None:
-            # Pre-account hijacking guard: someone could have registered this
-            # email without owning the inbox. Recovery: verify or reset password.
-            logger.info("auth.oauth.link_rejected_unverified", user_id=str(local.id))
-            raise AccountExistsUnverifiedError
+        # Conflict first (D5'-b): claiming before this check would wipe the
+        # password of an account we are about to reject.
         if await self._identities.get_for_user(user_id=local.id, provider=identity.provider):
             logger.warning(
                 "auth.oauth.link_rejected_conflict",
@@ -279,10 +280,40 @@ class OAuthService:
                 provider=identity.provider.value,
             )
             raise IdentityConflictError
+        if local.email_verified_at is None:
+            await self._claim_unverified(local, identity)
         linked = await self._add_identity(local.id, identity, product)
         await self._identities.touch_last_login(linked)
         logger.info(
             "auth.oauth.identity_linked", user_id=str(local.id), provider=identity.provider.value
+        )
+
+    async def _claim_unverified(self, local: User, identity: VerifiedIdentity) -> None:
+        """D5' — the provider proved inbox ownership of a never-verified local account.
+
+        Someone may have registered this email without owning the inbox
+        (pre-account hijacking), so the claim strips every credential they could
+        hold: password cleared, all sessions terminated. The rightful owner is
+        signed in by the caller and can add a password later. Runs in the
+        callback's transaction, before its commit — a failed commit only signs
+        the user out (fails safe).
+        """
+        had_password = local.password_hash is not None
+        if not await self._users.claim_unverified_email(local.id):
+            # Verified concurrently (single conditional UPDATE lost the race):
+            # now the ordinary verified path — keep the password and sessions.
+            logger.info(
+                "auth.oauth.claim_raced_verified",
+                user_id=str(local.id),
+                provider=identity.provider.value,
+            )
+            return
+        await self._sessions.terminate_all(local.id, op="oauth_claim_unverified", source="oauth")
+        logger.info(
+            "auth.oauth.unverified_account_claimed",
+            user_id=str(local.id),
+            provider=identity.provider.value,
+            had_password=had_password,
         )
 
     async def _add_identity(

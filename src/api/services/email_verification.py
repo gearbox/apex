@@ -17,13 +17,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.schemas.ops_events import (
-    PLATFORM_PRODUCT_ID,
-    OpsEventType,
-    TokenRevocationFailedOpsPayload,
-)
 from src.api.services.ops_event_bus import OpsEventBus
-from src.api.services.push_cleanup import delete_user_push_subscriptions
+from src.api.services.session_termination import SessionTerminationService
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
@@ -273,53 +268,27 @@ class EmailVerificationService:
         if user is None:
             raise UserNotFoundError(f"User {user_id} not found after token consumption")
 
-        # A consumed reset link proves control of the inbox — the recovery
-        # path for OAuth's account_exists_unverified (auto-link requires a
-        # verified local email). Never overwrites an existing timestamp.
+        # A consumed reset link proves control of the inbox. Never overwrites
+        # an existing timestamp.
         if user.email_verified_at is None:
             await user_repo.mark_email_verified(user_id)
             logger.info("user.email_verified_via_reset", user_id=str(user_id))
 
-        # Revoke all refresh tokens — forces re-authentication on all devices
-        revoked = await user_repo.revoke_all_refresh_tokens(user_id)
-        # Bulk-revoke live access tokens/content cookies too (issue #142) —
-        # otherwise a stolen access token or content cookie survives a
-        # password reset for its full remaining lifetime. This must never
-        # block the password reset itself completing (F5) — blocking
-        # account recovery on a cache outage is a worse failure than the
-        # bounded exposure of a live access token.
-        epoch = await self._token_revocation.revoke_user_sessions(user_id)
-        bulk_access_revoked = epoch is not None
-        await self._report_revocation_outcome(
-            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="reset_password"
-        )
-        await delete_user_push_subscriptions(
-            session, self._ops_event_bus, user_id=user_id, op="reset_password", source="email"
-        )
+        # Terminate every session — refresh tokens (re-authentication on all
+        # devices) and live access tokens/content cookies (issue #142), so a
+        # stolen access token doesn't survive a reset for its remaining
+        # lifetime. Never blocks the reset on a cache outage (F5).
+        terminated = await SessionTerminationService(
+            session=session,
+            user_repo=user_repo,
+            token_revocation=self._token_revocation,
+            ops_event_bus=self._ops_event_bus,
+        ).terminate_all(user_id, op="reset_password", source="email")
         logger.info(
             "email.password_reset_done",
             user_id=str(user_id),
-            revoked_tokens=revoked,
-            bulk_access_revoked=bulk_access_revoked,
+            revoked_tokens=terminated.revoked_refresh_tokens,
+            bulk_access_revoked=terminated.bulk_access_revoked,
         )
 
         return user
-
-    async def _report_revocation_outcome(
-        self, *, bulk_access_revoked: bool, user_id: UUID, op: str
-    ) -> None:
-        """F5 — surface a failed bulk access-token revocation to operators.
-
-        Only alert-worthy when Redis is actually configured
-        (`token_revocation.enabled`) — a failed outcome with Redis unset is
-        the documented no-op, already logged once at startup, not a fresh
-        degradation.
-        """
-        if bulk_access_revoked or not self._token_revocation.enabled:
-            return
-        logger.error("email.bulk_revocation_failed", user_id=str(user_id), op=op)
-        await self._ops_event_bus.publish(
-            event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
-            product_id=PLATFORM_PRODUCT_ID,
-            payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
-        )

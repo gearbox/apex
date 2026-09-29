@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import asyncio
+import time
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, Final
@@ -51,6 +53,10 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 _USER_EMAIL_CONSTRAINTS: Final = frozenset({"ix_users_email_product"})
+
+# Upper bound on how long issue_session waits out a just-written revocation epoch.
+_MAX_EPOCH_WAIT_S: Final = 2.0
+_EPOCH_WAIT_MARGIN_S: Final = 0.05
 
 
 class AuthError(Exception):
@@ -377,6 +383,7 @@ class AuthService:
         Returns:
             The new token pair.
         """
+        await self._wait_out_revocation_second(user_id)
         tokens, _refresh_token_id = await self._create_token_pair(
             user_id,
             product_id=product_id,
@@ -385,6 +392,29 @@ class AuthService:
             ip_address=context.ip_address,
         )
         return tokens
+
+    async def _wait_out_revocation_second(self, user_id: UUID) -> None:
+        """Don't mint into the second of a just-written revocation epoch.
+
+        Access tokens are rejected when ``iat <= epoch`` and both are whole
+        seconds. An OAuth claim revokes all sessions and the SPA's ``/exchange``
+        follows in well under a second, so the fresh token could carry
+        ``iat == epoch`` and be revoked the moment it is issued. Waiting until
+        the next second makes ``iat > epoch``. Only a session minted right after
+        a revocation ever waits, and at most about a second.
+
+        A future ``iat`` is deliberately not used instead: PyJWT rejects a token
+        whose ``iat`` is in the future. Password login is left alone — human
+        timing makes a same-second clash implausible.
+        """
+        epoch = await self._token_revocation.get_current_epoch(user_id)
+        if epoch is None:
+            return
+        # The epoch is Redis's clock, this is the app clock; skew is bounded by
+        # the cap, and the margin absorbs timer granularity (iat is truncated).
+        wait = (epoch + 1) - time.time() + _EPOCH_WAIT_MARGIN_S
+        if 0 < wait <= _MAX_EPOCH_WAIT_S:
+            await asyncio.sleep(wait)
 
     async def login(
         self,

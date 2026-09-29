@@ -416,7 +416,8 @@ class UserService:
             created_at=user.created_at,
             updated_at=user.updated_at,
             age_verified=user.age_verified_at is not None,
+            email_verified=user.email_verified_at is not None,
+            has_password=user.password_hash is not None,
             age_verified_at=user.age_verified_at,
             date_of_birth=user.date_of_birth,
-            has_password=user.password_hash is not None,
         )

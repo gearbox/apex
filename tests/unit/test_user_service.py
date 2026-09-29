@@ -504,12 +504,19 @@ class TestPasswordlessAccounts:
         pwd.averify.assert_not_called()
         repo.update_user.assert_not_awaited()
 
-    async def test_profile_reports_has_password(self) -> None:
+    @pytest.mark.parametrize("verified", [True, False])
+    @pytest.mark.parametrize("has_password", [True, False])
+    async def test_profile_reports_email_verified_and_has_password(
+        self, verified: bool, has_password: bool
+    ) -> None:
+        """K10 — both flags are derived independently, for all four combinations."""
         user = _make_user()
+        user.password_hash = "hashed_pw" if has_password else None
+        user.email_verified_at = datetime.now(UTC) if verified else None
         svc, _, _ = _make_service(user)
-        assert (await svc.get_profile(user.id)).has_password is True
-        user.password_hash = None
-        assert (await svc.get_profile(user.id)).has_password is False
+        profile = await svc.get_profile(user.id)
+        assert profile.email_verified is verified
+        assert profile.has_password is has_password
 
 
 class TestDeactivateUnlinksIdentities:

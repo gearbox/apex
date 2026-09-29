@@ -54,7 +54,6 @@ type OAuthErrorCode =
   | "oauth_failed"
   | "flow_expired"
   | "email_unverified"
-  | "account_exists_unverified"
   | "account_inactive"
   | "identity_conflict"
   | "invalid_handoff"
@@ -95,7 +94,7 @@ This is the API's redirect target, and the SPA never calls it. It always respond
 
 | `result` | Other keys | Meaning |
 |---|---|---|
-| `login` | `code`, optional `return_to` | An existing account signed in (or was just linked). Redeem `code` within **60 s**. |
+| `login` | `code`, optional `return_to` | An existing account signed in (or was just linked or claimed, §4). Redeem `code` within **60 s**. |
 | `signup` | `ticket`, optional `return_to` | New to this product. Show the signup screen. The ticket is valid for **15 min**. |
 | `error` | `error` (an `OAuthErrorCode`) | Show §4 copy. |
 
@@ -104,7 +103,7 @@ This is the API's redirect target, and the SPA never calls it. It always respond
 ### `POST /v1/auth/oauth/exchange` — `credentials: 'include'`
 
 - Body: `{ code }`.
-- **200:** `TokenResponse` plus `Set-Cookie: apex_content` (same as login) and a Set-Cookie that clears `apex_oauth_tx`. Store the tokens exactly as after password login.
+- **200:** `TokenResponse` plus `Set-Cookie: apex_content` (same as login) and a Set-Cookie that clears `apex_oauth_tx`. Store the tokens exactly as after password login. Right after a claim (§4) this call can take up to about a second longer than usual, because the API waits out the second in which it ended the account's old sessions; the new tokens are valid as soon as it returns.
 - **400 `invalid_handoff`:** the code is unknown, already used, expired, or was opened in another browser. Codes are single-use, so never retry the same one. Restart sign-in.
 - **401 `account_inactive`:** the account was deactivated.
 
@@ -120,7 +119,7 @@ This is the API's redirect target, and the SPA never calls it. It always respond
 - **201:** `TokenResponse` plus the `apex_content` cookie, with `apex_oauth_tx` cleared. The account's email is already verified. It has no password (see §5).
 - **Legal errors come before the ticket is consumed.** `409 legal_version_stale` / `422 legal_acceptance_incomplete` behave exactly as for register (legal contract §3). Refetch `/v1/legal/current`, show the new text, and submit again with the **same ticket**.
 - **400 `invalid_signup_ticket`:** expired or already used. A double-click is safe: exactly one request succeeds and the other gets this error. Restart sign-in.
-- **400 `email_exists`:** someone registered this email on this product since the callback. The ticket is spent; send the user back to sign in. If that account's email is verified, signing in with Google again auto-links it. Otherwise, sign in with a password or reset it.
+- **400 `email_exists`:** someone registered this email on this product since the callback. The ticket is spent; send the user back to sign in. Signing in with Google again links that account (§4).
 - **409 `identity_conflict`:** this Google account was linked to another account since the callback. Restart sign-in.
 
 **Signup screen requirements:** render the legal documents exactly as the password signup form does. That means `GET /v1/legal/current`, each body fetched with `?version=`, and `sensitive_data_consent` as its own unticked checkbox. Submit `accepted_documents` in the same shape as `POST /v1/auth/register`. `display_name` is optional. The backend never imports the Google name or picture.
@@ -137,13 +136,18 @@ Use product branding in all copy. Never show the backend's internal name.
 | `oauth_failed` | fragment | "We couldn't complete sign-in with Google. Please try again." |
 | `flow_expired` | fragment | "Your sign-in session expired or was started in another tab. Please try again." |
 | `email_unverified` | fragment | "Your Google account's email address isn't verified. Verify it with Google, or sign up with email and password." |
-| `account_exists_unverified` | fragment | "An account with this email already exists but its email hasn't been verified. Sign in with your password, or use 'Forgot password' to verify it, then try Google again." |
 | `account_inactive` | fragment, exchange (401) | "This account has been deactivated." |
 | `identity_conflict` | fragment, complete-signup (409) | "This account is already linked to a different Google account." |
 | `invalid_handoff` | exchange (400) | "This sign-in link has expired. Please sign in again." |
 | `invalid_signup_ticket` | signup-info / complete-signup (400) | "Your sign-up session expired. Please start again." |
 
-**Linking rule (backend semantics):** when the Google email matches an existing account on this product, sign-in links to it automatically, but only if Google has verified the email **and** the existing account's email is verified. Otherwise the result is `account_exists_unverified`. A successful password reset marks the email as verified, so "Forgot password" is always a way out.
+**Linking rule (backend semantics):** Google only reaches this step with `email_verified: true`, so it has proven the user owns the inbox. When that email matches an existing account on this product:
+
+- **The account's email is verified:** sign-in links the Google identity to it. The password is kept and no session is touched. Both login methods work afterwards.
+- **The account's email was never verified:** sign-in **claims** the account in one transaction. This defends against pre-account hijacking, where someone registers `victim@…` with their own password without owning the inbox. The claim marks the email verified, **clears the password** (`has_password` becomes `false`), ends **every** session of the account (refresh tokens, live access and content tokens, Web Push subscriptions), links the Google identity, and signs the user in. Whoever held the old password or tokens loses them. The rightful owner can add a password later with "Set a password" (§5).
+- **The account is already linked to a different Google account:** `identity_conflict`, and nothing about the account changes (this is checked before any claim).
+
+There is no "account exists but is unverified" error: the claim replaces it. If the user has other devices signed in to an unverified account, those devices are signed out by the claim, so the next request there returns `401` and the app should send the user to sign in.
 
 ---
 
@@ -153,7 +157,7 @@ Use product branding in all copy. Never show the backend's internal name.
 2. **Strip the fragment first.** At the top of `/auth/callback`, read `location.hash`, then call `history.replaceState(null, "", location.pathname + location.search)` **before** making any request or rendering third-party content. This keeps `code` / `ticket` out of history, bookmarks, and analytics.
 3. **Never send the fragment values anywhere except the matching endpoint.** Don't log them or put them in analytics or error reports.
 4. **Show the legal checkboxes on the signup screen,** fetched from the legal endpoints as described in §3.
-5. **Hide change-password when `GET /v1/users/me` returns `has_password: false`.** `POST /v1/users/me/password` returns `409 password_not_set` for these accounts. Offer "Set a password" through `POST /v1/auth/forgot-password` instead. Password login for such an account fails with the ordinary `401 invalid_credentials`.
+5. **Hide change-password when `GET /v1/users/me` returns `has_password: false`.** `POST /v1/users/me/password` returns `409 password_not_set` for these accounts. Offer "Set a password" through `POST /v1/auth/forgot-password` instead. Password login for such an account fails with the ordinary `401 invalid_credentials`. This also applies to an account just claimed through Google (§4): `has_password` is `false` afterwards. `GET /v1/users/me` also returns `email_verified` (a claimed account is verified).
 6. **One flow per browser.** Starting a login in a second tab invalidates the first (§3). Treat `flow_expired` as "try again", not as a bug.
 7. **Tokens are the usual ones.** After `exchange` / `complete-signup`, behave exactly as after `POST /v1/auth/login`: store the tokens, schedule the content-cookie re-mint, and refresh as usual. Tokens carry the `lgl` digest, so a freshly signed-up user doesn't hit `428` right away.
 

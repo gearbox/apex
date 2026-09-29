@@ -75,6 +75,7 @@ from src.api.services.pricing import PricingService
 from src.api.services.provisioning_script import ProvisioningScriptService
 from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.api.services.push import PushService, PywebpushSender
+from src.api.services.session_termination import SessionTerminationService
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
 from src.api.services.telegram.sender import HttpxTelegramSender
@@ -388,6 +389,23 @@ def get_auth_service(session: AsyncSession) -> AuthService:
     )
 
 
+def get_session_termination_service(session: AsyncSession) -> SessionTerminationService:
+    """Provide the "terminate all sessions of user X" service for request scope.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        SessionTerminationService bound to the request session (never commits).
+    """
+    return SessionTerminationService(
+        session=session,
+        user_repo=UserRepository(session),
+        token_revocation=get_token_revocation_service(),
+        ops_event_bus=get_ops_event_bus(),
+    )
+
+
 def get_oauth_registry() -> OAuthProviderRegistry:
     """Provide the process-wide OAuth provider registry.
 
@@ -418,6 +436,7 @@ def get_oauth_service(session: AsyncSession) -> OAuthService:
         identity_repo=UserIdentityRepository(session),
         user_repo=UserRepository(session),
         auth_service=get_auth_service(session),
+        sessions=get_session_termination_service(session),
         session=session,
         settings=get_settings(),
     )
@@ -1079,6 +1098,7 @@ async def init_services(settings: Settings) -> JWTService:
             api_key=settings.resend_api_key,
             from_address=settings.email_from_address,
             from_name=settings.email_from_name,
+            send_timeout_seconds=settings.email_send_timeout_seconds,
         )
         logger.info("email.initialized", provider="resend")
     else:
@@ -1712,6 +1732,8 @@ dependencies = {
     "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
     # Client IP (trusted-header aware) + user agent, for acceptance evidence
     "request_context": Provide(provide_request_context, sync_to_thread=False),
+    # Terminate-all-sessions sequence (request-scoped, never commits)
+    "session_termination_service": Provide(get_session_termination_service, sync_to_thread=False),
     # OAuth sign-in (registry singleton + request-scoped service)
     "oauth_registry": Provide(get_oauth_registry, sync_to_thread=False),
     "oauth_service": Provide(get_oauth_service, sync_to_thread=False),

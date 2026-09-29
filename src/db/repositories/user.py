@@ -239,6 +239,38 @@ class UserRepository:
         await self._session.flush()
         return await self.get_active_user(user_id)
 
+    async def claim_unverified_email(self, user_id: UUID) -> bool:
+        """Atomically mark the email verified AND clear the password, only if still unverified.
+
+        ``UPDATE users SET email_verified_at = now, password_hash = NULL
+        WHERE id = :id AND email_verified_at IS NULL``. The ``WHERE`` clause is
+        the race guard: if a concurrent request verified the email first, no
+        row changes and the password is left alone.
+
+        Used when an OAuth provider proves inbox ownership for a same-email
+        account that never verified it (pre-account-hijacking defence).
+
+        Args:
+            user_id: User to claim.
+
+        Returns:
+            True iff a row changed.
+        """
+        result = cast(
+            "CursorResult[tuple[()]]",
+            await self._session.execute(
+                update(User)
+                .where(User.id == user_id, User.email_verified_at.is_(None))
+                .values(email_verified_at=datetime.now(UTC), password_hash=None)
+                # "fetch": sync only rows the UPDATE really changed. The default
+                # evaluates in Python against a possibly stale in-session User and
+                # would show a cleared password even when the race was lost.
+                .execution_options(synchronize_session="fetch")
+            ),
+        )
+        await self._session.flush()
+        return result.rowcount == 1
+
     async def lock_user_for_session_change(self, user_id: UUID) -> None:
         """Acquire an exclusive row lock on the user row (issue #142 G1).
 

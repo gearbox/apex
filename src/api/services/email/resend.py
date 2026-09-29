@@ -4,7 +4,7 @@ Uses the official ``resend`` Python SDK which wraps the Resend REST API.
 Resend is the recommended provider for new projects in 2025:
 - Excellent deliverability out of the box
 - Generous free tier (3 000 emails/month)
-- Simple API surface — single ``resend.Emails.send()`` call
+- Simple API surface — single ``await resend.Emails.send_async()`` call
 - Native DKIM/SPF management via Resend dashboard
 
 Install: ``uv add resend``
@@ -12,6 +12,8 @@ Docs:    https://resend.com/docs/send-with-python
 """
 
 from __future__ import annotations
+
+from typing import cast
 
 import resend
 import structlog
@@ -24,14 +26,19 @@ logger = structlog.get_logger(__name__)
 class ResendEmailService(EmailService):
     """Transactional email via the Resend API.
 
+    Sends through the SDK's native ``httpx``-backed async path so a slow Resend
+    round-trip never blocks the event loop.
+
     Args:
         api_key: Resend API key (``re_...``).
         from_address: Default sender address, e.g. ``noreply@yourdomain.com``.
             Must be a verified domain in your Resend dashboard.
         from_name: Default sender display name, e.g. ``Apex``.
+        send_timeout_seconds: Timeout for each Resend HTTP request.
 
     Raises:
-        ImportError: If the ``resend`` package is not installed.
+        ImportError: If the ``resend`` package or its async (``httpx``) client
+            is not installed.
     """
 
     def __init__(
@@ -40,26 +47,36 @@ class ResendEmailService(EmailService):
         api_key: str,
         from_address: str,
         from_name: str = "Apex",
+        send_timeout_seconds: float = 10.0,
     ) -> None:
         try:
-            import resend  # noqa: F401
+            import resend
             # validate at construction, not import time
         except ImportError as exc:
             raise ImportError(
                 "The 'resend' package is required for ResendEmailService. "
                 "Install it with: uv add resend"
             ) from exc
+        try:
+            from resend.http_client_httpx import HTTPXClient
+        except ImportError as exc:
+            # Fail loud: without an async client, send_async cannot work at all.
+            raise ImportError(
+                "ResendEmailService needs 'httpx' for the Resend async client. "
+                "Install it with: uv add httpx"
+            ) from exc
 
-        self._api_key = api_key
+        # Process-global SDK state: the key and async client are module attributes
+        # of ``resend``, so one Resend account per process (there is only one).
+        resend.api_key = api_key
+        # The SDK types the timeout as int, but hands it straight to httpx.
+        resend.default_async_http_client = HTTPXClient(timeout=cast("int", send_timeout_seconds))
+
         self._from_address = from_address
         self._from_name = from_name
 
     async def send(self, message: EmailMessage) -> None:
-        """Send an email via the Resend API.
-
-        The Resend SDK is synchronous internally, so we call it directly
-        here (it's a thin HTTP wrapper — blocking time is negligible).
-        For high-throughput scenarios, wrap in ``asyncio.to_thread()``.
+        """Send an email via the Resend API without blocking the event loop.
 
         Args:
             message: Email to send.
@@ -67,8 +84,6 @@ class ResendEmailService(EmailService):
         Raises:
             EmailDeliveryError: If Resend returns an error response.
         """
-        resend.api_key = self._api_key
-
         sender_address = message.from_address or self._from_address
         sender_name = message.from_name or self._from_name
         from_field = f"{sender_name} <{sender_address}>"
@@ -88,18 +103,20 @@ class ResendEmailService(EmailService):
             # Resend expects tags as list of {name, value} dicts
             params["tags"] = [{"name": k, "value": v} for k, v in message.tags.items()]
 
+        # Transactional-email logs must not hold user email addresses.
+        recipient_domain = message.to.rsplit("@", 1)[-1]
         try:
-            result = resend.Emails.send(params)
+            result = await resend.Emails.send_async(params)
             logger.info(
                 "email.sent",
-                to=message.to,
+                recipient_domain=recipient_domain,
                 subject=message.subject,
                 resend_id=result.get("id"),
             )
         except Exception as exc:
             logger.exception(
                 "email.send_failed",
-                to=message.to,
+                recipient_domain=recipient_domain,
                 subject=message.subject,
                 error=str(exc),
             )

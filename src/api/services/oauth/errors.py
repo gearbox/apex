@@ -40,12 +40,6 @@ class EmailUnverifiedError(OAuthError):
     code = OAuthErrorCode.EMAIL_UNVERIFIED
 
 
-class AccountExistsUnverifiedError(OAuthError):
-    """A same-email local account exists but its email was never verified (no auto-link)."""
-
-    code = OAuthErrorCode.ACCOUNT_EXISTS_UNVERIFIED
-
-
 class AccountInactiveError(OAuthError):
     """The linked account is deactivated."""
 

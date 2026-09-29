@@ -271,6 +271,24 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 
 ---
 
+### Email (Resend)
+
+Verification and password-reset emails. With `RESEND_API_KEY` empty, `LogEmailService` is used and
+emails are only logged to stdout. Sending uses the Resend SDK's native `httpx` async path
+(`Emails.send_async`), so a slow round-trip never blocks the event loop. The `resend` API key and
+async HTTP client are process-global SDK state, set once when the service is constructed.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `RESEND_API_KEY` | `""` | `str` | Resend API key (`re_...`). Empty selects `LogEmailService`. |
+| `EMAIL_FROM_ADDRESS` | `noreply@apex.ai` | `str` | Sender address. Must be a verified domain in Resend. |
+| `EMAIL_FROM_NAME` | `Apex` | `str` | Sender display name. |
+| `EMAIL_SEND_TIMEOUT_SECONDS` | `10.0` | `float (>0)` | Timeout for each Resend API request. A timeout surfaces as `EmailDeliveryError`; registration still succeeds and the user can resend verification. |
+
+Send logs record the recipient's **domain** (`recipient_domain`), never the address.
+
+---
+
 ### OAuth Sign-In (Google)
 
 Per-product OAuth clients. Env-var names come from `ProductConfig.oauth_clients`

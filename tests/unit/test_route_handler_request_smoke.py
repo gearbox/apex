@@ -95,6 +95,8 @@ class TestUserControllerSmoke:
             created_at=now,
             updated_at=now,
             age_verified=False,
+            email_verified=True,
+            has_password=True,
         )
 
     def _make_app(self, user_service: AsyncMock) -> Litestar:
