@@ -51,10 +51,12 @@ class UserProfileResponse(msgspec.Struct, kw_only=True):
     created_at: datetime
     updated_at: datetime
     age_verified: bool
+    email_verified: bool
+    """Whether the email address has been verified (``email_verified_at`` is set)."""
+    has_password: bool
+    """False for OAuth-only accounts (and after an OAuth claim) — offer "Set a password"."""
     age_verified_at: datetime | None = None
     date_of_birth: date | None = None
-    has_password: bool = True
-    """False for OAuth-only accounts — hide change-password, offer forgot-password."""
 
 
 class UserStatsResponse(msgspec.Struct, kw_only=True):

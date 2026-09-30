@@ -75,6 +75,11 @@ from src.api.services.pricing import PricingService
 from src.api.services.provisioning_script import ProvisioningScriptService
 from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.api.services.push import PushService, PywebpushSender
+from src.api.services.session_termination import (
+    SessionTerminationFactory,
+    SessionTerminationService,
+    make_session_termination_factory,
+)
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
 from src.api.services.telegram.sender import HttpxTelegramSender
@@ -129,6 +134,9 @@ class ServiceContainer:
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     token_revocation_service: TokenRevocationService | None = None
+    # One construction rule for SessionTerminationService (closure over the shared
+    # token-revocation service + ops bus); used by request scope and singletons.
+    session_termination_factory: SessionTerminationFactory | None = None
     legal_registry: LegalDocumentRegistry | None = None
     # OAuth sign-in: provider clients (per product) + their shared HTTP client
     oauth_registry: OAuthProviderRegistry | None = None
@@ -388,6 +396,20 @@ def get_auth_service(session: AsyncSession) -> AuthService:
     )
 
 
+def get_session_termination_service(session: AsyncSession) -> SessionTerminationService:
+    """Provide the "terminate all sessions of user X" service for request scope.
+
+    Args:
+        session: Database session.
+
+    Returns:
+        SessionTerminationService bound to the request session (never commits).
+    """
+    if _services.session_termination_factory is None:
+        raise RuntimeError("Session termination factory not initialized")
+    return _services.session_termination_factory(session, UserRepository(session))
+
+
 def get_oauth_registry() -> OAuthProviderRegistry:
     """Provide the process-wide OAuth provider registry.
 
@@ -418,6 +440,7 @@ def get_oauth_service(session: AsyncSession) -> OAuthService:
         identity_repo=UserIdentityRepository(session),
         user_repo=UserRepository(session),
         auth_service=get_auth_service(session),
+        sessions=get_session_termination_service(session),
         session=session,
         settings=get_settings(),
     )
@@ -1079,6 +1102,7 @@ async def init_services(settings: Settings) -> JWTService:
             api_key=settings.resend_api_key,
             from_address=settings.email_from_address,
             from_name=settings.email_from_name,
+            send_timeout_seconds=settings.email_send_timeout_seconds,
         )
         logger.info("email.initialized", provider="resend")
     else:
@@ -1093,12 +1117,17 @@ async def init_services(settings: Settings) -> JWTService:
         raise RuntimeError(
             "token_revocation_service must be initialized before email_verification_service"
         )
+    if _services.ops_event_bus is None:
+        raise RuntimeError("ops_event_bus must be initialized before session_termination_factory")
+    _services.session_termination_factory = make_session_termination_factory(
+        token_revocation=_services.token_revocation_service,
+        ops_event_bus=_services.ops_event_bus,
+    )
     _services.email_verification_service = EmailVerificationService(
         email_service=_services.email_service,
         app_url=settings.app_url,
         app_name=settings.app_name,
-        token_revocation_service=_services.token_revocation_service,
-        ops_event_bus=_services.ops_event_bus,
+        session_termination_factory=_services.session_termination_factory,
     )
 
     # Initialize and start Aisha job poller
@@ -1712,6 +1741,8 @@ dependencies = {
     "legal_acceptance_service": Provide(get_legal_acceptance_service, sync_to_thread=False),
     # Client IP (trusted-header aware) + user agent, for acceptance evidence
     "request_context": Provide(provide_request_context, sync_to_thread=False),
+    # Terminate-all-sessions sequence (request-scoped, never commits)
+    "session_termination_service": Provide(get_session_termination_service, sync_to_thread=False),
     # OAuth sign-in (registry singleton + request-scoped service)
     "oauth_registry": Provide(get_oauth_registry, sync_to_thread=False),
     "oauth_service": Provide(get_oauth_service, sync_to_thread=False),

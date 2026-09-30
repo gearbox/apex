@@ -887,7 +887,6 @@ class OAuthErrorCode(StrEnum):
     OAUTH_FAILED = "oauth_failed"  # token endpoint / id_token verification failure
     FLOW_EXPIRED = "flow_expired"  # state unknown/consumed, binding or product mismatch
     EMAIL_UNVERIFIED = "email_unverified"  # provider says email_verified != true
-    ACCOUNT_EXISTS_UNVERIFIED = "account_exists_unverified"
     ACCOUNT_INACTIVE = "account_inactive"
     IDENTITY_CONFLICT = "identity_conflict"  # user already linked to a different subject
     INVALID_HANDOFF = "invalid_handoff"

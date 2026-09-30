@@ -112,6 +112,8 @@ class Harness:
             expires_in=900,
         )
         self.auth.issue_session = AsyncMock(return_value=self.tokens)
+        self.sessions = MagicMock()
+        self.sessions.terminate_all = AsyncMock()
         # I13 spy: commit vs. the Redis handoff write.
         self.order.attach_mock(self.session.commit, "commit")
         put_handoff = self.store.put_handoff
@@ -134,6 +136,7 @@ class Harness:
             identity_repo=self.identity_repo,
             user_repo=self.user_repo,
             auth_service=self.auth,
+            sessions=self.sessions,
             session=self.session,
             settings=self.settings,
         )

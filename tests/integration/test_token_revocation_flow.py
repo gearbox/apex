@@ -17,9 +17,7 @@ real guards/DI/HTTP without a live external dependency.
 from __future__ import annotations
 
 import asyncio
-import time
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
@@ -28,7 +26,6 @@ from litestar import Litestar, get
 from litestar.di import Provide
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 from litestar.testing import TestClient
-from redis.exceptions import NoScriptError
 from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
@@ -39,6 +36,8 @@ from src.api.security import auth_guard, content_auth_guard, hash_token, optiona
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.auth import AuthService, InvalidRefreshTokenError, TokenReuseDetectedError
 from src.api.services.email_verification import EmailVerificationService
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import make_session_termination_factory
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.product_registry import VEX_CONFIG
@@ -47,9 +46,7 @@ from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
-
-if TYPE_CHECKING:
-    from collections.abc import Callable
+from tests.revocation_support import FakeRedis as _FakeRedis
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 PRODUCT_ID = "vex"
@@ -59,57 +56,6 @@ PRODUCT_ID = "vex"
 # with no sleep, since `<=` (not `<`) means same-second rejection is now the
 # correct, intended behavior rather than something to dodge.
 _NEXT_SECOND_GAP = 1.1
-
-
-class _FakeRedis:
-    """Minimal in-memory stand-in for redis.asyncio.Redis.
-
-    Implements `set`/`mget`/`get`/`eval`/`evalsha` — the subset
-    TokenRevocationService uses — with real TTL-expiry semantics, so
-    epoch/jti keys actually age out. `eval` simulates the production Lua
-    epoch-write script (`redis.call('TIME')` + `SET ... EX`) using a
-    pluggable clock so tests can pin the "Redis clock" deterministically
-    instead of depending on real-clock timing.
-    """
-
-    def __init__(self, *, clock: Callable[[], float] = time.time) -> None:
-        self._store: dict[str, tuple[str, float | None]] = {}
-        self._clock = clock
-
-    async def set(self, key: str, value: object, ex: int | None = None) -> None:
-        deadline = self._clock() + ex if ex is not None else None
-        self._store[key] = (str(value), deadline)
-
-    async def mget(self, keys: list[str]) -> list[str | None]:
-        now = self._clock()
-        result: list[str | None] = []
-        for key in keys:
-            entry = self._store.get(key)
-            if entry is None:
-                result.append(None)
-                continue
-            value, deadline = entry
-            if deadline is not None and deadline < now:
-                del self._store[key]
-                result.append(None)
-            else:
-                result.append(value)
-        return result
-
-    async def get(self, key: str) -> str | None:
-        (result,) = await self.mget([key])
-        return result
-
-    async def evalsha(self, _sha: str, _numkeys: int, *_keys_and_args: object) -> int:
-        raise NoScriptError("fake redis never has a cached script")
-
-    async def eval(self, _script: str, numkeys: int, *keys_and_args: object) -> int:
-        """Simulates the production epoch-write script: SET key=TIME, EX=ttl."""
-        key = str(keys_and_args[0])
-        ttl = int(str(keys_and_args[numkeys]))
-        now = int(self._clock())
-        await self.set(key, now, ex=ttl)
-        return now
 
 
 def _make_repo() -> AsyncMock:
@@ -532,7 +478,9 @@ def _make_email_verification_service(
     return EmailVerificationService(
         email_service=email_service,
         app_url="https://app.example.com",
-        token_revocation_service=token_revocation,
+        session_termination_factory=make_session_termination_factory(
+            token_revocation=token_revocation, ops_event_bus=OpsEventBus(enabled=False)
+        ),
     )
 
 

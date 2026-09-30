@@ -9,7 +9,10 @@ Contracts: I4 (callback rejections), I5 (single use + concurrent signup),
 I6 (binding cookie), I7 (no rows before consent), I8 (stale legal keeps the
 ticket), I9 (signup rows), I10 (auto-link rules), I11 (admin-deactivated),
 I12 (self-closure unlinks), I14 (lgl digest), I17 (reset verifies email),
-I23 (migration 048).
+I23 (migration 048), K1-K6 (claiming an unverified same-email account, D5').
+
+Revocation runs against a real Redis when ``REDIS_URL`` is set, else an in-memory
+stand-in with the same semantics (``tests/revocation_support.py``).
 """
 
 from __future__ import annotations
@@ -17,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -32,26 +36,27 @@ import redis.asyncio as aioredis
 import structlog
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
-from litestar import Litestar
+from litestar import Litestar, get
 from litestar.datastructures import State
 from litestar.di import Provide
-from sqlalchemy import delete, func, select, text
+from sqlalchemy import delete, func, select, text, update
 
 from src.api.app import (
     legal_account_inactive_handler,
     legal_submission_incomplete_handler,
     legal_version_stale_handler,
 )
+from src.api.dependencies.auth import get_current_user_id
 from src.api.dependencies.common import get_product_config, get_product_id
 from src.api.middleware.product import ProductMiddleware
 from src.api.routes.auth import AuthController
 from src.api.routes.oauth import OAuthController
 from src.api.schemas.auth import RegisterRequest
 from src.api.schemas.ops_events import OpsEventType
-from src.api.security import JWTConfig, JWTService, PasswordService
+from src.api.security import JWTConfig, JWTService, PasswordService, auth_guard
 from src.api.security.guards import _enforce_legal_acceptance
 from src.api.security.oauth_tx_cookie import OAUTH_TX_COOKIE, binding_hash
-from src.api.services.auth import AuthService
+from src.api.services.auth import AuthService, InvalidCredentialsError, InvalidRefreshTokenError
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.legal.acceptance import LegalAcceptanceService, RequestContext
 from src.api.services.legal.errors import (
@@ -63,17 +68,24 @@ from src.api.services.oauth.errors import InvalidSignupTicketError
 from src.api.services.oauth.flow_store import RedisOAuthFlowStore
 from src.api.services.oauth.models import PendingSignup
 from src.api.services.oauth.service import OAuthService
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import (
+    SessionTerminationService,
+    make_session_termination_factory,
+)
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
-from src.core.enums import LegalAcceptanceSource
+from src.core.enums import LegalAcceptanceSource, RefreshTokenRevocationReason
 from src.core.product import OAuthProvider
 from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.billing import TokenAccount
 from src.db.models.legal import LegalAcceptance
-from src.db.models.user import User
+from src.db.models.push_subscription import PushSubscription
+from src.db.models.user import RefreshToken, User
 from src.db.models.user_identity import UserIdentity
 from src.db.repositories.legal import LegalAcceptanceRepository
+from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import accept_all_current, make_legal_registry
@@ -88,6 +100,7 @@ from tests.oauth_support import (
     oauth_settings,
     query_params,
 )
+from tests.revocation_support import FakeRedis
 
 if TYPE_CHECKING:
     import contextlib
@@ -129,9 +142,13 @@ class Flow:
         email: str = "person@example.com",
         subject: str = SUBJECT,
         settings: Settings | None = None,
+        token_revocation: TokenRevocationService | None = None,
     ) -> None:
         self.session = session
         self.settings = settings or oauth_settings()
+        self.token_revocation = token_revocation or TokenRevocationService(
+            None, max_token_ttl_seconds=0
+        )
         self.provider = FakeProviderClient(identity(subject=subject, email=email))
         self.store = store if store is not None else InMemoryOAuthFlowStore()
         self.legal_registry = make_legal_registry()
@@ -146,6 +163,7 @@ class Flow:
             jwt_service=self.jwt,
             ops=self.ops,
             settings=self.settings,
+            token_revocation=self.token_revocation,
         )
 
     def client(self) -> contextlib.AbstractAsyncContextManager[httpx.AsyncClient]:
@@ -156,8 +174,12 @@ class Flow:
         )
 
     def app(self) -> Litestar:
+        @get("/ping", guards=[auth_guard], dependencies={"user_id": Provide(get_current_user_id)})
+        async def ping(user_id: UUID) -> dict[str, str]:
+            return {"user_id": str(user_id)}
+
         return Litestar(
-            route_handlers=[OAuthController],
+            route_handlers=[OAuthController, ping],
             middleware=[ProductMiddleware],
             dependencies={
                 "product_config": Provide(get_product_config, sync_to_thread=False),
@@ -176,7 +198,7 @@ class Flow:
             state=State(
                 {
                     "jwt_service": self.jwt,
-                    "token_revocation": TokenRevocationService(None, max_token_ttl_seconds=0),
+                    "token_revocation": self.token_revocation,
                     "legal_registry": self.legal_registry,
                 }
             ),
@@ -222,8 +244,10 @@ def build_service(
     jwt_service: JWTService,
     ops: Any = None,
     settings: Settings | None = None,
+    token_revocation: TokenRevocationService | None = None,
 ) -> OAuthService:
     settings = settings or oauth_settings()
+    token_revocation = token_revocation or TokenRevocationService(None, max_token_ttl_seconds=0)
     legal = LegalAcceptanceService(
         registry=legal_registry, repository=LegalAcceptanceRepository(session), session=session
     )
@@ -231,10 +255,16 @@ def build_service(
         repository=UserRepository(session),
         jwt_service=jwt_service,
         password_service=PasswordService(),
-        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+        token_revocation_service=token_revocation,
         legal_acceptance_service=legal,
         session=session,
         ops_event_bus=ops,
+    )
+    sessions = SessionTerminationService(
+        session=session,
+        user_repo=UserRepository(session),
+        token_revocation=token_revocation,
+        ops_event_bus=ops if ops is not None else MagicMock(publish=AsyncMock()),
     )
     return OAuthService(
         registry=fake_registry(settings, provider),
@@ -242,6 +272,7 @@ def build_service(
         identity_repo=UserIdentityRepository(session),
         user_repo=UserRepository(session),
         auth_service=auth,
+        sessions=sessions,
         session=session,
         settings=settings,
     )
@@ -285,6 +316,19 @@ async def redis_store() -> AsyncGenerator[RedisOAuthFlowStore]:
         yield RedisOAuthFlowStore(lambda: client)
     finally:
         await client.aclose()
+
+
+@pytest_asyncio.fixture
+async def revocation() -> AsyncGenerator[TokenRevocationService]:
+    """A working revocation service: real Redis if REDIS_URL is set, else the fake."""
+    if _REDIS_URL:
+        client = aioredis.Redis.from_url(_REDIS_URL, decode_responses=True)
+        try:
+            yield TokenRevocationService(client, max_token_ttl_seconds=3600)
+        finally:
+            await client.aclose()
+    else:
+        yield TokenRevocationService(FakeRedis(), max_token_ttl_seconds=3600)  # type: ignore[arg-type]
 
 
 # ---------------------------------------------------------------------------
@@ -672,17 +716,6 @@ class TestLogin:
         assert linked.user_id == user.id
         assert linked.last_login_at is not None
 
-    async def test_unverified_local_account_not_linked(
-        self, db_session: AsyncSession, make_user: UserFactory
-    ) -> None:
-        """I10 — local email unverified → account_exists_unverified, no link."""
-        await make_user(email="person@example.com")
-        flow = Flow(db_session)
-        async with flow.client() as client:
-            frag = await flow.callback(client)
-        assert frag == {"result": "error", "error": "account_exists_unverified"}
-        assert not await _identities(db_session)
-
     async def test_account_linked_to_other_subject_conflicts(
         self, db_session: AsyncSession, make_user: UserFactory
     ) -> None:
@@ -722,6 +755,283 @@ class TestLogin:
         assert isinstance(flow.store, InMemoryOAuthFlowStore)
         assert flow.store.signups == {}
         assert flow.store.handoffs == {}
+
+
+class TestClaimUnverifiedAccount:
+    """D5' — Google proves inbox ownership, so an unverified same-email account is claimed."""
+
+    PASSWORD = "original-password-123"
+
+    async def _unverified_user(self, make_user: UserFactory, *, verified: bool = False) -> User:
+        password_hash = await PasswordService().ahash(self.PASSWORD)
+        user = await make_user(email="person@example.com", password_hash=password_hash)
+        if verified:
+            user.email_verified_at = datetime.now(UTC)
+        return user
+
+    async def _seed_sessions(self, flow: Flow, session: AsyncSession, user: User) -> Any:
+        """A live token pair and a push subscription — what a claim must (or must not) end."""
+        await PushSubscriptionRepository(session).upsert(
+            user_id=user.id,
+            product_id="vex",
+            endpoint=f"https://push.test/{uuid4().hex}",
+            p256dh="p256dh",
+            auth="auth",
+            user_agent=None,
+        )
+        return await flow.service._auth.issue_session(user.id, product_id="vex", context=CONTEXT)
+
+    @staticmethod
+    def _bearer(access_token: str) -> dict[str, str]:
+        return {**VEX, "Authorization": f"Bearer {access_token}"}
+
+    @staticmethod
+    async def _refresh_rows(session: AsyncSession, user: User) -> list[RefreshToken]:
+        result = await session.execute(
+            select(RefreshToken)
+            .where(RefreshToken.user_id == user.id)
+            .execution_options(populate_existing=True)
+        )
+        return list(result.scalars().all())
+
+    @staticmethod
+    async def _push_count(session: AsyncSession, user: User) -> int:
+        return int(
+            (
+                await session.execute(
+                    select(func.count())
+                    .select_from(PushSubscription)
+                    .where(PushSubscription.user_id == user.id)
+                )
+            ).scalar_one()
+        )
+
+    async def _assert_sessions_intact(
+        self,
+        flow: Flow,
+        session: AsyncSession,
+        user: User,
+        client: httpx.AsyncClient,
+        pair: Any,
+    ) -> None:
+        rows = await self._refresh_rows(session, user)
+        assert rows
+        assert not any(row.is_revoked for row in rows)
+        assert await flow.token_revocation.get_current_epoch(user.id) is None
+        assert await self._push_count(session, user) == 1
+        resp = await client.get("/ping", headers=self._bearer(pair.access_token))
+        assert resp.status_code == 200
+
+    async def test_k1_claim_signs_in_and_strips_every_credential(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K1 — LOGIN; password gone, email verified, sessions ended, identity linked."""
+        user = await self._unverified_user(make_user)
+        flow = Flow(db_session, token_revocation=revocation)
+        await self._seed_sessions(flow, db_session, user)
+
+        async with flow.client() as client:
+            with structlog.testing.capture_logs() as logs:
+                frag = await flow.callback(client)
+        assert frag["result"] == "login"
+
+        await db_session.refresh(user)
+        assert user.password_hash is None
+        assert user.email_verified_at is not None
+        rows = await self._refresh_rows(db_session, user)
+        assert rows
+        assert all(
+            row.is_revoked and row.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION
+            for row in rows
+        )
+        assert await revocation.get_current_epoch(user.id) is not None
+        assert await self._push_count(db_session, user) == 0
+        (linked,) = await _identities(db_session)
+        assert linked.user_id == user.id
+        assert linked.last_login_at is not None
+
+        (claimed,) = [e for e in logs if e["event"] == "auth.oauth.unverified_account_claimed"]
+        assert claimed["had_password"] is True
+        assert claimed["user_id"] == str(user.id)
+        assert claimed["provider"] == "google"
+        assert "email" not in claimed
+        assert "person@example.com" not in repr(claimed)
+
+    async def test_k2_pre_hijacker_is_locked_out(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K2 — the credentials a pre-registrant held are all dead after the claim."""
+        user = await self._unverified_user(make_user)
+        flow = Flow(db_session, token_revocation=revocation)
+        old = await self._seed_sessions(flow, db_session, user)
+
+        async with flow.client() as client:
+            before = await client.get("/ping", headers=self._bearer(old.access_token))
+            assert before.status_code == 200
+            frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            after = await client.get("/ping", headers=self._bearer(old.access_token))
+        assert after.status_code == 401
+
+        with pytest.raises(InvalidRefreshTokenError):
+            await flow.service._auth.refresh_tokens(old.refresh_token)
+        with pytest.raises(InvalidCredentialsError):
+            await flow.service._auth.login(
+                email="person@example.com", password=self.PASSWORD, product_id="vex"
+            )
+
+    async def test_k3_identity_conflict_changes_nothing(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K3 — conflict is checked before the claim: password, verification, sessions intact."""
+        user = await self._unverified_user(make_user)
+        original_hash = user.password_hash
+        await _link(db_session, user, subject="some-other-subject")
+        flow = Flow(db_session, token_revocation=revocation)
+        pair = await self._seed_sessions(flow, db_session, user)
+
+        async with flow.client() as client:
+            frag = await flow.callback(client)
+            assert frag == {"result": "error", "error": "identity_conflict"}
+            await db_session.refresh(user)
+            assert user.password_hash == original_hash
+            assert user.email_verified_at is None
+            await self._assert_sessions_intact(flow, db_session, user, client, pair)
+        assert [i.subject for i in await _identities(db_session, "some-other-subject")] == [
+            "some-other-subject"
+        ]
+        assert not await _identities(db_session)
+
+    async def test_k4_lost_race_keeps_password_and_sessions(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K4 — verified by someone else between lookup and claim: plain verified-path link."""
+        user = await self._unverified_user(make_user)
+        original_hash = user.password_hash
+        flow = Flow(db_session, token_revocation=revocation)
+        pair = await self._seed_sessions(flow, db_session, user)
+
+        original_lookup = UserRepository.get_active_user_by_email
+
+        async def lookup_then_verify(
+            repo: UserRepository, *args: Any, **kwargs: Any
+        ) -> User | None:
+            found = await original_lookup(repo, *args, **kwargs)
+            # The concurrent verification lands after our read, so `found` is stale.
+            await db_session.execute(
+                update(User)
+                .where(User.id == user.id)
+                .values(email_verified_at=datetime.now(UTC))
+                .execution_options(synchronize_session=False)
+            )
+            return found
+
+        async with flow.client() as client:
+            with (
+                patch.object(UserRepository, "get_active_user_by_email", lookup_then_verify),
+                structlog.testing.capture_logs() as logs,
+            ):
+                frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            await db_session.refresh(user)
+            assert user.password_hash == original_hash
+            assert user.email_verified_at is not None
+            await self._assert_sessions_intact(flow, db_session, user, client, pair)
+
+        events = {e["event"] for e in logs}
+        assert "auth.oauth.claim_raced_verified" in events
+        assert "auth.oauth.unverified_account_claimed" not in events
+        (linked,) = await _identities(db_session)
+        assert linked.user_id == user.id
+
+    async def test_k5_verified_account_keeps_password_and_sessions(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K5 (D5'-a) — a verified account is linked as before; both logins keep working."""
+        user = await self._unverified_user(make_user, verified=True)
+        original_hash = user.password_hash
+        await db_session.flush()
+        flow = Flow(db_session, token_revocation=revocation)
+        pair = await self._seed_sessions(flow, db_session, user)
+
+        async with flow.client() as client:
+            with structlog.testing.capture_logs() as logs:
+                frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            await db_session.refresh(user)
+            assert user.password_hash == original_hash
+            await self._assert_sessions_intact(flow, db_session, user, client, pair)
+
+            # Google login (now via the linked identity) and password login both work.
+            again = await flow.callback(client)
+            assert again["result"] == "login"
+        _user, tokens = await flow.service._auth.login(
+            email="person@example.com", password=self.PASSWORD, product_id="vex"
+        )
+        assert tokens.access_token
+        assert "auth.oauth.unverified_account_claimed" not in {e["event"] for e in logs}
+        (linked,) = await _identities(db_session)
+        assert linked.user_id == user.id
+
+    async def test_k6_token_minted_right_after_a_claim_is_accepted(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """K6 — claim then immediately exchange: the new access token is not born revoked."""
+        user = await self._unverified_user(make_user)
+        flow = Flow(db_session, token_revocation=revocation)
+        old = await self._seed_sessions(flow, db_session, user)
+
+        async with flow.client() as client:
+            frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            exchanged = await client.post(
+                "/v1/auth/oauth/exchange", json={"code": frag["code"]}, headers=VEX
+            )
+            assert exchanged.status_code == 200, exchanged.text
+            fresh = await client.get(
+                "/ping", headers=self._bearer(exchanged.json()["access_token"])
+            )
+            stale = await client.get("/ping", headers=self._bearer(old.access_token))
+        assert fresh.status_code == 200
+        assert fresh.json() == {"user_id": str(user.id)}
+        assert stale.status_code == 401
+
+    async def test_v1_f_exchange_with_an_indeterminate_epoch_read_is_not_born_revoked(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """V1-f — breaker open at /exchange (epoch read → None) must not skip the post-claim wait.
+
+        ``revoke_user_sessions`` (the claim's write) bypasses the breaker, so the epoch lands
+        while ``get_current_epoch`` reads ``None``. The handoff carries the written epoch, so
+        the token is still minted strictly after it and works once reads recover.
+        """
+        user = await self._unverified_user(make_user)
+        flow = Flow(db_session, token_revocation=revocation)
+        # Start early in a wall-clock second so claim and exchange share it — otherwise a
+        # second rollover between them would hide the defect on the pre-fix code.
+        if (fraction := time.time() % 1) > 0.3:
+            await asyncio.sleep(1.0 - fraction + 0.02)
+
+        async with flow.client() as client:
+            frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            # Breaker open for the exchange only; restored before the guarded call.
+            with patch.object(revocation._breaker, "allow_request", return_value=False):
+                assert await revocation.get_current_epoch(user.id) is None  # premise
+                exchanged = await client.post(
+                    "/v1/auth/oauth/exchange", json={"code": frag["code"]}, headers=VEX
+                )
+            assert exchanged.status_code == 200, exchanged.text
+            access_token = exchanged.json()["access_token"]
+            guarded = await client.get("/ping", headers=self._bearer(access_token))
+
+        epoch = await revocation.get_current_epoch(user.id)
+        assert epoch is not None  # the claim's write landed
+        payload = flow.jwt.decode_access_token(access_token)
+        assert payload is not None
+        assert payload.iat > epoch
+        assert guarded.status_code == 200, guarded.text
+        assert guarded.json() == {"user_id": str(user.id)}
 
 
 class TestCallbackRejections:
@@ -821,7 +1131,10 @@ class TestResetPasswordVerifiesEmail:
         return EmailVerificationService(
             email_service=MagicMock(),
             app_url="https://vex.test",
-            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+            session_termination_factory=make_session_termination_factory(
+                token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                ops_event_bus=OpsEventBus(enabled=False),
+            ),
         )
 
     async def test_sets_when_null(

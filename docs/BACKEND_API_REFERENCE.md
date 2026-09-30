@@ -472,7 +472,7 @@ Request:  { token: string (20-100 chars), new_password: string (8-128 chars) }
 Response: { message: string }
 Errors:   400 (invalid_token | expired)
 Effect:   Also marks the email verified if it wasn't (a consumed reset link proves inbox
-          control) — the recovery path for OAuth's `account_exists_unverified`.
+          control).
 Headers:  (200 only) Clear-Site-Data: "cache", "storage" — the calling device ends its own
           session here too, and this is the compromised-account recovery path.
 Note:     One of the five bulk-revocation sites — also deletes every Web Push subscription the
@@ -573,10 +573,14 @@ Response: {
   created_at: datetime,
   updated_at: datetime,
   age_verified: bool,                  // true once the user has passed the age gate
-  age_verified_at: datetime | null,    // timestamp of first successful verification; null if never
-  date_of_birth: date | null,          // stored only for DATE_OF_BIRTH-policy products; else null
-  has_password: bool                   // false for OAuth-only accounts: hide change-password,
+  email_verified: bool,                // always present: true once the email is verified (verification
+                                       // link, password reset, or Google sign-in)
+  has_password: bool,                  // always present (no default): false for OAuth-only accounts,
+                                       // including one that signed in with Google and claimed a
+                                       // previously unverified account: hide change-password,
                                        // offer "set a password" via forgot-password instead
+  age_verified_at: datetime | null,    // timestamp of first successful verification; null if never
+  date_of_birth: date | null           // stored only for DATE_OF_BIRTH-policy products; else null
 }
 ```
 
