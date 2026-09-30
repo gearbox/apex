@@ -1325,10 +1325,6 @@ class Settings(BaseSettings):
         default="noreply@apex.ai",
         description="Sender email address. Must be verified in your Resend dashboard.",
     )
-    email_from_name: str = Field(
-        default="Apex",
-        description="Sender display name shown in email clients.",
-    )
     email_send_timeout_seconds: int = Field(
         default=10,
         gt=0,

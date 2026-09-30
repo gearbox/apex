@@ -594,6 +594,7 @@ class TestTokenReuseDetectionRevokesAccessTokens:
         repo.get_refresh_token_owner.return_value = user_id
         repo.get_refresh_token_by_hash_for_update.return_value = stored_token
         repo.revoke_token_family = AsyncMock(return_value=3)
+        repo.family_reuse_detected.return_value = False  # first detection for this family
 
         auth_service = AuthService(
             legal_acceptance_service=make_legal_acceptance_service(),

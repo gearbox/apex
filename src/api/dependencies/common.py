@@ -1100,7 +1100,6 @@ async def init_services(settings: Settings) -> JWTService:
         _services.email_service = ResendEmailService(
             api_key=settings.resend_api_key,
             from_address=settings.email_from_address,
-            from_name=settings.email_from_name,
             send_timeout_seconds=settings.email_send_timeout_seconds,
         )
         logger.info("email.initialized", provider="resend")

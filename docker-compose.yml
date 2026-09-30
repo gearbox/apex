@@ -132,7 +132,6 @@ services:
       # Email Settings (Resend)
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@apex.ai}
-      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Apex}
       EMAIL_SEND_TIMEOUT_SECONDS: ${EMAIL_SEND_TIMEOUT_SECONDS:-10}
 
       # Redis

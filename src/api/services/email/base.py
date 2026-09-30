@@ -18,7 +18,8 @@ class EmailMessage:
         html_body: HTML email body.
         text_body: Plain-text fallback (strongly recommended for deliverability).
         from_address: Sender address override (uses settings default when None).
-        from_name: Sender display name override.
+        from_name: Sender display name (the product brand). Senders that need a
+            display name require it; there is no global fallback.
         reply_to: Reply-to address (optional).
         tags: Provider-specific tags for tracking/analytics (optional).
     """
@@ -92,6 +93,7 @@ class EmailService(ABC):
                 subject=get_subject("verify_email", locale, app_name=app_name),
                 html_body=html,
                 text_body=text,
+                from_name=app_name,
                 tags={"type": "verification"},
             )
         )
@@ -130,6 +132,7 @@ class EmailService(ABC):
                 subject=get_subject("reset_password", locale, app_name=app_name),
                 html_body=html,
                 text_body=text,
+                from_name=app_name,
                 tags={"type": "password_reset"},
             )
         )

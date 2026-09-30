@@ -99,6 +99,7 @@ class TestW2aVerificationEmailIsPerProduct:
         assert brand in message.text_body
         assert brand in message.html_body
         assert "Apex" not in _whole_message(message)
+        assert message.from_name == brand  # X2-a: the From header follows the product too
 
 
 @pytest.mark.parametrize(
@@ -125,6 +126,8 @@ class TestW2bResetEmailIsPerProduct:
         assert brand in message.subject
         assert brand in message.text_body
         assert "Apex" not in _whole_message(message)
+        assert message.from_name == brand  # X2-a
+        assert message.from_name != "Apex"
 
 
 class TestW2fNoHiddenFallbacks:
@@ -159,3 +162,7 @@ class TestW2fNoHiddenFallbacks:
     def test_w2_f_settings_have_no_global_app_url_or_app_name(self) -> None:
         assert "app_url" not in Settings.model_fields
         assert "app_name" not in Settings.model_fields
+
+    def test_x2_settings_have_no_global_sender_name(self) -> None:
+        assert "email_from_name" not in Settings.model_fields
+        assert "email_from_address" in Settings.model_fields

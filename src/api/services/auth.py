@@ -109,7 +109,9 @@ class TokenPair:
 def _reuse_detected_message(*, bulk_access_revoked: bool) -> str:
     """TokenReuseDetectedError's user-facing message (issue #142 F5).
 
-    Reuse detection signs the user out on every device (W1-A). Branches on
+    The first reuse detection for a token family signs the user out on every
+    device (W1-A); later replays of that family get a fixed message instead
+    (``_REUSE_REPLAYED_MESSAGE``) and have no side effects. Branches on
     whether the Redis-backed bulk access-token/content-cookie revocation
     actually landed — the refresh-token revocation (DB-side) always succeeds
     by the time this is called, so only the access-token side can fail
@@ -129,6 +131,11 @@ def _reuse_detected_message(*, bulk_access_revoked: bool) -> str:
         "revoked — they may stay active until their access tokens expire. Change "
         "your password immediately if you suspect compromise."
     )
+
+
+_REUSE_REPLAYED_MESSAGE = (
+    "Security alert: this refresh token was already used. Please sign in again."
+)
 
 
 class AuthService:
@@ -528,7 +535,9 @@ class AuthService:
                 theft).
             TokenReuseDetectedError: If revoked token was reused for any
                 other reason (including legacy rows with no recorded
-                reason).
+                reason). The first detection for a token family signs the
+                user out on every device; later replays of the same family
+                are refused without side effects.
         """
         today = datetime.now(UTC).date()
         token_hash = hash_token(refresh_token)
@@ -554,8 +563,9 @@ class AuthService:
 
         # G1 — lock ordering is user row -> refresh-token row in every path
         # that acquires both: this method and the bulk-revocation method
-        # (UserRepository.revoke_all_refresh_tokens) acquire the user row first. Reversing the order in either path
-        # deadlocks against the other — see
+        # (UserRepository.revoke_all_refresh_tokens) acquire the user row
+        # first. Reversing the order in either path deadlocks against the
+        # other — see
         # UserRepository.lock_user_for_session_change's docstring. With
         # this lock held, a concurrent bulk revocation either already
         # committed (so is_revoked/revoked_reason below reflect it) or
@@ -587,9 +597,25 @@ class AuthService:
                 )
                 raise InvalidRefreshTokenError("Your session has ended. Please sign in again.")
 
+            # X1 — sign out everywhere only on the FIRST detection for a
+            # family. The user-row lock is held, so concurrent replays
+            # serialize here and exactly one of them does the first detection.
+            # Without this, whoever holds the stolen token could replay it
+            # after every new login and keep the victim signed out forever.
+            if await self._repo.family_reuse_detected(stored_token.family_id):
+                logger.warning(
+                    "auth.token_reuse_replayed",
+                    user_id=str(stored_token.user_id),
+                    family=str(stored_token.family_id),
+                )
+                raise TokenReuseDetectedError(_REUSE_REPLAYED_MESSAGE)
+
             # 1. Stamp the stolen family as theft FIRST — later replays of it stay
             #    classified as reuse_detected, not as a benign bulk revocation.
+            #    The replayed row is stamped too: it is the family's "handled"
+            #    marker even when no active row was left to revoke.
             revoked_family = await self._repo.revoke_token_family(stored_token.family_id)
+            await self._repo.mark_reuse_detected(stored_token.id)
             # 2. W1-A: sign out everywhere (remaining refresh tokens ->
             #    bulk_revocation, access-token epoch, push). Re-acquiring the
             #    already-held user-row lock is a no-op.

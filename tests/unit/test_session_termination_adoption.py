@@ -20,6 +20,7 @@ from src.api.schemas.ops_events import OpsEventType
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.age_verification import AgeVerificationService
 from src.api.services.auth import (
+    _REUSE_REPLAYED_MESSAGE,
     AuthService,
     TokenReuseDetectedError,
     _reuse_detected_message,
@@ -169,6 +170,7 @@ class TestW1bEachPathCallsTerminateAllOnce:
         repo.get_refresh_token_owner.return_value = user_id
         repo.get_refresh_token_by_hash_for_update.return_value = _revoked_token(user_id, family_id)
         repo.revoke_token_family.return_value = 1
+        repo.family_reuse_detected.return_value = False
         order = MagicMock()
         order.attach_mock(repo.revoke_token_family, "stamp_family")
         order.attach_mock(terminator.terminate_all, "terminate")
@@ -185,6 +187,56 @@ class TestW1bEachPathCallsTerminateAllOnce:
         )
         repo.revoke_all_refresh_tokens.assert_not_awaited()
         assert str(excinfo.value) == _reuse_detected_message(bulk_access_revoked=True)
+
+
+class TestX1eReplayOfHandledFamily:
+    async def test_x1_e_replay_is_logged_refused_and_has_no_side_effects(self) -> None:
+        user_id, family_id = uuid4(), uuid4()
+        repo, terminator = AsyncMock(), _fake_terminator()
+        repo.get_refresh_token_owner.return_value = user_id
+        repo.get_refresh_token_by_hash_for_update.return_value = _revoked_token(user_id, family_id)
+        repo.family_reuse_detected.return_value = True
+
+        # The module logger is patched, not captured: structlog caches bound loggers on
+        # first use, so ``capture_logs`` only sees them depending on test order.
+        with (
+            patch("src.api.services.auth.logger") as log,
+            pytest.raises(TokenReuseDetectedError) as e,
+        ):
+            await _auth_service(repo, terminator).refresh_tokens("stolen")
+
+        assert str(e.value) == _REUSE_REPLAYED_MESSAGE
+        log.warning.assert_called_once_with(
+            "auth.token_reuse_replayed", user_id=str(user_id), family=str(family_id)
+        )
+        repo.family_reuse_detected.assert_awaited_once_with(family_id)
+        # No sign-out, no stamping: the replay is refused and nothing else.
+        terminator.terminate_all.assert_not_awaited()
+        repo.revoke_token_family.assert_not_awaited()
+        repo.mark_reuse_detected.assert_not_awaited()
+
+    async def test_x1_e_replay_with_a_real_termination_service_publishes_no_ops_event(
+        self,
+    ) -> None:
+        user_id = uuid4()
+        repo = AsyncMock()
+        repo.get_refresh_token_owner.return_value = user_id
+        repo.get_refresh_token_by_hash_for_update.return_value = _revoked_token(user_id, uuid4())
+        repo.family_reuse_detected.return_value = True
+        revocation = MagicMock()
+        revocation.enabled = True
+        revocation.revoke_user_sessions = AsyncMock(return_value=None)  # would alert if reached
+        ops = MagicMock()
+        ops.publish = AsyncMock()
+        service = make_session_termination(
+            user_repo=repo, token_revocation=revocation, ops_event_bus=ops
+        )
+
+        with pytest.raises(TokenReuseDetectedError):
+            await _auth_service(repo, service).refresh_tokens("stolen")
+
+        revocation.revoke_user_sessions.assert_not_awaited()
+        ops.publish.assert_not_awaited()
 
 
 class TestW1dReuseDetectedMessage:
@@ -245,6 +297,7 @@ async def _run_reuse(service: SessionTerminationService, repo: AsyncMock) -> str
     repo.get_refresh_token_owner.return_value = user_id
     repo.get_refresh_token_by_hash_for_update.return_value = _revoked_token(user_id, uuid4())
     repo.revoke_token_family.return_value = 1
+    repo.family_reuse_detected.return_value = False
     with pytest.raises(TokenReuseDetectedError):
         await _auth_service(repo, service).refresh_tokens("stolen")
     return "token_reuse_detected"

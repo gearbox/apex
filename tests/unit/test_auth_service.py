@@ -69,7 +69,10 @@ def jwt_service() -> JWTService:
 @pytest.fixture
 def mock_repository() -> AsyncMock:
     """Create mock user repository."""
-    return AsyncMock()
+    repo = AsyncMock()
+    # X1 — a bare AsyncMock would answer "family already handled" (truthy).
+    repo.family_reuse_detected.return_value = False
+    return repo
 
 
 @pytest.fixture
@@ -546,6 +549,7 @@ class TestAuthServiceRefresh:
             await auth_service.refresh_tokens("reused_token")
 
         mock_repository.revoke_token_family.assert_called_once_with(family_id)
+        mock_repository.mark_reuse_detected.assert_awaited_once_with(mock_token.id)
 
     @pytest.mark.asyncio
     async def test_refresh_revoked_token_bulk_revokes_access_tokens(

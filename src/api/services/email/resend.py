@@ -31,7 +31,6 @@ class ResendEmailService(EmailService):
         api_key: Resend API key (``re_...``).
         from_address: Default sender address, e.g. ``noreply@yourdomain.com``.
             Must be a verified domain in your Resend dashboard.
-        from_name: Default sender display name, e.g. ``Apex``.
         send_timeout_seconds: Timeout for each Resend HTTP request.
 
     Raises:
@@ -44,7 +43,6 @@ class ResendEmailService(EmailService):
         *,
         api_key: str,
         from_address: str,
-        from_name: str = "Apex",
         send_timeout_seconds: int = 10,
     ) -> None:
         try:
@@ -70,7 +68,6 @@ class ResendEmailService(EmailService):
         resend.default_async_http_client = HTTPXClient(timeout=send_timeout_seconds)
 
         self._from_address = from_address
-        self._from_name = from_name
 
     async def send(self, message: EmailMessage) -> None:
         """Send an email via the Resend API without blocking the event loop.
@@ -79,11 +76,14 @@ class ResendEmailService(EmailService):
             message: Email to send.
 
         Raises:
+            ValueError: If the message carries no ``from_name`` (the sender
+                name is per-product; there is no global default).
             EmailDeliveryError: If Resend returns an error response.
         """
+        if not message.from_name:
+            raise ValueError("EmailMessage.from_name is required: the sender name is per-product")
         sender_address = message.from_address or self._from_address
-        sender_name = message.from_name or self._from_name
-        from_field = f"{sender_name} <{sender_address}>"
+        from_field = f"{message.from_name} <{sender_address}>"
 
         params: resend.Emails.SendParams = {
             "from": from_field,

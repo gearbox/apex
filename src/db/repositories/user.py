@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, date, datetime
 from typing import TYPE_CHECKING, cast
 
-from sqlalchemy import CursorResult, case, delete, func, literal, select, tuple_, update
+from sqlalchemy import CursorResult, case, delete, exists, func, literal, select, tuple_, update
 
 from src.core.enums import JobStatus, RefreshTokenRevocationReason, SubscriptionTier, UserRole
 from src.db.models import GenerationJob, GenerationOutput, RefreshToken, User, UserImage
@@ -566,6 +566,44 @@ class UserRepository:
             ),
         )
         return result.rowcount or 0
+
+    async def mark_reuse_detected(self, token_id: UUID) -> None:
+        """Stamp an already-revoked token ``revoked_reason=reuse_detected``.
+
+        Marks the replayed row itself as the "family handled" marker:
+        ``revoke_token_family`` only touches still-active rows, so a family
+        whose active token is already gone (logged out, expired) would
+        otherwise leave nothing for ``family_reuse_detected`` to find.
+        ``revoked_at`` is kept — the row was revoked when it was rotated.
+
+        Args:
+            token_id: ID of the replayed (already revoked) refresh token.
+        """
+        await self._session.execute(
+            update(RefreshToken)
+            .where(RefreshToken.id == token_id)
+            .values(revoked_reason=RefreshTokenRevocationReason.REUSE_DETECTED.value)
+        )
+
+    async def family_reuse_detected(self, family_id: UUID) -> bool:
+        """Whether reuse detection already handled this token family.
+
+        Args:
+            family_id: Token family ID.
+
+        Returns:
+            True if any row of the family is stamped ``reuse_detected``.
+        """
+        result = await self._session.execute(
+            select(
+                exists().where(
+                    RefreshToken.family_id == family_id,
+                    RefreshToken.revoked_reason
+                    == RefreshTokenRevocationReason.REUSE_DETECTED.value,
+                )
+            )
+        )
+        return bool(result.scalar())
 
     async def cleanup_expired_tokens(self) -> int:
         """Delete expired tokens.
