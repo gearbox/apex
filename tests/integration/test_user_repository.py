@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
+from unittest.mock import AsyncMock, patch
 from uuid import uuid4
 
 import pytest
@@ -146,7 +147,7 @@ async def test_get_active_user_returns_none_for_unknown(
 async def test_get_active_user_by_email_found(user_repo: UserRepository, make_user) -> None:
     """get_active_user_by_email returns active user by email."""
     await make_user(email="activebyemail@example.com", is_active=True)
-    found = await user_repo.get_active_user_by_email("activebyemail@example.com")
+    found = await user_repo.get_active_user_by_email("activebyemail@example.com", product_id="vex")
     assert found is not None
 
 
@@ -155,13 +156,15 @@ async def test_get_active_user_by_email_inactive_returns_none(
 ) -> None:
     """get_active_user_by_email returns None for inactive user."""
     await make_user(email="inactivebyemail@example.com", is_active=False)
-    found = await user_repo.get_active_user_by_email("inactivebyemail@example.com")
+    found = await user_repo.get_active_user_by_email(
+        "inactivebyemail@example.com", product_id="vex"
+    )
     assert found is None
 
 
 async def test_get_active_user_by_email_not_found(user_repo: UserRepository) -> None:
     """get_active_user_by_email returns None when email does not exist."""
-    assert await user_repo.get_active_user_by_email("ghost@example.com") is None
+    assert await user_repo.get_active_user_by_email("ghost@example.com", product_id="vex") is None
 
 
 # ---------------------------------------------------------------------------
@@ -172,24 +175,53 @@ async def test_get_active_user_by_email_not_found(user_repo: UserRepository) -> 
 async def test_email_exists_true_for_existing(user_repo: UserRepository, make_user) -> None:
     """email_exists returns True for an existing active user."""
     await make_user(email="exists@example.com", is_active=True)
-    assert await user_repo.email_exists("exists@example.com") is True
+    assert await user_repo.email_exists("exists@example.com", product_id="vex") is True
 
 
 async def test_email_exists_false_for_unknown(user_repo: UserRepository) -> None:
     """email_exists returns False when the email is not registered."""
-    assert await user_repo.email_exists("unknown@example.com") is False
+    assert await user_repo.email_exists("unknown@example.com", product_id="vex") is False
 
 
 async def test_email_exists_false_for_inactive(user_repo: UserRepository, make_user) -> None:
     """email_exists ignores inactive (soft-deleted) users."""
     await make_user(email="deluser@example.com", is_active=False)
-    assert await user_repo.email_exists("deluser@example.com") is False
+    assert await user_repo.email_exists("deluser@example.com", product_id="vex") is False
+
+
+async def test_w2_b_email_lookups_are_scoped_to_the_product(
+    user_repo: UserRepository, make_user
+) -> None:
+    """W2-B — the same address on another product is invisible to both lookups."""
+    vex = await make_user(email="both@example.com", product_id="vex")
+    synthara = await make_user(email="both@example.com", product_id="synthara")
+
+    found_vex = await user_repo.get_active_user_by_email("both@example.com", product_id="vex")
+    found_synthara = await user_repo.get_active_user_by_email(
+        "both@example.com", product_id="synthara"
+    )
+    assert found_vex is not None
+    assert found_vex.id == vex.id
+    assert found_synthara is not None
+    assert found_synthara.id == synthara.id
+    assert await user_repo.get_active_user_by_email("both@example.com", product_id="nope") is None
+    assert await user_repo.email_exists("both@example.com", product_id="synthara") is True
+    # A vex user may take an address only synthara knows: excluding the vex row leaves no vex match.
+    assert (
+        await user_repo.email_exists("both@example.com", product_id="vex", exclude_user_id=vex.id)
+        is False
+    )
 
 
 async def test_email_exists_excludes_given_user(user_repo: UserRepository, make_user) -> None:
     """email_exists with exclude_user_id excludes the given user from the check."""
     user = await make_user(email="selfcheck@example.com", is_active=True)
-    assert await user_repo.email_exists("selfcheck@example.com", exclude_user_id=user.id) is False
+    assert (
+        await user_repo.email_exists(
+            "selfcheck@example.com", product_id="vex", exclude_user_id=user.id
+        )
+        is False
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -426,45 +458,81 @@ async def test_revoke_token_family(user_repo: UserRepository, make_user) -> None
         assert token.revoked_reason == RefreshTokenRevocationReason.REUSE_DETECTED.value
 
 
-async def test_revoke_all_user_tokens(user_repo: UserRepository, make_user) -> None:
-    """revoke_all_user_tokens revokes all tokens for a user and records why (issue #142 B2)."""
-    user = await make_user(email="revokeall@example.com")
-    expires = datetime.now(UTC) + timedelta(days=7)
-    for i in range(2):
-        await user_repo.create_refresh_token(
-            id=uuid4(),
-            user_id=user.id,
-            token_hash=f"allhash{i}",
-            family_id=uuid4(),
-            expires_at=expires,
-            product_id="vex",
-        )
-    count = await user_repo.revoke_all_user_tokens(user.id)
-    assert count == 2
-    for i in range(2):
-        token = await user_repo.get_refresh_token_by_hash(f"allhash{i}")
-        assert token is not None
-        assert token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value
-
-
-async def test_revoke_all_refresh_tokens(user_repo: UserRepository, make_user) -> None:
-    """revoke_all_refresh_tokens (password-reset path) revokes and records
-    revoked_reason=bulk_revocation (issue #142 B2)."""
-    user = await make_user(email="revokeallrefresh@example.com")
-    expires = datetime.now(UTC) + timedelta(days=7)
+async def _add_token(
+    user_repo: UserRepository, user: User, token_hash: str, *, product_id: str = "vex"
+) -> None:
     await user_repo.create_refresh_token(
         id=uuid4(),
         user_id=user.id,
-        token_hash="resethash",
+        token_hash=token_hash,
         family_id=uuid4(),
-        expires_at=expires,
-        product_id="vex",
+        expires_at=datetime.now(UTC) + timedelta(days=7),
+        product_id=product_id,
     )
-    count = await user_repo.revoke_all_refresh_tokens(user.id)
+
+
+async def _token(db_session: AsyncSession, token_hash: str) -> RefreshToken:
+    db_session.expire_all()
+    return (
+        await db_session.execute(select(RefreshToken).where(RefreshToken.token_hash == token_hash))
+    ).scalar_one()
+
+
+async def test_w1_a_revoke_all_refresh_tokens_stamps_active_rows_and_spares_revoked_ones(
+    user_repo: UserRepository, db_session: AsyncSession, make_user
+) -> None:
+    """W1-a — every active row gets ``revoked_at`` *and* ``bulk_revocation``; rows revoked
+    earlier keep their original reason and timestamp; other users' rows are untouched."""
+    user = await make_user(email="w1a-revokeall@example.com")
+    user_id = user.id
+    other = await make_user(email="w1a-other@example.com")
+    await _add_token(user_repo, user, "w1a-active-0")
+    await _add_token(user_repo, user, "w1a-active-1")
+    await _add_token(user_repo, user, "w1a-earlier")
+    await _add_token(user_repo, other, "w1a-other")
+    earlier = await _token(db_session, "w1a-earlier")
+    await user_repo.revoke_refresh_token(earlier.id, reason=RefreshTokenRevocationReason.ROTATED)
+    earlier = await _token(db_session, "w1a-earlier")
+    earlier_revoked_at = earlier.revoked_at
+    assert earlier_revoked_at is not None
+
+    count = await user_repo.revoke_all_refresh_tokens(user_id)
+
+    assert count == 2
+    for token_hash in ("w1a-active-0", "w1a-active-1"):
+        token = await _token(db_session, token_hash)
+        assert token.is_revoked is True
+        assert token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value
+        assert token.revoked_at is not None
+        assert abs((datetime.now(UTC) - token.revoked_at).total_seconds()) < 60
+    earlier = await _token(db_session, "w1a-earlier")
+    assert earlier.revoked_reason == RefreshTokenRevocationReason.ROTATED.value
+    assert earlier.revoked_at == earlier_revoked_at
+    untouched = await _token(db_session, "w1a-other")
+    assert untouched.is_revoked is False
+    assert untouched.revoked_at is None
+    assert untouched.revoked_reason is None
+
+
+async def test_w1_a_revoke_all_refresh_tokens_takes_the_user_row_lock(
+    user_repo: UserRepository, make_user
+) -> None:
+    """W1-a — the G1 lock is taken inside the method, so no caller can forget it.
+
+    The blocking behaviour itself is proven against a second connection in
+    ``test_revoke_all_refresh_tokens_lock.py``.
+    """
+    user = await make_user(email="w1a-lock@example.com")
+    await _add_token(user_repo, user, "w1a-lock-token")
+    real_lock = user_repo.lock_user_for_session_change
+
+    with patch.object(
+        user_repo, "lock_user_for_session_change", new=AsyncMock(side_effect=real_lock)
+    ) as lock:
+        count = await user_repo.revoke_all_refresh_tokens(user.id)
+
     assert count == 1
-    token = await user_repo.get_refresh_token_by_hash("resethash")
-    assert token is not None
-    assert token.revoked_reason == RefreshTokenRevocationReason.BULK_REVOCATION.value
+    lock.assert_awaited_once_with(user.id)
 
 
 async def test_lock_user_for_session_change_smoke(user_repo: UserRepository, make_user) -> None:
@@ -475,11 +543,12 @@ async def test_lock_user_for_session_change_smoke(user_repo: UserRepository, mak
     await user_repo.lock_user_for_session_change(user.id)
 
 
-async def test_revoke_all_user_tokens_no_tokens(user_repo: UserRepository, make_user) -> None:
-    """revoke_all_user_tokens with no tokens returns 0 without error."""
+async def test_w1_a_revoke_all_refresh_tokens_no_tokens_returns_zero(
+    user_repo: UserRepository, make_user
+) -> None:
+    """W1-a — nothing to revoke is a clean zero, not an error."""
     user = await make_user(email="notokens@example.com")
-    count = await user_repo.revoke_all_user_tokens(user.id)
-    assert count == 0
+    assert await user_repo.revoke_all_refresh_tokens(user.id) == 0
 
 
 async def test_cleanup_expired_tokens_deletes_expired(user_repo: UserRepository, make_user) -> None:

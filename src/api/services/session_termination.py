@@ -1,10 +1,11 @@
 """Terminate every session of one user — the shared "revoke all" sequence.
 
 Refresh tokens, live access/content tokens (Redis epoch) and Web Push
-subscriptions are all credentials a user holds on some device. Callers that
-must end all of them (password reset, claiming an unverified account on OAuth
-sign-in) use this instead of repeating the revoke / report / push-cleanup
-sequence.
+subscriptions are all credentials a user holds on some device. Every path that
+must end all of them — logout-all, password change / reset, account
+deactivation, refresh-token reuse detection, claiming an unverified account on
+OAuth sign-in — uses this instead of repeating the revoke / report /
+push-cleanup sequence.
 
 Never commits — the caller owns the transaction. Callers terminate *before*
 their commit, so if the commit later fails the only effect is that the user
@@ -54,7 +55,12 @@ class SessionTerminationResult:
 
 
 class SessionTerminationService:
-    """Terminate every session of one user: refresh tokens, live access/content tokens, push."""
+    """Terminate every session of one user: refresh tokens, live access/content tokens, push.
+
+    The single implementation of the "revoke everything" sequence, shared by all
+    revoke-all paths (``AuthService``, ``UserService``, the password-reset and
+    OAuth-claim flows).
+    """
 
     def __init__(
         self,
@@ -95,8 +101,8 @@ class SessionTerminationService:
             How many refresh tokens were revoked and the epoch written for the
             bulk access-token revocation (``None`` if it did not land).
         """
-        # Issue #142 G1: user row first, then refresh-token rows, in every path.
-        await self._users.lock_user_for_session_change(user_id)
+        # Issue #142 G1: revoke_all_refresh_tokens takes the user-row lock itself
+        # (user row first, then refresh-token rows), so it cannot be forgotten.
         revoked = await self._users.revoke_all_refresh_tokens(user_id)
         epoch = await self._token_revocation.revoke_user_sessions(user_id)
         await self._report_revocation_outcome(

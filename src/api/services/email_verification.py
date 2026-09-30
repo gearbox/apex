@@ -21,6 +21,7 @@ from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Callable
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
@@ -60,16 +61,19 @@ class EmailVerificationService:
         self,
         *,
         email_service: EmailService,
-        app_url: str,
+        app_url_for: Callable[[str], str],
+        brand_for: Callable[[str], str],
         session_termination_factory: SessionTerminationFactory,
-        app_name: str = "Apex",
     ) -> None:
         """Initialise the service.
 
         Args:
             email_service: Provider that actually sends emails.
-            app_url: Base URL of the frontend app, e.g. ``https://app.apex.ai``.
-                     Used to build verification/reset links.
+            app_url_for: Maps a product slug to that product's frontend base URL
+                (``settings.app_url_for``). Used to build verification/reset
+                links from the *user's* product, never from the request.
+            brand_for: Maps a product slug to its public-facing brand name (the
+                registry's ``display_name``) for email subjects and bodies.
             session_termination_factory: Builds the session-bound
                 :class:`~src.api.services.session_termination.SessionTerminationService`
                 used on password reset — the account-recovery path a user
@@ -79,11 +83,10 @@ class EmailVerificationService:
                 tokens. Required so the choice is visible; tests that want
                 revocation to no-op pass a factory over
                 ``TokenRevocationService(None, max_token_ttl_seconds=0)``.
-            app_name: Public-facing product name for email branding.
         """
         self._email = email_service
-        self._app_url = app_url.rstrip("/")
-        self._app_name = app_name
+        self._app_url_for = app_url_for
+        self._brand_for = brand_for
         self._session_termination = session_termination_factory
 
     # -------------------------------------------------------------------------
@@ -116,14 +119,15 @@ class EmailVerificationService:
         token_repo = AuthTokenRepository(session)
         raw_token = await token_repo.create_verification_token(user_id)
 
-        verification_url = f"{self._app_url}/verify-email?token={raw_token}"
+        base = self._app_url_for(user.product_id).rstrip("/")
+        verification_url = f"{base}/verify-email?token={raw_token}"
 
         await self._email.send_verification_email(
             to=user.email,
             display_name=user.display_name,
             verification_url=verification_url,
             locale=user.locale,
-            app_name=self._app_name,
+            app_name=self._brand_for(user.product_id),
         )
 
         logger.info("email.verification_sent", user_id=str(user_id))
@@ -169,10 +173,11 @@ class EmailVerificationService:
         self,
         email: str,
         *,
+        product_id: str,
         session: AsyncSession,
         ip_address: str | None = None,
     ) -> None:
-        """Send a password reset email if the address is registered.
+        """Send a password reset email if the address is registered on this product.
 
         **Always returns successfully**, even if the email is not found.
         This prevents email enumeration attacks — callers should return 200
@@ -180,11 +185,14 @@ class EmailVerificationService:
 
         Args:
             email: Recipient email address.
+            product_id: Product the request was made on. Accounts are
+                product-scoped, so only that product's account is looked up;
+                the link and branding then follow that account's product.
             session: DB session (caller commits).
             ip_address: Originating IP for audit trail.
         """
         user_repo = UserRepository(session)
-        user = await user_repo.get_active_user_by_email(email)
+        user = await user_repo.get_active_user_by_email(email, product_id=product_id)
 
         if user is None:
             # Silent — do not reveal that the address is unknown
@@ -194,20 +202,20 @@ class EmailVerificationService:
         token_repo = AuthTokenRepository(session)
         raw_token = await token_repo.create_reset_token(user.id, ip_address=ip_address)
 
-        reset_url = f"{self._app_url}/reset-password?token={raw_token}"
+        base = self._app_url_for(user.product_id).rstrip("/")
+        reset_url = f"{base}/reset-password?token={raw_token}"
 
         await self._email.send_password_reset_email(
             to=user.email,
             display_name=user.display_name,
             reset_url=reset_url,
             locale=user.locale,
-            app_name=self._app_name,
+            app_name=self._brand_for(user.product_id),
         )
 
         logger.info(
             "email.password_reset_sent",
             user_id=str(user.id),
-            email=user.email,
             ip=ip_address,
         )
 

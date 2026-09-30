@@ -28,6 +28,7 @@ from tests.legal_support import (
     accept_all_current,
     make_legal_acceptance_service,
 )
+from tests.revocation_support import make_session_termination
 
 
 def _noop_token_revocation() -> TokenRevocationService:
@@ -68,7 +69,10 @@ def jwt_service() -> JWTService:
 @pytest.fixture
 def mock_repository() -> AsyncMock:
     """Create mock user repository."""
-    return AsyncMock()
+    repo = AsyncMock()
+    # X1 — a bare AsyncMock would answer "family already handled" (truthy).
+    repo.family_reuse_detected.return_value = False
+    return repo
 
 
 @pytest.fixture
@@ -85,6 +89,11 @@ def auth_service(
         password_service=password_service,
         token_revocation_service=_noop_token_revocation(),
         session=_mock_session(),
+        session_termination=make_session_termination(
+            user_repo=mock_repository,
+            token_revocation=_noop_token_revocation(),
+            session=_mock_session(),
+        ),
     )
 
 
@@ -259,6 +268,9 @@ class TestAuthServiceRegister:
             jwt_service=jwt_service,
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
+            session_termination=make_session_termination(
+                user_repo=AsyncMock(), token_revocation=_noop_token_revocation()
+            ),
         )
 
         with pytest.raises(RuntimeError, match="provision_user requires a session"):
@@ -301,6 +313,11 @@ class TestAuthServiceRegister:
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=legal,
             session=_mock_session(),
+            session_termination=make_session_termination(
+                user_repo=repository,
+                token_revocation=_noop_token_revocation(),
+                session=_mock_session(),
+            ),
         )
 
         await service.register(
@@ -348,6 +365,11 @@ class TestAuthServiceRegister:
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=legal,
             session=_mock_session(),
+            session_termination=make_session_termination(
+                user_repo=repository,
+                token_revocation=_noop_token_revocation(),
+                session=_mock_session(),
+            ),
         )
 
         await service.register(
@@ -527,6 +549,7 @@ class TestAuthServiceRefresh:
             await auth_service.refresh_tokens("reused_token")
 
         mock_repository.revoke_token_family.assert_called_once_with(family_id)
+        mock_repository.mark_reuse_detected.assert_awaited_once_with(mock_token.id)
 
     @pytest.mark.asyncio
     async def test_refresh_revoked_token_bulk_revokes_access_tokens(
@@ -557,6 +580,9 @@ class TestAuthServiceRefresh:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=mock_token_revocation,
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=mock_token_revocation
+            ),
         )
 
         with pytest.raises(TokenReuseDetectedError):
@@ -593,6 +619,11 @@ class TestAuthServiceRefresh:
             password_service=password_service,
             token_revocation_service=_noop_token_revocation(),
             ops_event_bus=mock_ops_event_bus,
+            session_termination=make_session_termination(
+                user_repo=mock_repository,
+                token_revocation=_noop_token_revocation(),
+                ops_event_bus=mock_ops_event_bus,
+            ),
         )
 
         with pytest.raises(InvalidRefreshTokenError):
@@ -710,7 +741,7 @@ class TestAuthServiceLogout:
         revoke_refresh_token (an UPDATE that locks the refresh-token row —
         acquiring the user lock after it inverts G1's documented
         user-row-before-refresh-token-row order and deadlocks against
-        AuthService.refresh_tokens/revoke_all_user_tokens/
+        AuthService.refresh_tokens/revoke_all_refresh_tokens/
         revoke_all_refresh_tokens) and the jti denylist write. Pinning the
         full three-call order on one shared mock — not just the last pair —
         is what actually catches a regression that puts the lock between
@@ -739,6 +770,9 @@ class TestAuthServiceLogout:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=token_revocation
+            ),
         )
 
         user_id = uuid4()
@@ -779,6 +813,9 @@ class TestAuthServiceLogout:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=token_revocation
+            ),
         )
 
         payload = TokenPayload(sub="not-a-uuid", exp=9999999999, iat=0, jti="jti-x")
@@ -838,6 +875,9 @@ class TestAuthServiceLogout:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=token_revocation
+            ),
         )
 
         user_id = uuid4()
@@ -859,12 +899,12 @@ class TestAuthServiceLogout:
     ) -> None:
         """Test logout from all devices."""
         user_id = uuid4()
-        mock_repository.revoke_all_user_tokens.return_value = 5
+        mock_repository.revoke_all_refresh_tokens.return_value = 5
 
         count = await auth_service.logout_all(user_id)
 
         assert count == 5
-        mock_repository.revoke_all_user_tokens.assert_called_once_with(user_id)
+        mock_repository.revoke_all_refresh_tokens.assert_called_once_with(user_id)
 
     @pytest.mark.asyncio
     async def test_logout_all_bulk_revokes_access_tokens(
@@ -883,9 +923,12 @@ class TestAuthServiceLogout:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=mock_token_revocation,
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=mock_token_revocation
+            ),
         )
         user_id = uuid4()
-        mock_repository.revoke_all_user_tokens.return_value = 2
+        mock_repository.revoke_all_refresh_tokens.return_value = 2
 
         await service.logout_all(user_id)
 
@@ -917,6 +960,11 @@ class TestAuthServiceMissingBranches:
             password_service=password_service,
             token_revocation_service=_noop_token_revocation(),
             session=session,
+            session_termination=make_session_termination(
+                user_repo=mock_repository,
+                token_revocation=_noop_token_revocation(),
+                session=session,
+            ),
         )
 
         with patch("src.api.services.auth.BillingRepository") as billing_repo_cls:
@@ -958,6 +1006,11 @@ class TestAuthServiceMissingBranches:
             token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
+            session_termination=make_session_termination(
+                user_repo=mock_repository,
+                token_revocation=_noop_token_revocation(),
+                session=session,
+            ),
         )
 
         await svc.register(
@@ -996,6 +1049,11 @@ class TestAuthServiceMissingBranches:
             token_revocation_service=_noop_token_revocation(),
             session=session,
             email_verification_service=email_verification,
+            session_termination=make_session_termination(
+                user_repo=mock_repository,
+                token_revocation=_noop_token_revocation(),
+                session=session,
+            ),
         )
 
         # Should not raise even though email fails
@@ -1029,6 +1087,9 @@ class TestAuthServiceMissingBranches:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=_noop_token_revocation(),
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=_noop_token_revocation()
+            ),
         )
 
         # Make needs_rehash return True
@@ -1052,6 +1113,9 @@ class TestAuthServiceMissingBranches:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=_noop_token_revocation(),
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=_noop_token_revocation()
+            ),
         )
 
         with pytest.raises(InvalidRefreshTokenError, match="Invalid refresh token"):
@@ -1078,6 +1142,9 @@ class TestAuthServiceMissingBranches:
             jwt_service=jwt_service,
             password_service=password_service,
             token_revocation_service=_noop_token_revocation(),
+            session_termination=make_session_termination(
+                user_repo=mock_repository, token_revocation=_noop_token_revocation()
+            ),
         )
 
         with pytest.raises(UserInactiveError):
@@ -1104,6 +1171,9 @@ class TestLoginWithoutPassword:
             password_service=password,
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=make_legal_acceptance_service(),
+            session_termination=make_session_termination(
+                user_repo=repository, token_revocation=_noop_token_revocation()
+            ),
         )
 
         with pytest.raises(InvalidCredentialsError):
@@ -1125,6 +1195,9 @@ class TestIssueSession:
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
             legal_acceptance_service=legal,
+            session_termination=make_session_termination(
+                user_repo=repository, token_revocation=_noop_token_revocation()
+            ),
         )
         user_id = uuid4()
 

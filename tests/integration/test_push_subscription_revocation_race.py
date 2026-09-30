@@ -51,6 +51,7 @@ from src.db.models.user import RefreshToken, User
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from tests.legal_support import make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -228,6 +229,12 @@ async def _run_bulk_logout_all(
             token_revocation_service=token_revocation,
             session=session,
             ops_event_bus=OpsEventBus(enabled=False),
+            session_termination=make_session_termination(
+                user_repo=UserRepository(session),
+                token_revocation=token_revocation,
+                session=session,
+                ops_event_bus=OpsEventBus(enabled=False),
+            ),
         )
         await auth_service.logout_all(user_id)
 

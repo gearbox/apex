@@ -108,7 +108,7 @@ Controls how Apex connects to the ComfyUI backend that executes generation workf
 > `POST /v1/auth/reset-password`, `DELETE /v1/users/me`) sends
 > `Clear-Site-Data: "cache", "storage"` (`CLEAR_SITE_DATA_HEADER`,
 > `src/api/security/response_headers.py`). `"storage"` clears storage for the origin that
-> *sent* the header. Today the API and the frontend are separate origins (`APP_URL` on its own
+> *sent* the header. Today the API and the frontend are separate origins (`APP_URL_<PRODUCT>` on its own
 > host/port vs. `API_HOST`/`API_PORT`, e.g. `api.` vs. the app host in production), so this only
 > clears the API origin — which holds nothing but cached content-proxy responses. If the API is
 > ever reverse-proxied same-origin with the frontend (e.g. under `/api` on the app domain behind
@@ -282,8 +282,9 @@ async HTTP client are process-global SDK state, set once when the service is con
 |----------|---------|------|-------------|
 | `RESEND_API_KEY` | `""` | `str` | Resend API key (`re_...`). Empty selects `LogEmailService`. |
 | `EMAIL_FROM_ADDRESS` | `noreply@apex.ai` | `str` | Sender address. Must be a verified domain in Resend. |
-| `EMAIL_FROM_NAME` | `Apex` | `str` | Sender display name. |
 | `EMAIL_SEND_TIMEOUT_SECONDS` | `10` | `int (1–60)` | Timeout for each Resend API request. A timeout surfaces as `EmailDeliveryError`; registration still succeeds and the user can resend verification. |
+
+The sender display name is per product (the product registry's `display_name`, same as the email subject and body); only the sender *address* is global.
 
 Send logs record the recipient's **domain** (`recipient_domain`), never the address.
 
@@ -302,7 +303,7 @@ Frontend contract: `docs/contracts/oauth-contract.md`.
 | `GOOGLE_OAUTH_CLIENT_ID_VEX` / `_SYNTHARA` | `None` | `str \| None` | Google OAuth client ID (type *Web application*) for the product. |
 | `GOOGLE_OAUTH_CLIENT_SECRET_VEX` / `_SYNTHARA` | `None` | `SecretStr \| None` | Client secret for that client. Secrets/env only, and never logged. |
 | `API_PUBLIC_URL_VEX` / `_SYNTHARA` | `None` | `str \| None` | Public origin of **this API** for the product (scheme+host, no path, no trailing slash), e.g. `https://api.vex.pics`. It is the only input to the `redirect_uri` `{API_PUBLIC_URL_<P>}/v1/auth/oauth/google/callback`. That value must **byte-match** the URI registered in Google Cloud. It is never derived from request headers. |
-| `APP_URL_VEX` / `_SYNTHARA` | `https://vex.pics` / `https://synthara.app` | `str` | Frontend origin. The OAuth callback 302s to `{APP_URL_<P>}{OAUTH_FRONTEND_CALLBACK_PATH}#…`. Emails still use `APP_URL`. |
+| `APP_URL_VEX` / `_SYNTHARA` | `https://vex.pics` / `https://synthara.app` | `str` | Frontend origin. The OAuth callback 302s to `{APP_URL_<P>}{OAUTH_FRONTEND_CALLBACK_PATH}#…`. Verification and password-reset email links use it too, chosen from the *user's* product (never the request). Email branding (subject/body name) is the product registry's `display_name`, not a setting. **Set it explicitly per environment** — there is no global `APP_URL` fallback (a leftover `APP_URL`/`APP_NAME` in an old env file is ignored). |
 | `OAUTH_FRONTEND_CALLBACK_PATH` | `/auth/callback` | `str` | Frontend route that reads the result fragment. |
 | `OAUTH_FLOW_TTL_SECONDS` | `600` | `int (60–1800)` | Lifetime of a pending authorize→callback flow (state, nonce, PKCE verifier). |
 | `OAUTH_HANDOFF_TTL_SECONDS` | `60` | `int (10–300)` | Lifetime of the one-time login code redeemed at `/exchange`. |

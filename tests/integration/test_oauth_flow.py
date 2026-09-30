@@ -100,7 +100,7 @@ from tests.oauth_support import (
     oauth_settings,
     query_params,
 )
-from tests.revocation_support import FakeRedis
+from tests.revocation_support import FakeRedis, make_session_termination
 
 if TYPE_CHECKING:
     import contextlib
@@ -259,6 +259,12 @@ def build_service(
         legal_acceptance_service=legal,
         session=session,
         ops_event_bus=ops,
+        session_termination=make_session_termination(
+            user_repo=UserRepository(session),
+            token_revocation=token_revocation,
+            session=session,
+            ops_event_bus=ops,
+        ),
     )
     sessions = SessionTerminationService(
         session=session,
@@ -513,6 +519,11 @@ class TestSignup:
             token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             legal_acceptance_service=legal,
             session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                session=db_session,
+            ),
         )
         competing_user_id = await commit_active_user_for_email_race(db_engine, email=email)
         try:
@@ -1102,14 +1113,17 @@ class TestSelfClosure:
             repository=UserRepository(db_session),
             password_service=PasswordService(),
             age_verification_service=MagicMock(),
-            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             legal_acceptance_service=LegalAcceptanceService(
                 registry=registry,
                 repository=LegalAcceptanceRepository(db_session),
                 session=db_session,
             ),
             identity_repository=UserIdentityRepository(db_session),
-            session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                session=db_session,
+            ),
         )
         await users.deactivate_account(old.id, product=VEX_CONFIG, context=CONTEXT)
         assert not await _identities(db_session)
@@ -1130,7 +1144,8 @@ class TestResetPasswordVerifiesEmail:
     def _service(self) -> EmailVerificationService:
         return EmailVerificationService(
             email_service=MagicMock(),
-            app_url="https://vex.test",
+            app_url_for=lambda _slug: "https://vex.test",
+            brand_for=lambda _slug: "vex.pics",
             session_termination_factory=make_session_termination_factory(
                 token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
                 ops_event_bus=OpsEventBus(enabled=False),

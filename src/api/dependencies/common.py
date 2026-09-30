@@ -91,7 +91,7 @@ from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
-from src.core.product_registry import PRODUCT_REGISTRY
+from src.core.product_registry import PRODUCT_REGISTRY, get_product_config_by_slug
 from src.core.redis import get_redis_client
 from src.db import DatabaseManager, init_db
 from src.db.repositories import (
@@ -393,6 +393,7 @@ def get_auth_service(session: AsyncSession) -> AuthService:
         ops_event_bus=get_ops_event_bus(),
         token_revocation_service=get_token_revocation_service(),
         legal_acceptance_service=get_legal_acceptance_service(session),
+        session_termination=get_session_termination_service(session),
     )
 
 
@@ -461,11 +462,9 @@ def get_user_service(session: AsyncSession) -> UserService:
         password_service=get_password_service(),
         age_verification_service=AgeVerificationService(),
         r2_storage=_services.r2_storage,
-        token_revocation_service=get_token_revocation_service(),
         legal_acceptance_service=get_legal_acceptance_service(session),
         identity_repository=UserIdentityRepository(session),
-        ops_event_bus=get_ops_event_bus(),
-        session=session,
+        session_termination=get_session_termination_service(session),
     )
 
 
@@ -1101,7 +1100,6 @@ async def init_services(settings: Settings) -> JWTService:
         _services.email_service = ResendEmailService(
             api_key=settings.resend_api_key,
             from_address=settings.email_from_address,
-            from_name=settings.email_from_name,
             send_timeout_seconds=settings.email_send_timeout_seconds,
         )
         logger.info("email.initialized", provider="resend")
@@ -1125,8 +1123,8 @@ async def init_services(settings: Settings) -> JWTService:
     )
     _services.email_verification_service = EmailVerificationService(
         email_service=_services.email_service,
-        app_url=settings.app_url,
-        app_name=settings.app_name,
+        app_url_for=settings.app_url_for,
+        brand_for=lambda slug: get_product_config_by_slug(slug).display_name,
         session_termination_factory=_services.session_termination_factory,
     )
 

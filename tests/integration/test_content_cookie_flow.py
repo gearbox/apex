@@ -40,7 +40,7 @@ from src.api.services.legal.errors import LegalAcceptanceRequiredError
 from src.api.services.token_revocation import TokenRevocationService
 from src.core.config import Settings
 from src.core.product_registry import get_product_config_by_slug
-from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY
+from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY, TEST_REQUEST_CONTEXT
 
 if TYPE_CHECKING:
     from litestar.types import Receive, Scope, Send
@@ -433,8 +433,6 @@ class TestAuthControllerCookies:
     ) -> None:
         from unittest.mock import AsyncMock, MagicMock
 
-        from litestar import Request
-
         from src.api.routes.auth import AuthController
         from src.api.schemas.auth import LoginRequest
 
@@ -445,13 +443,9 @@ class TestAuthControllerCookies:
         mock_auth = AsyncMock()
         mock_auth.login = AsyncMock(return_value=(user, pair))
 
-        mock_request = MagicMock(spec=Request)
-        mock_request.headers.get.return_value = None
-        mock_request.client = None
-
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=mock_request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=LoginRequest(email="a@b.com", password="pass1234"),
             auth_service=mock_auth,
             jwt_service=jwt_service,
@@ -480,8 +474,6 @@ class TestAuthControllerCookies:
         """refresh sets the cookie via user_id from AuthService — no access-token decode."""
         from unittest.mock import AsyncMock, MagicMock
 
-        from litestar import Request
-
         from src.api.routes.auth import AuthController
         from src.api.schemas.auth import RefreshTokenRequest
         from src.api.security.jwt import JWTConfig
@@ -493,13 +485,9 @@ class TestAuthControllerCookies:
         mock_auth = AsyncMock()
         mock_auth.refresh_tokens = AsyncMock(return_value=(pair, user_id))
 
-        mock_request = MagicMock(spec=Request)
-        mock_request.headers.get.return_value = None
-        mock_request.client = None
-
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=mock_request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=RefreshTokenRequest(refresh_token="some.refresh.token"),
             auth_service=mock_auth,
             jwt_service=jwt_service,
@@ -655,15 +643,11 @@ class TestRemintContentCookieHandler:
         user = MagicMock()
         user.id = user_id
         mock_auth.login = AsyncMock(return_value=(user, _make_token_pair()))
-        mock_request = MagicMock()
-        mock_request.headers.get.return_value = None
-        mock_request.client = None
-
         from src.api.schemas.auth import LoginRequest
 
         login_response = await AuthController.login.fn(
             MagicMock(),
-            request=mock_request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=LoginRequest(email="a@b.com", password="pass1234"),
             auth_service=mock_auth,
             jwt_service=jwt_service,

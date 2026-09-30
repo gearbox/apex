@@ -29,7 +29,6 @@ def _harness(
     token_revocation.revoke_user_sessions = AsyncMock(return_value=epoch)
     ops = MagicMock()
     ops.publish = AsyncMock()
-    calls.attach_mock(user_repo.lock_user_for_session_change, "lock")
     calls.attach_mock(user_repo.revoke_all_refresh_tokens, "revoke_refresh")
     calls.attach_mock(token_revocation.revoke_user_sessions, "epoch")
     calls.attach_mock(ops.publish, "report")
@@ -49,7 +48,7 @@ def _push_cleanup(calls: MagicMock) -> AsyncMock:
 
 
 class TestTerminateAll:
-    async def test_order_lock_refresh_epoch_push(self) -> None:
+    async def test_order_refresh_epoch_push(self) -> None:
         service, calls = _harness()
         user_id = uuid4()
         with patch(
@@ -61,8 +60,9 @@ class TestTerminateAll:
         assert result == SessionTerminationResult(revoked_refresh_tokens=3, epoch=1_800_000_000)
         assert result.bulk_access_revoked is True
         names = [c[0] for c in calls.mock_calls]
-        assert names == ["lock", "revoke_refresh", "epoch", "push"]
-        calls.lock.assert_awaited_once_with(user_id)
+        # W1-B: the user-row lock lives inside revoke_all_refresh_tokens, so the
+        # service takes no separate lock of its own.
+        assert names == ["revoke_refresh", "epoch", "push"]
         calls.revoke_refresh.assert_awaited_once_with(user_id)
         calls.epoch.assert_awaited_once_with(user_id)
         push_kwargs = calls.push.await_args.kwargs
@@ -85,7 +85,6 @@ class TestTerminateAll:
         assert result.revoked_refresh_tokens == 3
         # The order still ends with report → push cleanup (push cleanup is not skipped).
         assert [c[0] for c in calls.mock_calls] == [
-            "lock",
             "revoke_refresh",
             "epoch",
             "report",

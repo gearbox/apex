@@ -22,6 +22,7 @@ from src.core.product import AgeGatePolicy, ProductConfig
 from src.core.product_registry import VEX_CONFIG
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 pytestmark = pytest.mark.unit
 
@@ -74,15 +75,18 @@ def _make_service(
         repository=repo,
         password_service=pwd,
         age_verification_service=age_svc,
-        token_revocation_service=(
-            token_revocation_service
-            if token_revocation_service is not None
-            else TokenRevocationService(None, max_token_ttl_seconds=0)
-        ),
         identity_repository=(
             identity_repository
             if identity_repository is not None
             else cast("UserIdentityRepository", AsyncMock(spec=UserIdentityRepository))
+        ),
+        session_termination=make_session_termination(
+            user_repo=repo,
+            token_revocation=(
+                token_revocation_service
+                if token_revocation_service is not None
+                else TokenRevocationService(None, max_token_ttl_seconds=0)
+            ),
         ),
     )
     return svc, repo, pwd
@@ -347,13 +351,13 @@ class TestChangePassword:
         user = _make_user()
         svc, repo, pwd = _make_service(user)
         repo.update_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=3)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=3)
 
         await svc.change_password(user.id, current_password="old", new_password="new")
 
         pwd.averify.assert_called_once_with("hashed_pw", "old")
         pwd.ahash.assert_called_once_with("new")
-        repo.revoke_all_user_tokens.assert_awaited_once_with(user.id)
+        repo.revoke_all_refresh_tokens.assert_awaited_once_with(user.id)
 
     async def test_raises_when_user_not_found(self) -> None:
         svc, _, _ = _make_service(user=None)
@@ -374,7 +378,7 @@ class TestChangePassword:
         mock_token_revocation = AsyncMock()
         svc, repo, _ = _make_service(user, token_revocation_service=mock_token_revocation)
         repo.update_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=3)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=3)
 
         await svc.change_password(user.id, current_password="old", new_password="new")
 
@@ -390,7 +394,7 @@ class TestDeactivateAccount:
             user, identity_repository=cast("UserIdentityRepository", identities)
         )
         repo.soft_delete_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=1)
 
         await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
@@ -404,18 +408,21 @@ class TestDeactivateAccount:
                 repository=AsyncMock(),
                 password_service=MagicMock(),
                 age_verification_service=AgeVerificationService(),
-                token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+                session_termination=make_session_termination(
+                    user_repo=AsyncMock(),
+                    token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                ),
             )
 
     async def test_deactivates_and_returns_timestamp(self) -> None:
         user = _make_user()
         svc, repo, _ = _make_service(user)
         repo.soft_delete_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=1)
 
         ts = await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
         assert isinstance(ts, datetime)
-        repo.revoke_all_user_tokens.assert_awaited_once_with(user.id)
+        repo.revoke_all_refresh_tokens.assert_awaited_once_with(user.id)
 
     async def test_raises_when_user_not_found(self) -> None:
         svc, repo, _ = _make_service(user=None)
@@ -431,7 +438,7 @@ class TestDeactivateAccount:
         mock_token_revocation = AsyncMock()
         svc, repo, _ = _make_service(user, token_revocation_service=mock_token_revocation)
         repo.soft_delete_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=1)
 
         await svc.deactivate_account(user.id, product=VEX_CONFIG, context=TEST_REQUEST_CONTEXT)
 
@@ -446,7 +453,7 @@ class TestDeactivateAccount:
         user = _make_user()
         svc, repo, _ = _make_service(user)
         repo.soft_delete_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=1)
         legal = MagicMock()
         legal.record_consent_withdrawal = AsyncMock()
         svc._legal = legal
@@ -526,7 +533,7 @@ class TestDeactivateUnlinksIdentities:
         user = _make_user()
         svc, repo, _ = _make_service(user)
         repo.soft_delete_user = AsyncMock(return_value=user)
-        repo.revoke_all_user_tokens = AsyncMock(return_value=1)
+        repo.revoke_all_refresh_tokens = AsyncMock(return_value=1)
         identities = MagicMock()
         identities.delete_for_user = AsyncMock(return_value=1)
         svc._identities = identities

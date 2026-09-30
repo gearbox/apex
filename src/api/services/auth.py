@@ -11,12 +11,7 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from src.api.schemas.ops_events import (
-    PLATFORM_PRODUCT_ID,
-    OpsEventType,
-    TokenRevocationFailedOpsPayload,
-    UserRegisteredOpsPayload,
-)
+from src.api.schemas.ops_events import OpsEventType, UserRegisteredOpsPayload
 from src.api.security import (
     JWTService,
     PasswordService,
@@ -24,7 +19,6 @@ from src.api.security import (
     hash_token,
 )
 from src.api.services.ops_event_bus import OpsEventBus
-from src.api.services.push_cleanup import delete_user_push_subscriptions
 from src.core.enums import LegalAcceptanceSource, RefreshTokenRevocationReason
 from src.core.product_registry import get_product_config_by_slug
 from src.core.uid import new_id
@@ -45,6 +39,7 @@ if TYPE_CHECKING:
         RequestContext,
     )
     from src.api.services.legal.registry import LegalDocument
+    from src.api.services.session_termination import SessionTerminationService
     from src.api.services.token_revocation import TokenRevocationService
     from src.core.product import ProductConfig
     from src.db.models import User
@@ -114,25 +109,33 @@ class TokenPair:
 def _reuse_detected_message(*, bulk_access_revoked: bool) -> str:
     """TokenReuseDetectedError's user-facing message (issue #142 F5).
 
-    Branches on whether the Redis-backed bulk access-token/content-cookie
-    revocation actually landed — the refresh-token family revocation
-    (DB-side) always succeeds by the time this is called, so only the
-    access-token side can fail (Redis down) or be skipped (Redis not
-    configured). Claiming "all sessions invalidated" when that write failed
-    would over-promise a security guarantee that wasn't actually met, so the
-    message is branched rather than a single fixed string.
+    The first reuse detection for a token family signs the user out on every
+    device (W1-A); later replays of that family get a fixed message instead
+    (``_REUSE_REPLAYED_MESSAGE``) and have no side effects. Branches on
+    whether the Redis-backed bulk access-token/content-cookie revocation
+    actually landed — the refresh-token revocation (DB-side) always succeeds
+    by the time this is called, so only the access-token side can fail
+    (Redis down) or be skipped (Redis not configured). Claiming "signed out
+    on all devices" when that write failed would over-promise a security
+    guarantee that wasn't actually met, so the message is branched rather
+    than a single fixed string.
     """
     if bulk_access_revoked:
         return (
-            "Security alert: This refresh token was already used. "
-            "All sessions have been invalidated."
+            "Security alert: this refresh token was already used. "
+            "You have been signed out on all devices."
         )
     return (
-        "Security alert: This refresh token was already used. Your refresh-token "
-        "session has been invalidated, but we could not confirm that other active "
-        "access tokens were revoked — change your password immediately if you "
-        "suspect compromise."
+        "Security alert: this refresh token was already used. Every device must "
+        "sign in again, but we could not confirm that sessions already open were "
+        "revoked — they may stay active until their access tokens expire. Change "
+        "your password immediately if you suspect compromise."
     )
+
+
+_REUSE_REPLAYED_MESSAGE = (
+    "Security alert: this refresh token was already used. Please sign in again."
+)
 
 
 class AuthService:
@@ -151,6 +154,7 @@ class AuthService:
         *,
         token_revocation_service: TokenRevocationService,
         legal_acceptance_service: LegalAcceptanceService,
+        session_termination: SessionTerminationService,
         product_resolver: Callable[[str], ProductConfig] = get_product_config_by_slug,
         session: AsyncSession | None = None,
         email_verification_service: EmailVerificationService | None = None,
@@ -162,8 +166,9 @@ class AuthService:
             repository: User repository.
             jwt_service: JWT token service.
             password_service: Password hashing service.
-            token_revocation_service: Bulk-revokes access tokens issued
-                before logout_all and on refresh-token reuse detection (see
+            token_revocation_service: Reads the revocation epoch (refresh
+                race backstop, post-revocation mint wait) and deny-lists the
+                access token's jti on logout (see
                 src.api.services.token_revocation). Required — callers that
                 intentionally want revocation to no-op (tests, older call
                 sites) must pass an explicit
@@ -173,6 +178,10 @@ class AuthService:
             legal_acceptance_service: Validates/records signup acceptance and
                 computes the ``lgl`` digest embedded in every access token.
                 Required so the digest is never silently omitted.
+            session_termination: Owns the "revoke everything" sequence
+                (refresh tokens, access-token epoch, push cleanup) for
+                logout-all and refresh-token reuse detection. Required —
+                there is no fallback that skips any of the steps.
             product_resolver: Resolves a product slug to its config (defaults
                 to the product registry).
             session: Database session (for billing account creation).
@@ -193,6 +202,7 @@ class AuthService:
         )
         self._token_revocation = token_revocation_service
         self._legal = legal_acceptance_service
+        self._sessions = session_termination
         self._product_resolver = product_resolver
 
     async def register(
@@ -525,7 +535,9 @@ class AuthService:
                 theft).
             TokenReuseDetectedError: If revoked token was reused for any
                 other reason (including legacy rows with no recorded
-                reason).
+                reason). The first detection for a token family signs the
+                user out on every device; later replays of the same family
+                are refused without side effects.
         """
         today = datetime.now(UTC).date()
         token_hash = hash_token(refresh_token)
@@ -550,10 +562,10 @@ class AuthService:
             raise InvalidRefreshTokenError("Invalid refresh token")
 
         # G1 — lock ordering is user row -> refresh-token row in every path
-        # that acquires both: this method and every bulk-revocation method
-        # (UserRepository.revoke_all_user_tokens/revoke_all_refresh_tokens)
-        # acquire the user row first. Reversing the order in either path
-        # deadlocks against the other — see
+        # that acquires both: this method and the bulk-revocation method
+        # (UserRepository.revoke_all_refresh_tokens) acquire the user row
+        # first. Reversing the order in either path deadlocks against the
+        # other — see
         # UserRepository.lock_user_for_session_change's docstring. With
         # this lock held, a concurrent bulk revocation either already
         # committed (so is_revoked/revoked_reason below reflect it) or
@@ -585,30 +597,40 @@ class AuthService:
                 )
                 raise InvalidRefreshTokenError("Your session has ended. Please sign in again.")
 
-            # Revoke entire token family as precaution
-            revoked_count = await self._repo.revoke_token_family(stored_token.family_id)
-            # Bulk-revoke live access tokens/content cookies too (issue #142)
-            # — otherwise the "all sessions have been invalidated" message
-            # below is false: an access token or content cookie the
-            # attacker already holds would keep working for its full
-            # remaining lifetime.
-            epoch = await self._token_revocation.revoke_user_sessions(stored_token.user_id)
-            bulk_access_revoked = epoch is not None
-            await self._report_revocation_outcome(
-                bulk_access_revoked=bulk_access_revoked,
-                user_id=stored_token.user_id,
-                op="token_reuse_detected",
+            # X1 — sign out everywhere only on the FIRST detection for a
+            # family. The user-row lock is held, so concurrent replays
+            # serialize here and exactly one of them does the first detection.
+            # Without this, whoever holds the stolen token could replay it
+            # after every new login and keep the victim signed out forever.
+            if await self._repo.family_reuse_detected(stored_token.family_id):
+                logger.warning(
+                    "auth.token_reuse_replayed",
+                    user_id=str(stored_token.user_id),
+                    family=str(stored_token.family_id),
+                )
+                raise TokenReuseDetectedError(_REUSE_REPLAYED_MESSAGE)
+
+            # 1. Stamp the stolen family as theft FIRST — later replays of it stay
+            #    classified as reuse_detected, not as a benign bulk revocation.
+            #    The replayed row is stamped too: it is the family's "handled"
+            #    marker even when no active row was left to revoke.
+            revoked_family = await self._repo.revoke_token_family(stored_token.family_id)
+            await self._repo.mark_reuse_detected(stored_token.id)
+            # 2. W1-A: sign out everywhere (remaining refresh tokens ->
+            #    bulk_revocation, access-token epoch, push). Re-acquiring the
+            #    already-held user-row lock is a no-op.
+            result = await self._sessions.terminate_all(
+                stored_token.user_id, op="token_reuse_detected", source="auth"
             )
-            await self._delete_push_subscriptions(stored_token.user_id, op="token_reuse_detected")
             logger.warning(
                 "auth.token_reuse_detected",
                 user_id=str(stored_token.user_id),
-                revoked=revoked_count,
+                revoked=revoked_family + result.revoked_refresh_tokens,
                 family=str(stored_token.family_id),
-                bulk_access_revoked=bulk_access_revoked,
+                bulk_access_revoked=result.bulk_access_revoked,
             )
             raise TokenReuseDetectedError(
-                _reuse_detected_message(bulk_access_revoked=bulk_access_revoked)
+                _reuse_detected_message(bulk_access_revoked=result.bulk_access_revoked)
             )
 
         # Check expiration
@@ -680,8 +702,8 @@ class AuthService:
         operation below. G1 lock ordering is user row -> refresh-token row
         in every path that acquires both: ``revoke_refresh_token`` below
         issues an ``UPDATE`` that locks the refresh-token row, and
-        ``AuthService.refresh_tokens``/``revoke_all_user_tokens``/
-        ``revoke_all_refresh_tokens`` all take the user row first.
+        ``AuthService.refresh_tokens``/``revoke_all_refresh_tokens`` both
+        take the user row first.
         Acquiring the user-row lock after the token row (as this method
         used to) inverts that order and deadlocks against every one of
         them — see ``UserRepository.lock_user_for_session_change``.
@@ -715,9 +737,9 @@ class AuthService:
         # G1 lock ordering: user row -> refresh-token row, in every path
         # that acquires both. revoke_refresh_token below UPDATEs (and so
         # locks) the refresh-token row, and AuthService.refresh_tokens /
-        # revoke_all_user_tokens / revoke_all_refresh_tokens all take the
-        # user row first — acquiring it after the token row here would
-        # deadlock against every one of them. See
+        # revoke_all_refresh_tokens both take the user row first —
+        # acquiring it after the token row here would deadlock against
+        # either of them. See
         # UserRepository.lock_user_for_session_change.
         actor_id = token_payload.user_id if token_payload is not None else None
         if actor_id is not None:
@@ -754,58 +776,16 @@ class AuthService:
             user_id: User ID.
 
         Returns:
-            Number of tokens revoked.
+            Number of refresh tokens revoked.
         """
-        count = await self._repo.revoke_all_user_tokens(user_id)
-        epoch = await self._token_revocation.revoke_user_sessions(user_id)
-        bulk_access_revoked = epoch is not None
-        await self._report_revocation_outcome(
-            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op="logout_all"
-        )
-        await self._delete_push_subscriptions(user_id, op="logout_all")
+        result = await self._sessions.terminate_all(user_id, op="logout_all", source="auth")
         logger.info(
             "auth.tokens_revoked",
             user_id=str(user_id),
-            count=count,
-            bulk_access_revoked=bulk_access_revoked,
+            count=result.revoked_refresh_tokens,
+            bulk_access_revoked=result.bulk_access_revoked,
         )
-        return count
-
-    async def _report_revocation_outcome(
-        self, *, bulk_access_revoked: bool, user_id: UUID, op: str
-    ) -> None:
-        """F5 — surface a failed bulk access-token revocation to operators.
-
-        Only alert-worthy when Redis is actually configured
-        (`token_revocation.enabled`) — a `False` outcome with Redis unset is
-        the documented no-op, already logged once at startup, not a fresh
-        degradation. Never raises and never blocks the caller's primary
-        action (password reset/logout-all/etc. must still complete even if
-        this publish fails — OpsEventBus.publish already guarantees that).
-        """
-        if bulk_access_revoked or not self._token_revocation.enabled:
-            return
-        logger.error("auth.bulk_revocation_failed", user_id=str(user_id), op=op)
-        await self._ops_event_bus.publish(
-            event_type=OpsEventType.TOKEN_REVOCATION_FAILED,
-            product_id=PLATFORM_PRODUCT_ID,
-            payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
-        )
-
-    async def _delete_push_subscriptions(self, user_id: UUID, *, op: str) -> None:
-        """Delete every push subscription for the user, if a session is wired.
-
-        A missing session (M3) means a mis-wired construction would
-        otherwise skip this security-relevant cleanup silently — production
-        always wires one (get_auth_service), so this only fires for direct
-        construction (mostly tests).
-        """
-        if self._session is None:
-            logger.warning("auth.push_subscriptions_cleanup_skipped_no_session", op=op)
-            return
-        await delete_user_push_subscriptions(
-            self._session, self._ops_event_bus, user_id=user_id, op=op, source="auth"
-        )
+        return result.revoked_refresh_tokens
 
     async def _create_token_pair(
         self,

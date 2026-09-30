@@ -8,7 +8,7 @@ UserRepository.lock_user_for_session_change). Before the C1 fix, logout
 acquired the refresh-token row's lock first (via revoke_refresh_token's
 UPDATE) and only locked the user row afterward — the inverse of
 AuthService.refresh_tokens and AuthService.logout_all (via
-revoke_all_user_tokens), both of which lock the user row first. Two
+revoke_all_refresh_tokens), both of which lock the user row first. Two
 requests for the same user racing on the same refresh token, one taking
 each order, form a lock cycle Postgres aborts with SQLSTATE 40P01.
 
@@ -48,7 +48,8 @@ from src.core.product_registry import VEX_CONFIG
 from src.core.uid import new_id
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
-from tests.legal_support import make_legal_acceptance_service
+from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -168,6 +169,12 @@ def _auth_service(
         token_revocation_service=token_revocation,
         session=session,
         ops_event_bus=OpsEventBus(enabled=False),
+        session_termination=make_session_termination(
+            user_repo=UserRepository(session),
+            token_revocation=token_revocation,
+            session=session,
+            ops_event_bus=OpsEventBus(enabled=False),
+        ),
     )
 
 
@@ -218,10 +225,6 @@ async def _run_refresh(
     refresh token logout is racing. request.client is None so the ip
     lookup short-circuits without touching request.headers.get's return
     value for anything but user-agent."""
-    request = MagicMock()
-    request.headers.get.return_value = None
-    request.client = None
-
     async with (
         AsyncSession(bind=engine, expire_on_commit=False) as session,
         session.begin(),
@@ -231,7 +234,7 @@ async def _run_refresh(
         )
         response = await AuthController.refresh_tokens.fn(
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=RefreshTokenRequest(refresh_token=refresh_token),
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -325,8 +328,8 @@ class TestLogoutVsRefreshDeadlock:
 
 class TestLogoutVsLogoutAllDeadlock:
     """C1 variant — exercises the bulk revocation path
-    (AuthService.logout_all -> UserRepository.revoke_all_user_tokens)
-    rather than refresh_tokens' rotation path. revoke_all_user_tokens also
+    (AuthService.logout_all -> UserRepository.revoke_all_refresh_tokens)
+    rather than refresh_tokens' rotation path. revoke_all_refresh_tokens also
     locks the user row first, then bulk-UPDATEs every active refresh-token
     row for that user — including the one row single-device logout is
     revoking — so the same cycle risk applies.

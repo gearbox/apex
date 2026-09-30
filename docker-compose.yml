@@ -132,17 +132,17 @@ services:
       # Email Settings (Resend)
       RESEND_API_KEY: ${RESEND_API_KEY:-}
       EMAIL_FROM_ADDRESS: ${EMAIL_FROM_ADDRESS:-noreply@apex.ai}
-      EMAIL_FROM_NAME: ${EMAIL_FROM_NAME:-Apex}
       EMAIL_SEND_TIMEOUT_SECONDS: ${EMAIL_SEND_TIMEOUT_SECONDS:-10}
 
       # Redis
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
 
-      # App frontend URL (used for building verification/reset links)
-      APP_URL: ${APP_URL:-http://localhost:3000}
+      # Per-product frontend origins: verification/reset email links use the
+      # user's product (localhost defaults for dev; prod/staging overlays override)
+      APP_URL_VEX: ${APP_URL_VEX:-http://localhost:3000}
+      APP_URL_SYNTHARA: ${APP_URL_SYNTHARA:-http://localhost:3001}
 
-      # Branding
-      APP_NAME: ${APP_NAME:-Apex}
+      # Branding (email brand names come from the product registry's display_name)
       SUPPORT_EMAIL: ${SUPPORT_EMAIL:-support@apex.ai}
 
       # Telegram ops notifications (optional; bot token + Redis required to enable)

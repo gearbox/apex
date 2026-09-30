@@ -19,6 +19,7 @@ from src.db.models import User
 from src.db.repositories import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -102,6 +103,11 @@ def auth_service(
         password_service=password_service,
         token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
         session=mock_session,
+        session_termination=make_session_termination(
+            user_repo=mock_user_repository,
+            token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+            session=mock_session,
+        ),
     )
 
 
@@ -116,8 +122,11 @@ def user_service(
         repository=mock_user_repository,
         password_service=password_service,
         age_verification_service=AgeVerificationService(),
-        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
         identity_repository=AsyncMock(spec=UserIdentityRepository),
+        session_termination=make_session_termination(
+            user_repo=mock_user_repository,
+            token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+        ),
     )
 
 

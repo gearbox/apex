@@ -23,7 +23,7 @@ def _make_message(**kwargs: object) -> EmailMessage:
         html_body=str(kwargs.get("html_body", "<p>Hello</p>")),
         text_body=str(kwargs.get("text_body", "Hello")),
         from_address=kwargs.get("from_address"),  # type: ignore[arg-type]
-        from_name=kwargs.get("from_name"),  # type: ignore[arg-type]
+        from_name=kwargs.get("from_name", "Test"),  # type: ignore[arg-type]
         reply_to=kwargs.get("reply_to"),  # type: ignore[arg-type]
         tags=kwargs.get("tags"),  # type: ignore[arg-type]
     )
@@ -34,7 +34,6 @@ def svc() -> ResendEmailService:
     return ResendEmailService(
         api_key="re_test_key",
         from_address="noreply@example.com",
-        from_name="Test",
     )
 
 
@@ -107,6 +106,37 @@ class TestSend:
 
         params = sent.call_args[0][0]
         assert params["from"] == "Custom <custom@example.com>"
+
+    async def test_x2_b_from_field_is_built_from_the_message_name_and_global_address(
+        self, svc: ResendEmailService
+    ) -> None:
+        msg = _make_message(from_name="Synthara")
+
+        with patch("resend.Emails.send_async", new=AsyncMock(return_value={"id": "x2"})) as sent:
+            await svc.send(msg)
+
+        assert sent.call_args[0][0]["from"] == "Synthara <noreply@example.com>"
+
+    async def test_x2_b_missing_from_name_raises_and_sends_nothing(
+        self, svc: ResendEmailService
+    ) -> None:
+        msg = _make_message(from_name=None)
+
+        with (
+            patch("resend.Emails.send_async", new=AsyncMock()) as sent,
+            pytest.raises(ValueError, match="from_name"),
+        ):
+            await svc.send(msg)
+
+        sent.assert_not_awaited()
+
+    def test_x2_b_constructor_has_no_global_sender_name(self) -> None:
+        with pytest.raises(TypeError):
+            ResendEmailService(  # type: ignore[call-arg]
+                api_key="k",
+                from_address="a@b.com",
+                from_name="Apex",  # pyright: ignore[reportCallIssue]
+            )
 
     async def test_includes_reply_to_when_set(self, svc: ResendEmailService) -> None:
         msg = _make_message(reply_to="reply@example.com")

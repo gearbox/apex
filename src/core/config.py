@@ -799,16 +799,6 @@ class Settings(BaseSettings):
         ),
     )
 
-    # App URL (used for building verification / reset links)
-    app_url: str = Field(
-        default="http://localhost:3000",
-        description=(
-            "Base URL of the frontend application. "
-            "Used to build verification and password reset links. "
-            "Must be set to the real frontend URL in production."
-        ),
-    )
-
     # JWT Authentication Settings
     jwt_secret_key: str = Field(
         default="CHANGE_ME_IN_PRODUCTION_USE_STRONG_SECRET_KEY_256_BITS",
@@ -1335,10 +1325,6 @@ class Settings(BaseSettings):
         default="noreply@apex.ai",
         description="Sender email address. Must be verified in your Resend dashboard.",
     )
-    email_from_name: str = Field(
-        default="Apex",
-        description="Sender display name shown in email clients.",
-    )
     email_send_timeout_seconds: int = Field(
         default=10,
         gt=0,
@@ -1489,13 +1475,6 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
 
     # Branding
-    app_name: str = Field(
-        default="Apex",
-        description=(
-            "Public-facing product name used in emails and UI copy. "
-            "Override via APP_NAME env var when the brand/domain changes."
-        ),
-    )
     support_email: str = Field(
         default="support@apex.ai",
         description="Support email address shown in transactional emails.",

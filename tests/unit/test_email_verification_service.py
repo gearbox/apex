@@ -36,12 +36,19 @@ def _make_session() -> AsyncMock:
     return session
 
 
-def _make_user(user_id=None, email="user@example.com", display_name="Alice", locale="en"):
+_APP_URLS = {"vex": "https://vex.test", "synthara": "https://synthara.test"}
+_BRANDS = {"vex": "vex.pics", "synthara": "Synthara"}
+
+
+def _make_user(
+    user_id=None, email="user@example.com", display_name="Alice", locale="en", product_id="vex"
+):
     user = MagicMock()
     user.id = user_id or uuid4()
     user.email = email
     user.display_name = display_name
     user.locale = locale
+    user.product_id = product_id
     return user
 
 
@@ -52,8 +59,8 @@ def _make_svc(email_service=None, token_revocation_service=None):
         email_service.send_password_reset_email = AsyncMock()
     return EmailVerificationService(
         email_service=email_service,
-        app_url="https://app.example.com",
-        app_name="TestApp",
+        app_url_for=_APP_URLS.__getitem__,
+        brand_for=_BRANDS.__getitem__,
         session_termination_factory=make_session_termination_factory(
             token_revocation=(
                 token_revocation_service
@@ -178,7 +185,9 @@ class TestSendPasswordResetEmail:
             token_repo.create_reset_token = AsyncMock(return_value="reset-xyz")
             token_repo_cls.return_value = token_repo
 
-            await svc.send_password_reset_email(user.email, session=session, ip_address="1.2.3.4")
+            await svc.send_password_reset_email(
+                user.email, product_id="vex", session=session, ip_address="1.2.3.4"
+            )
 
         email_mock.send_password_reset_email.assert_awaited_once()
         call_kwargs = email_mock.send_password_reset_email.call_args.kwargs
@@ -195,7 +204,9 @@ class TestSendPasswordResetEmail:
             user_repo_cls.return_value = user_repo
 
             # Should not raise
-            await svc.send_password_reset_email("unknown@example.com", session=session)
+            await svc.send_password_reset_email(
+                "unknown@example.com", product_id="vex", session=session
+            )
 
         email_mock.send_password_reset_email.assert_not_awaited()
 
@@ -274,7 +285,8 @@ class TestResetPassword:
         factory = MagicMock(return_value=terminator)
         svc = EmailVerificationService(
             email_service=AsyncMock(),
-            app_url="https://app.example.com",
+            app_url_for=_APP_URLS.__getitem__,
+            brand_for=_BRANDS.__getitem__,
             session_termination_factory=factory,
         )
 
