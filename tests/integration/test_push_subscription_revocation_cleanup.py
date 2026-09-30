@@ -33,6 +33,7 @@ from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -104,6 +105,11 @@ class TestLogoutAllDeletesPushSubscriptions:
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
             session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+            ),
         )
 
         await auth_service.logout_all(user.id)
@@ -127,9 +133,12 @@ class TestChangePasswordDeletesPushSubscriptions:
             repository=UserRepository(db_session),
             password_service=password_service,
             age_verification_service=MagicMock(),
-            token_revocation_service=_noop_token_revocation(),
             identity_repository=UserIdentityRepository(db_session),
-            session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+            ),
         )
 
         await user_service.change_password(
@@ -154,9 +163,12 @@ class TestDeactivateAccountDeletesPushSubscriptions:
             repository=UserRepository(db_session),
             password_service=PasswordService(),
             age_verification_service=MagicMock(),
-            token_revocation_service=_noop_token_revocation(),
             identity_repository=UserIdentityRepository(db_session),
-            session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+            ),
         )
 
         await user_service.deactivate_account(
@@ -180,7 +192,8 @@ class TestResetPasswordDeletesPushSubscriptions:
 
         svc = EmailVerificationService(
             email_service=AsyncMock(),
-            app_url="https://app.example.com",
+            app_url_for=lambda _slug: "https://app.example.com",
+            brand_for=lambda _slug: "vex.pics",
             session_termination_factory=make_session_termination_factory(
                 token_revocation=_noop_token_revocation(),
                 ops_event_bus=OpsEventBus(enabled=False),
@@ -217,6 +230,11 @@ class TestTokenReuseDetectionDeletesPushSubscriptions:
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
             session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+            ),
         )
 
         with pytest.raises(TokenReuseDetectedError):
@@ -246,6 +264,11 @@ class TestSingleLogoutLeavesPushSubscriptionsIntact:
             password_service=PasswordService(),
             token_revocation_service=_noop_token_revocation(),
             session=db_session,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+            ),
         )
 
         result = await auth_service.logout(raw_token)
@@ -277,6 +300,12 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
             token_revocation_service=_noop_token_revocation(),
             session=db_session,
             ops_event_bus=ops_event_bus,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+                ops_event_bus=ops_event_bus,
+            ),
         )
 
         with patch.object(
@@ -319,10 +348,13 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
             repository=UserRepository(db_session),
             password_service=password_service,
             age_verification_service=MagicMock(),
-            token_revocation_service=_noop_token_revocation(),
             identity_repository=UserIdentityRepository(db_session),
-            session=db_session,
-            ops_event_bus=ops_event_bus,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(db_session),
+                token_revocation=_noop_token_revocation(),
+                session=db_session,
+                ops_event_bus=ops_event_bus,
+            ),
         )
 
         with patch.object(
@@ -353,7 +385,8 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
         ops_event_bus = AsyncMock()
         svc = EmailVerificationService(
             email_service=AsyncMock(),
-            app_url="https://app.example.com",
+            app_url_for=lambda _slug: "https://app.example.com",
+            brand_for=lambda _slug: "vex.pics",
             session_termination_factory=make_session_termination_factory(
                 token_revocation=_noop_token_revocation(), ops_event_bus=ops_event_bus
             ),

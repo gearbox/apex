@@ -17,6 +17,7 @@ import pytest
 from src.api.security import JWTConfig, JWTService, PasswordService
 from src.api.services.auth import AuthService
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
+from tests.revocation_support import make_session_termination
 
 pytestmark = pytest.mark.unit
 
@@ -33,6 +34,9 @@ def _service(epoch: int | None) -> tuple[AuthService, JWTService]:
         jwt_service=jwt_service,
         password_service=PasswordService(),
         token_revocation_service=token_revocation,
+        session_termination=make_session_termination(
+            user_repo=AsyncMock(), token_revocation=token_revocation
+        ),
     )
     return service, jwt_service
 

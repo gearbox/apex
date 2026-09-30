@@ -32,7 +32,7 @@ it. ``iat <= epoch`` is arithmetically identical to ``iat < epoch + 1``; it
 does not break re-login, it only refuses tokens minted inside the one-second
 tick containing the revocation, after which login proceeds normally. The
 client self-heals even in that tick: bulk revocation revokes refresh tokens
-through a separate DB-backed path (see ``UserRepository.revoke_all_user_tokens``),
+through a separate DB-backed path (see ``UserRepository.revoke_all_refresh_tokens``),
 so a fresh login yields a valid refresh token regardless, and if the paired
 access token happens to land in the rejected second, the existing 401->refresh
 middleware mints a replacement one second later — invisible to the user.
@@ -159,7 +159,7 @@ primary guarantee lives in ``UserRepository.lock_user_for_session_change``
 — a ``SELECT ... FOR UPDATE`` on the *user* row, acquired before either
 the refresh-token row lock (``AuthService.refresh_tokens``, before
 ``get_refresh_token_by_hash_for_update``) or a bulk revocation's UPDATE
-(``revoke_all_user_tokens``/``revoke_all_refresh_tokens``). See that
+(``revoke_all_refresh_tokens``). See that
 method's docstring for the full interleaving this closes and the required
 lock ordering (user row -> refresh-token row in *every* path that
 acquires both, or the two paths deadlock against each other). A row lock

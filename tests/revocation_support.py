@@ -9,9 +9,18 @@ clock simulating Redis ``TIME`` — consistent with this repo's other infra-free
 from __future__ import annotations
 
 import time
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock
 
 from redis.exceptions import NoScriptError
+
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import (
+    SessionTerminationFactory,
+    SessionTerminationService,
+    make_session_termination_factory,
+)
+from src.api.services.token_revocation import TokenRevocationService
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -64,3 +73,32 @@ class FakeRedis:
         now = int(self._clock())
         await self.set(key, now, ex=ttl)
         return now
+
+
+def make_session_termination(
+    *,
+    user_repo: Any,
+    token_revocation: TokenRevocationService,
+    session: Any | None = None,
+    ops_event_bus: OpsEventBus | None = None,
+) -> SessionTerminationService:
+    """A real ``SessionTerminationService`` over the collaborators a test already has.
+
+    ``AuthService``/``UserService`` require one (W1-C), so tests build it from the
+    same repository / revocation service / ops bus / session they hand the service —
+    the revoke-all sequence then runs against exactly the doubles the test asserts on.
+    """
+    return SessionTerminationService(
+        session=session if session is not None else AsyncMock(),
+        user_repo=user_repo,
+        token_revocation=token_revocation,
+        ops_event_bus=ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False),
+    )
+
+
+def make_session_termination_factory_noop() -> SessionTerminationFactory:
+    """A factory over a revocation service and ops bus that no-op (Redis unset, bus disabled)."""
+    return make_session_termination_factory(
+        token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+        ops_event_bus=OpsEventBus(enabled=False),
+    )

@@ -27,6 +27,7 @@ from tests.legal_support import (
     accept_all_current,
     make_legal_acceptance_service,
 )
+from tests.revocation_support import make_session_termination
 
 
 class TestOpsEventBus:
@@ -105,6 +106,12 @@ class TestAuthRegisterPublishesUserRegistered:
             token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
             ops_event_bus=ops_bus,
             session=session,
+            session_termination=make_session_termination(
+                user_repo=mock_repository,
+                token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                session=session,
+                ops_event_bus=ops_bus,
+            ),
         )
 
         await service.register(

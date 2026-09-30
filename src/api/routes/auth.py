@@ -270,34 +270,25 @@ class AuthController(Controller):
     @post("/login")
     async def login(
         self,
-        request: Request[Any, Any, Any],
         data: Annotated[LoginRequest, Body()],
         auth_service: AuthService,
         jwt_service: JWTService,
         product_id: str,
         product_config: ProductConfig,
         settings: Settings,
+        request_context: RequestContext,
     ) -> Response[TokenResponse | ErrorEnvelope]:
         """Authenticate user and return tokens.
 
         Returns access and refresh tokens for valid credentials.
         """
         try:
-            user_agent = request.headers.get("user-agent")
-            # Get client IP (considering proxy headers)
-            ip_address = (
-                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                or request.client.host
-                if request.client
-                else None
-            )
-
             user, tokens = await auth_service.login(
                 email=data.email,
                 password=data.password,
                 product_id=product_id,
-                user_agent=user_agent,
-                ip_address=ip_address,
+                user_agent=request_context.user_agent,
+                ip_address=request_context.ip_address,
             )
 
             response = build_token_response(
@@ -336,31 +327,23 @@ class AuthController(Controller):
     @post("/refresh")
     async def refresh_tokens(
         self,
-        request: Request[Any, Any, Any],
         data: Annotated[RefreshTokenRequest, Body()],
         auth_service: AuthService,
         jwt_service: JWTService,
         product_id: str,
         product_config: ProductConfig,
         settings: Settings,
+        request_context: RequestContext,
     ) -> Response[TokenResponse | ErrorEnvelope]:
         """Refresh access token using refresh token.
 
         Implements token rotation - old refresh token is invalidated.
         """
         try:
-            user_agent = request.headers.get("user-agent")
-            ip_address = (
-                request.headers.get("x-forwarded-for", "").split(",")[0].strip()
-                or request.client.host
-                if request.client
-                else None
-            )
-
             tokens, user_id = await auth_service.refresh_tokens(
                 data.refresh_token,
-                user_agent=user_agent,
-                ip_address=ip_address,
+                user_agent=request_context.user_agent,
+                ip_address=request_context.ip_address,
             )
 
             response = build_token_response(
@@ -488,26 +471,26 @@ class AuthController(Controller):
     @post("/forgot-password")
     async def forgot_password(
         self,
-        request: Request[Any, Any, Any],
         data: Annotated[ForgotPasswordRequest, Body()],
         session: AsyncSession,
         email_verification_service: EmailVerificationService,
+        product_config: ProductConfig,
+        request_context: RequestContext,
     ) -> Response[MessageResponse]:
         """Request a password reset email.
 
         **Always returns 200** — does not reveal whether the email is registered.
-        The reset link expires in 30 minutes.
+        Only the account on the requesting product is considered, so the same
+        address registered on another product is never emailed (or mistaken for
+        this one). The reset link expires in 30 minutes.
         """
-        ip_address = request.headers.get("x-forwarded-for", "").split(",")[0].strip() or (
-            request.client.host if request.client else None
-        )
-
         # Fire and forget — any error is logged inside the service
         try:
             await email_verification_service.send_password_reset_email(
                 data.email,
+                product_id=product_config.slug,
                 session=session,
-                ip_address=ip_address,
+                ip_address=request_context.ip_address,
             )
             await session.commit()
         except Exception:

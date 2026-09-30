@@ -24,6 +24,8 @@ from litestar.exceptions import (
 from litestar.response import Response, ServerSentEvent, Stream
 from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
+from tests.legal_support import TEST_REQUEST_CONTEXT
+
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator, Sequence
 
@@ -1614,10 +1616,6 @@ class TestAuthRouteHandlers:
         data = MagicMock()
         data.email = "u@e.com"
         data.password = "pw"
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = MagicMock()
-        request.client.host = "127.0.0.1"
         jwt_service = MagicMock()
         jwt_service.create_content_token.return_value = ("content_tok", None)
         product_config = MagicMock()
@@ -1628,7 +1626,7 @@ class TestAuthRouteHandlers:
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1645,16 +1643,13 @@ class TestAuthRouteHandlers:
         auth_service = AsyncMock()
         auth_service.login = AsyncMock(side_effect=InvalidCredentialsError("bad"))
         data = MagicMock()
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         product_config = MagicMock()
         settings = MagicMock()
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1671,16 +1666,13 @@ class TestAuthRouteHandlers:
         auth_service = AsyncMock()
         auth_service.login = AsyncMock(side_effect=UserInactiveError("inactive"))
         data = MagicMock()
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         product_config = MagicMock()
         settings = MagicMock()
 
         response = await AuthController.login.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1702,9 +1694,6 @@ class TestAuthRouteHandlers:
         auth_service.refresh_tokens = AsyncMock(return_value=(tokens, "user-uuid-123"))
         data = MagicMock()
         data.refresh_token = "old_ref"
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         jwt_service.decode_access_token.return_value = None  # skip cookie on MagicMock token
         jwt_service.create_content_token.return_value = ("content_token", None)
@@ -1716,7 +1705,7 @@ class TestAuthRouteHandlers:
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1733,16 +1722,13 @@ class TestAuthRouteHandlers:
         auth_service = AsyncMock()
         auth_service.refresh_tokens = AsyncMock(side_effect=InvalidRefreshTokenError("bad"))
         data = MagicMock()
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         product_config = MagicMock()
         settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1759,16 +1745,13 @@ class TestAuthRouteHandlers:
         auth_service = AsyncMock()
         auth_service.refresh_tokens = AsyncMock(side_effect=TokenReuseDetectedError("reuse"))
         data = MagicMock()
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         product_config = MagicMock()
         settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1785,16 +1768,13 @@ class TestAuthRouteHandlers:
         auth_service = AsyncMock()
         auth_service.refresh_tokens = AsyncMock(side_effect=UserInactiveError("inactive"))
         data = MagicMock()
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = None
         jwt_service = MagicMock()
         product_config = MagicMock()
         settings = MagicMock()
 
         response = await AuthController.refresh_tokens.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             auth_service=auth_service,
             jwt_service=jwt_service,
@@ -1953,16 +1933,17 @@ class TestAuthRouteHandlers:
         svc.send_password_reset_email = AsyncMock()
         data = MagicMock()
         data.email = "u@e.com"
-        request = MagicMock()
-        request.headers.get.return_value = "1.2.3.4"
-        request.client = None
+
+        product_config = MagicMock()
+        product_config.slug = "vex"
 
         response = await AuthController.forgot_password.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             session=session,
             email_verification_service=svc,
+            product_config=product_config,
         )
         assert response.status_code == 200
 
@@ -1974,17 +1955,17 @@ class TestAuthRouteHandlers:
         svc.send_password_reset_email = AsyncMock(side_effect=Exception("fail"))
         data = MagicMock()
         data.email = "u@e.com"
-        request = MagicMock()
-        request.headers.get.return_value = ""
-        request.client = MagicMock()
-        request.client.host = "127.0.0.1"
+
+        product_config = MagicMock()
+        product_config.slug = "vex"
 
         response = await AuthController.forgot_password.fn(  # type: ignore[attr-defined]
             MagicMock(),
-            request=request,
+            request_context=TEST_REQUEST_CONTEXT,
             data=data,
             session=session,
             email_verification_service=svc,
+            product_config=product_config,
         )
         assert response.status_code == 200
 

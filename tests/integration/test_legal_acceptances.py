@@ -44,6 +44,7 @@ from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.integration.pg_locks import wait_for_advisory_lock_waiter
 from tests.legal_support import accept_all_current, make_legal_document, make_legal_registry
+from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -83,6 +84,11 @@ def _auth(
         token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
         legal_acceptance_service=_legal(session, registry),
         session=session,
+        session_termination=make_session_termination(
+            user_repo=UserRepository(session),
+            token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+            session=session,
+        ),
     )
 
 
@@ -146,10 +152,13 @@ def _user_service(session: AsyncSession, registry: LegalDocumentRegistry) -> Use
         repository=UserRepository(session),
         password_service=PasswordService(),
         age_verification_service=MagicMock(),
-        token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
         legal_acceptance_service=_legal(session, registry),
         identity_repository=UserIdentityRepository(session),
-        session=session,
+        session_termination=make_session_termination(
+            user_repo=UserRepository(session),
+            token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+            session=session,
+        ),
     )
 
 

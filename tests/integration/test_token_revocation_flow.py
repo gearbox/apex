@@ -47,6 +47,7 @@ from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
 from tests.legal_support import TEST_REQUEST_CONTEXT, make_legal_acceptance_service
 from tests.revocation_support import FakeRedis as _FakeRedis
+from tests.revocation_support import make_session_termination
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
 PRODUCT_ID = "vex"
@@ -60,7 +61,7 @@ _NEXT_SECOND_GAP = 1.1
 
 def _make_repo() -> AsyncMock:
     repo = AsyncMock()
-    repo.revoke_all_user_tokens.return_value = 1
+    repo.revoke_all_refresh_tokens.return_value = 1
     repo.get_refresh_token_by_hash.return_value = None
     repo.get_refresh_token_owner.return_value = None
     repo.get_refresh_token_by_hash_for_update.return_value = None
@@ -174,6 +175,9 @@ class TestSameSecondRevocationIsRejected:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         await auth_service.logout_all(user_id)
 
@@ -204,6 +208,9 @@ class TestLogoutAllRevokesAccessTokens:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         logout_all_response = await UserController.logout_all.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -236,6 +243,9 @@ class TestLogoutAllRevokesAccessTokens:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         await auth_service.logout_all(user_id)
 
@@ -271,8 +281,10 @@ class TestChangePasswordRevokesAccessTokens:
             repository=repo,
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
-            token_revocation_service=token_revocation,
             identity_repository=AsyncMock(spec=UserIdentityRepository),
+            session_termination=make_session_termination(
+                user_repo=repo, token_revocation=token_revocation
+            ),
         )
         data = MagicMock()
         data.current_password = "old"
@@ -311,8 +323,10 @@ class TestDeactivateAccountRevokesAccessTokens:
             repository=repo,
             password_service=_make_password_service(),
             age_verification_service=MagicMock(),
-            token_revocation_service=token_revocation,
             identity_repository=AsyncMock(spec=UserIdentityRepository),
+            session_termination=make_session_termination(
+                user_repo=repo, token_revocation=token_revocation
+            ),
         )
         delete_account_response = await UserController.delete_account.fn(  # type: ignore[attr-defined]
             MagicMock(),
@@ -359,6 +373,9 @@ class TestSingleDeviceLogoutDenylistsOnlyThatToken:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         request = MagicMock()
         request.headers.get.return_value = f"Bearer {device_a_token}"
@@ -415,6 +432,9 @@ class TestUnknownRefreshTokenLogoutStillPurgesCache:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
 
         request = MagicMock()
@@ -463,6 +483,9 @@ class TestContentCookieRevokedByLogoutAll:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         await auth_service.logout_all(user_id)
 
@@ -477,7 +500,8 @@ def _make_email_verification_service(
     email_service = AsyncMock()
     return EmailVerificationService(
         email_service=email_service,
-        app_url="https://app.example.com",
+        app_url_for=lambda _slug: "https://app.example.com",
+        brand_for=lambda _slug: "vex.pics",
         session_termination_factory=make_session_termination_factory(
             token_revocation=token_revocation, ops_event_bus=OpsEventBus(enabled=False)
         ),
@@ -577,6 +601,9 @@ class TestTokenReuseDetectionRevokesAccessTokens:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=repo, token_revocation=token_revocation
+            ),
         )
 
         with pytest.raises(TokenReuseDetectedError):
@@ -614,6 +641,9 @@ class TestOptionalAuthGuardRevocation:
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=_make_repo(), token_revocation=token_revocation
+            ),
         )
         await auth_service.logout_all(user_id)
 
@@ -680,6 +710,9 @@ async def _attempt_refresh(
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(session), token_revocation=token_revocation
+            ),
         )
         try:
             tokens, _uid = await auth_service.refresh_tokens(raw_refresh_token)
@@ -713,6 +746,9 @@ async def _attempt_logout_all(
             jwt_service=jwt_service,
             password_service=_make_password_service(),
             token_revocation_service=token_revocation,
+            session_termination=make_session_termination(
+                user_repo=UserRepository(session), token_revocation=token_revocation
+            ),
         )
         await auth_service.logout_all(user_id)
 

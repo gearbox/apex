@@ -66,7 +66,7 @@ class EmailService(ABC):
         verification_url: str,
         expires_hours: int = 24,
         locale: str = "en",
-        app_name: str = "Apex",
+        app_name: str,
     ) -> None:
         """Send an email verification message.
 
@@ -104,7 +104,7 @@ class EmailService(ABC):
         reset_url: str,
         expires_minutes: int = 30,
         locale: str = "en",
-        app_name: str = "Apex",
+        app_name: str,
     ) -> None:
         """Send a password reset email.
 
