@@ -58,9 +58,8 @@ class TestTerminateAll:
         ):
             result = await service.terminate_all(user_id, op="reset_password", source="email")
 
-        assert result == SessionTerminationResult(
-            revoked_refresh_tokens=3, bulk_access_revoked=True
-        )
+        assert result == SessionTerminationResult(revoked_refresh_tokens=3, epoch=1_800_000_000)
+        assert result.bulk_access_revoked is True
         names = [c[0] for c in calls.mock_calls]
         assert names == ["lock", "revoke_refresh", "epoch", "push"]
         calls.lock.assert_awaited_once_with(user_id)
@@ -107,3 +106,25 @@ class TestTerminateAll:
 
         assert result.bulk_access_revoked is False
         calls.report.assert_not_awaited()
+
+
+class TestResultEpoch:
+    """V1-g — the result exposes the written epoch; ``bulk_access_revoked`` derives from it."""
+
+    @pytest.mark.parametrize(("epoch", "expected"), [(1_800_000_000, True), (None, False)])
+    def test_v1_g_bulk_access_revoked_equals_epoch_is_not_none(
+        self, epoch: int | None, expected: bool
+    ) -> None:
+        result = SessionTerminationResult(revoked_refresh_tokens=0, epoch=epoch)
+        assert result.bulk_access_revoked is expected
+
+    @pytest.mark.parametrize("epoch", [1_800_000_000, None])
+    async def test_v1_g_terminate_all_carries_the_written_epoch(self, epoch: int | None) -> None:
+        service, calls = _harness(epoch=epoch)
+        with patch(
+            "src.api.services.session_termination.delete_user_push_subscriptions",
+            new=_push_cleanup(calls),
+        ):
+            result = await service.terminate_all(uuid4(), op="reset_password", source="email")
+        assert result.epoch == epoch
+        assert result.bulk_access_revoked is (epoch is not None)

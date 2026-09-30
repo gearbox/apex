@@ -36,6 +36,8 @@ from src.api.security import auth_guard, content_auth_guard, hash_token, optiona
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.auth import AuthService, InvalidRefreshTokenError, TokenReuseDetectedError
 from src.api.services.email_verification import EmailVerificationService
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import make_session_termination_factory
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.product_registry import VEX_CONFIG
@@ -476,7 +478,9 @@ def _make_email_verification_service(
     return EmailVerificationService(
         email_service=email_service,
         app_url="https://app.example.com",
-        token_revocation_service=token_revocation,
+        session_termination_factory=make_session_termination_factory(
+            token_revocation=token_revocation, ops_event_bus=OpsEventBus(enabled=False)
+        ),
     )
 
 

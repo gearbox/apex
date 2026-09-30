@@ -17,8 +17,6 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.services.ops_event_bus import OpsEventBus
-from src.api.services.session_termination import SessionTerminationService
 from src.db.repositories.auth_tokens import AuthTokenRepository
 from src.db.repositories.user import UserRepository
 
@@ -28,7 +26,7 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.email import EmailService
-    from src.api.services.token_revocation import TokenRevocationService
+    from src.api.services.session_termination import SessionTerminationFactory
     from src.db.models.user import User
 
 logger = structlog.get_logger(__name__)
@@ -63,9 +61,8 @@ class EmailVerificationService:
         *,
         email_service: EmailService,
         app_url: str,
-        token_revocation_service: TokenRevocationService,
+        session_termination_factory: SessionTerminationFactory,
         app_name: str = "Apex",
-        ops_event_bus: OpsEventBus | None = None,
     ) -> None:
         """Initialise the service.
 
@@ -73,30 +70,21 @@ class EmailVerificationService:
             email_service: Provider that actually sends emails.
             app_url: Base URL of the frontend app, e.g. ``https://app.apex.ai``.
                      Used to build verification/reset links.
-            token_revocation_service: Bulk-revokes access tokens/content
-                cookies on password reset (see
-                src.api.services.token_revocation) — the account-recovery
-                path a user reaches because they believe their account is
-                compromised, so it must invalidate live credentials, not
-                just refresh tokens. Required — callers that intentionally
-                want revocation to no-op (tests, older call sites) must pass
-                an explicit
-                ``TokenRevocationService(None, max_token_ttl_seconds=0)`` so
-                the choice is visible rather than a silent default (issue
-                #142 A1).
+            session_termination_factory: Builds the session-bound
+                :class:`~src.api.services.session_termination.SessionTerminationService`
+                used on password reset — the account-recovery path a user
+                reaches because they believe their account is compromised, so
+                it must invalidate live credentials (refresh tokens, access
+                tokens/content cookies, push subscriptions), not just refresh
+                tokens. Required so the choice is visible; tests that want
+                revocation to no-op pass a factory over
+                ``TokenRevocationService(None, max_token_ttl_seconds=0)``.
             app_name: Public-facing product name for email branding.
-            ops_event_bus: Publishes an alert when a bulk access-token
-                revocation write fails against a configured Redis (issue
-                #142 F5). Defaults to a disabled bus so callers that don't
-                wire one (tests, older call sites) simply skip publishing.
         """
         self._email = email_service
         self._app_url = app_url.rstrip("/")
         self._app_name = app_name
-        self._token_revocation = token_revocation_service
-        self._ops_event_bus = (
-            ops_event_bus if ops_event_bus is not None else OpsEventBus(enabled=False)
-        )
+        self._session_termination = session_termination_factory
 
     # -------------------------------------------------------------------------
     # Email verification
@@ -278,12 +266,9 @@ class EmailVerificationService:
         # devices) and live access tokens/content cookies (issue #142), so a
         # stolen access token doesn't survive a reset for its remaining
         # lifetime. Never blocks the reset on a cache outage (F5).
-        terminated = await SessionTerminationService(
-            session=session,
-            user_repo=user_repo,
-            token_revocation=self._token_revocation,
-            ops_event_bus=self._ops_event_bus,
-        ).terminate_all(user_id, op="reset_password", source="email")
+        terminated = await self._session_termination(session, user_repo).terminate_all(
+            user_id, op="reset_password", source="email"
+        )
         logger.info(
             "email.password_reset_done",
             user_id=str(user_id),

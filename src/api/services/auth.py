@@ -367,7 +367,12 @@ class AuthService:
         return user
 
     async def issue_session(
-        self, user_id: UUID, *, product_id: str, context: RequestContext
+        self,
+        user_id: UUID,
+        *,
+        product_id: str,
+        context: RequestContext,
+        not_before_epoch: int | None = None,
     ) -> TokenPair:
         """Mint a fresh access/refresh token pair (new family) for a user.
 
@@ -379,11 +384,14 @@ class AuthService:
             user_id: The authenticated user.
             product_id: Product scope to embed in the JWT.
             context: Client IP / user agent recorded on the refresh-token row.
+            not_before_epoch: A revocation epoch the caller knows it just wrote
+                (OAuth claim); the token is minted strictly after it even if the
+                Redis epoch read is indeterminate.
 
         Returns:
             The new token pair.
         """
-        await self._wait_out_revocation_second(user_id)
+        await self._wait_out_revocation_second(user_id, not_before_epoch)
         tokens, _refresh_token_id = await self._create_token_pair(
             user_id,
             product_id=product_id,
@@ -393,7 +401,9 @@ class AuthService:
         )
         return tokens
 
-    async def _wait_out_revocation_second(self, user_id: UUID) -> None:
+    async def _wait_out_revocation_second(
+        self, user_id: UUID, not_before_epoch: int | None = None
+    ) -> None:
         """Don't mint into the second of a just-written revocation epoch.
 
         Access tokens are rejected when ``iat <= epoch`` and both are whole
@@ -406,10 +416,20 @@ class AuthService:
         A future ``iat`` is deliberately not used instead: PyJWT rejects a token
         whose ``iat`` is in the future. Password login is left alone — human
         timing makes a same-second clash implausible.
+
+        ``get_current_epoch`` returns ``None`` for "no key", "Redis unset", "breaker
+        open" and "read failed" alike, while the revocation write bypasses the
+        breaker — so a ``None`` read cannot prove no revocation happened. The
+        caller that just wrote an epoch passes it as ``not_before_epoch``; the wait
+        uses the larger of that and the read. The read stays as a fallback for a
+        revocation made elsewhere (e.g. a password reset in another tab), but it
+        can no longer cancel a wait the claim proved is needed.
         """
-        epoch = await self._token_revocation.get_current_epoch(user_id)
-        if epoch is None:
+        read = await self._token_revocation.get_current_epoch(user_id)
+        known = [e for e in (not_before_epoch, read) if e is not None]
+        if not known:
             return
+        epoch = max(known)
         # The epoch is Redis's clock, this is the app clock; skew is bounded by
         # the cap, and the margin absorbs timer granularity (iat is truncated).
         wait = (epoch + 1) - time.time() + _EPOCH_WAIT_MARGIN_S

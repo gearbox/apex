@@ -242,8 +242,11 @@ class OAuthService:
         #    never-verified local account is claimed, not rejected (D5').
         local = await self._users.get_active_user_by_email(identity.email, product_id=product.slug)
         if local is not None:
-            await self._link_existing(local, identity, product)
-            return LoginOutcome(user_id=local.id), flow.return_to
+            not_before_epoch = await self._link_existing(local, identity, product)
+            return (
+                LoginOutcome(user_id=local.id, not_before_epoch=not_before_epoch),
+                flow.return_to,
+            )
 
         # 5. Unknown identity → two-step signup. No DB writes.
         logger.info("auth.oauth.signup_pending", product_id=product.slug, provider=provider.value)
@@ -270,7 +273,8 @@ class OAuthService:
 
     async def _link_existing(
         self, local: User, identity: VerifiedIdentity, product: ProductConfig
-    ) -> None:
+    ) -> int | None:
+        """Link the identity to ``local``; return the claim's revocation epoch, if any."""
         # Conflict first (D5'-b): claiming before this check would wipe the
         # password of an account we are about to reject.
         if await self._identities.get_for_user(user_id=local.id, provider=identity.provider):
@@ -280,15 +284,17 @@ class OAuthService:
                 provider=identity.provider.value,
             )
             raise IdentityConflictError
+        not_before_epoch: int | None = None
         if local.email_verified_at is None:
-            await self._claim_unverified(local, identity)
+            not_before_epoch = await self._claim_unverified(local, identity)
         linked = await self._add_identity(local.id, identity, product)
         await self._identities.touch_last_login(linked)
         logger.info(
             "auth.oauth.identity_linked", user_id=str(local.id), provider=identity.provider.value
         )
+        return not_before_epoch
 
-    async def _claim_unverified(self, local: User, identity: VerifiedIdentity) -> None:
+    async def _claim_unverified(self, local: User, identity: VerifiedIdentity) -> int | None:
         """D5' — the provider proved inbox ownership of a never-verified local account.
 
         Someone may have registered this email without owning the inbox
@@ -297,6 +303,11 @@ class OAuthService:
         signed in by the caller and can add a password later. Runs in the
         callback's transaction, before its commit — a failed commit only signs
         the user out (fails safe).
+
+        Returns:
+            The revocation epoch written by ``terminate_all``, carried through the
+            handoff so ``/exchange`` can wait it out without re-reading Redis;
+            ``None`` when the race was lost or the epoch write failed.
         """
         had_password = local.password_hash is not None
         if not await self._users.claim_unverified_email(local.id):
@@ -307,14 +318,17 @@ class OAuthService:
                 user_id=str(local.id),
                 provider=identity.provider.value,
             )
-            return
-        await self._sessions.terminate_all(local.id, op="oauth_claim_unverified", source="oauth")
+            return None
+        result = await self._sessions.terminate_all(
+            local.id, op="oauth_claim_unverified", source="oauth"
+        )
         logger.info(
             "auth.oauth.unverified_account_claimed",
             user_id=str(local.id),
             provider=identity.provider.value,
             had_password=had_password,
         )
+        return result.epoch
 
     async def _add_identity(
         self, user_id: UUID, identity: VerifiedIdentity, product: ProductConfig
@@ -358,13 +372,16 @@ class OAuthService:
         params: dict[str, str]
         binding_max_age: int
         match outcome:
-            case LoginOutcome(user_id=user_id):
+            case LoginOutcome(user_id=user_id, not_before_epoch=not_before_epoch):
                 code = generate_opaque_token()
                 binding_max_age = self._settings.oauth_handoff_ttl_seconds
                 await self._store.put_handoff(
                     code,
                     OAuthHandoff(
-                        product_id=product.slug, user_id=user_id, binding_hash=binding_hash(binding)
+                        product_id=product.slug,
+                        user_id=user_id,
+                        binding_hash=binding_hash(binding),
+                        not_before_epoch=not_before_epoch,
                     ),
                     binding_max_age,
                 )
@@ -432,7 +449,12 @@ class OAuthService:
         user = await self._users.get_active_user(handoff.user_id)
         if user is None:
             raise AccountInactiveError
-        tokens = await self._auth.issue_session(user.id, product_id=product.slug, context=context)
+        tokens = await self._auth.issue_session(
+            user.id,
+            product_id=product.slug,
+            context=context,
+            not_before_epoch=handoff.not_before_epoch,
+        )
         logger.info("auth.oauth.login_completed", user_id=str(user.id))
         return user.id, tokens
 

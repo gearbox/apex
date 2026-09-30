@@ -20,6 +20,7 @@ from __future__ import annotations
 import asyncio
 import importlib.util
 import os
+import time
 from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Any, cast
@@ -67,7 +68,11 @@ from src.api.services.oauth.errors import InvalidSignupTicketError
 from src.api.services.oauth.flow_store import RedisOAuthFlowStore
 from src.api.services.oauth.models import PendingSignup
 from src.api.services.oauth.service import OAuthService
-from src.api.services.session_termination import SessionTerminationService
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import (
+    SessionTerminationService,
+    make_session_termination_factory,
+)
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.enums import LegalAcceptanceSource, RefreshTokenRevocationReason
@@ -991,6 +996,43 @@ class TestClaimUnverifiedAccount:
         assert fresh.json() == {"user_id": str(user.id)}
         assert stale.status_code == 401
 
+    async def test_v1_f_exchange_with_an_indeterminate_epoch_read_is_not_born_revoked(
+        self, db_session: AsyncSession, make_user: UserFactory, revocation: TokenRevocationService
+    ) -> None:
+        """V1-f — breaker open at /exchange (epoch read → None) must not skip the post-claim wait.
+
+        ``revoke_user_sessions`` (the claim's write) bypasses the breaker, so the epoch lands
+        while ``get_current_epoch`` reads ``None``. The handoff carries the written epoch, so
+        the token is still minted strictly after it and works once reads recover.
+        """
+        user = await self._unverified_user(make_user)
+        flow = Flow(db_session, token_revocation=revocation)
+        # Start early in a wall-clock second so claim and exchange share it — otherwise a
+        # second rollover between them would hide the defect on the pre-fix code.
+        if (fraction := time.time() % 1) > 0.3:
+            await asyncio.sleep(1.0 - fraction + 0.02)
+
+        async with flow.client() as client:
+            frag = await flow.callback(client)
+            assert frag["result"] == "login"
+            # Breaker open for the exchange only; restored before the guarded call.
+            with patch.object(revocation._breaker, "allow_request", return_value=False):
+                assert await revocation.get_current_epoch(user.id) is None  # premise
+                exchanged = await client.post(
+                    "/v1/auth/oauth/exchange", json={"code": frag["code"]}, headers=VEX
+                )
+            assert exchanged.status_code == 200, exchanged.text
+            access_token = exchanged.json()["access_token"]
+            guarded = await client.get("/ping", headers=self._bearer(access_token))
+
+        epoch = await revocation.get_current_epoch(user.id)
+        assert epoch is not None  # the claim's write landed
+        payload = flow.jwt.decode_access_token(access_token)
+        assert payload is not None
+        assert payload.iat > epoch
+        assert guarded.status_code == 200, guarded.text
+        assert guarded.json() == {"user_id": str(user.id)}
+
 
 class TestCallbackRejections:
     """I4 — every broken flow redirects with flow_expired, and the provider is never called."""
@@ -1089,7 +1131,10 @@ class TestResetPasswordVerifiesEmail:
         return EmailVerificationService(
             email_service=MagicMock(),
             app_url="https://vex.test",
-            token_revocation_service=TokenRevocationService(None, max_token_ttl_seconds=0),
+            session_termination_factory=make_session_termination_factory(
+                token_revocation=TokenRevocationService(None, max_token_ttl_seconds=0),
+                ops_event_bus=OpsEventBus(enabled=False),
+            ),
         )
 
     async def test_sets_when_null(

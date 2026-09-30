@@ -13,6 +13,7 @@ was signed out (fails safe).
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import TYPE_CHECKING
 
@@ -42,8 +43,14 @@ class SessionTerminationResult:
     """Outcome of :meth:`SessionTerminationService.terminate_all`."""
 
     revoked_refresh_tokens: int
-    bulk_access_revoked: bool
-    """False when the Redis epoch write failed *or* Redis is not configured."""
+    epoch: int | None
+    """Redis-clock second written as the revocation epoch; ``None`` when the write
+    failed *or* Redis is not configured."""
+
+    @property
+    def bulk_access_revoked(self) -> bool:
+        """False when the Redis epoch write failed *or* Redis is not configured."""
+        return self.epoch is not None
 
 
 class SessionTerminationService:
@@ -85,23 +92,20 @@ class SessionTerminationService:
             source: Log-event-name prefix of the caller, e.g. ``"email"``, ``"oauth"``.
 
         Returns:
-            How many refresh tokens were revoked and whether the bulk
-            access-token revocation landed.
+            How many refresh tokens were revoked and the epoch written for the
+            bulk access-token revocation (``None`` if it did not land).
         """
         # Issue #142 G1: user row first, then refresh-token rows, in every path.
         await self._users.lock_user_for_session_change(user_id)
         revoked = await self._users.revoke_all_refresh_tokens(user_id)
         epoch = await self._token_revocation.revoke_user_sessions(user_id)
-        bulk_access_revoked = epoch is not None
         await self._report_revocation_outcome(
-            bulk_access_revoked=bulk_access_revoked, user_id=user_id, op=op, source=source
+            bulk_access_revoked=epoch is not None, user_id=user_id, op=op, source=source
         )
         await delete_user_push_subscriptions(
             self._session, self._ops_event_bus, user_id=user_id, op=op, source=source
         )
-        return SessionTerminationResult(
-            revoked_refresh_tokens=revoked, bulk_access_revoked=bulk_access_revoked
-        )
+        return SessionTerminationResult(revoked_refresh_tokens=revoked, epoch=epoch)
 
     async def _report_revocation_outcome(
         self, *, bulk_access_revoked: bool, user_id: UUID, op: str, source: str
@@ -122,3 +126,31 @@ class SessionTerminationService:
             product_id=PLATFORM_PRODUCT_ID,
             payload=TokenRevocationFailedOpsPayload(user_id=user_id, op=op),
         )
+
+
+SessionTerminationFactory = Callable[["AsyncSession", "UserRepository"], SessionTerminationService]
+"""Builds a session-bound :class:`SessionTerminationService` for a caller-owned session.
+
+Process-wide singletons (which cannot hold a request-scoped instance) take this
+instead of constructing the service inline, so the dependency is visible in their
+constructor and substitutable in tests.
+"""
+
+
+def make_session_termination_factory(
+    *, token_revocation: TokenRevocationService, ops_event_bus: OpsEventBus
+) -> SessionTerminationFactory:
+    """Build the factory closed over the shared revocation service and ops bus.
+
+    The single construction rule for :class:`SessionTerminationService`.
+    """
+
+    def factory(session: AsyncSession, user_repo: UserRepository) -> SessionTerminationService:
+        return SessionTerminationService(
+            session=session,
+            user_repo=user_repo,
+            token_revocation=token_revocation,
+            ops_event_bus=ops_event_bus,
+        )
+
+    return factory

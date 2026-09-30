@@ -12,6 +12,11 @@ from src.api.services.email_verification import (
     InvalidTokenError,
     UserNotFoundError,
 )
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import (
+    SessionTerminationResult,
+    make_session_termination_factory,
+)
 from src.api.services.token_revocation import TokenRevocationService
 
 pytestmark = [pytest.mark.unit, pytest.mark.asyncio]
@@ -49,10 +54,13 @@ def _make_svc(email_service=None, token_revocation_service=None):
         email_service=email_service,
         app_url="https://app.example.com",
         app_name="TestApp",
-        token_revocation_service=(
-            token_revocation_service
-            if token_revocation_service is not None
-            else TokenRevocationService(None, max_token_ttl_seconds=0)
+        session_termination_factory=make_session_termination_factory(
+            token_revocation=(
+                token_revocation_service
+                if token_revocation_service is not None
+                else TokenRevocationService(None, max_token_ttl_seconds=0)
+            ),
+            ops_event_bus=OpsEventBus(enabled=False),
         ),
     )
 
@@ -254,6 +262,43 @@ class TestResetPassword:
             await svc.reset_password("token", "new_password", session=session)
 
         mock_token_revocation.revoke_user_sessions.assert_awaited_once_with(user.id)
+
+    async def test_v2_a_terminates_sessions_through_the_injected_factory(self) -> None:
+        """V2-a — reset_password uses the injected factory: same session, one terminate_all."""
+        user = _make_user()
+        session = _make_session()
+        terminator = MagicMock()
+        terminator.terminate_all = AsyncMock(
+            return_value=SessionTerminationResult(revoked_refresh_tokens=2, epoch=1_800_000_000)
+        )
+        factory = MagicMock(return_value=terminator)
+        svc = EmailVerificationService(
+            email_service=AsyncMock(),
+            app_url="https://app.example.com",
+            session_termination_factory=factory,
+        )
+
+        with (
+            patch("src.api.services.email_verification.UserRepository") as user_repo_cls,
+            patch("src.api.services.email_verification.AuthTokenRepository") as token_repo_cls,
+            patch("src.api.security.PasswordService") as pwd_cls,
+        ):
+            token_repo = AsyncMock()
+            token_repo.consume_reset_token = AsyncMock(return_value=user.id)
+            token_repo_cls.return_value = token_repo
+            user_repo = AsyncMock()
+            user_repo.update_user = AsyncMock(return_value=user)
+            user_repo_cls.return_value = user_repo
+            pwd_instance = MagicMock()
+            pwd_instance.ahash = AsyncMock(return_value="hashed_pw")
+            pwd_cls.return_value = pwd_instance
+
+            await svc.reset_password("token", "new_password", session=session)
+
+        factory.assert_called_once_with(session, user_repo)
+        terminator.terminate_all.assert_awaited_once_with(
+            user.id, op="reset_password", source="email"
+        )
 
     async def test_raises_invalid_token_on_bad_token(self) -> None:
         session = AsyncMock()

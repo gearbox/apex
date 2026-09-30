@@ -37,8 +37,13 @@ def _service(epoch: int | None) -> tuple[AuthService, JWTService]:
     return service, jwt_service
 
 
-async def _issue(service: AuthService) -> None:
-    await service.issue_session(uuid4(), product_id="vex", context=TEST_REQUEST_CONTEXT)
+async def _issue(service: AuthService, *, not_before_epoch: int | None = None) -> None:
+    await service.issue_session(
+        uuid4(),
+        product_id="vex",
+        context=TEST_REQUEST_CONTEXT,
+        not_before_epoch=not_before_epoch,
+    )
 
 
 class TestSleepBounds:
@@ -93,3 +98,67 @@ class TestMintedAfterEpoch:
         payload = jwt_service.decode_access_token(tokens.access_token)
         assert payload is not None
         assert payload.iat > epoch  # the revocation rule is `iat <= epoch`
+
+
+class TestNotBeforeEpoch:
+    """V1 — the claim's own epoch cannot be cancelled by an indeterminate epoch read."""
+
+    async def test_v1_a_known_epoch_waits_even_when_the_read_is_none(self) -> None:
+        """Breaker open / read failed ⇒ ``get_current_epoch`` is None; the wait still happens."""
+        service, _ = _service(None)
+        with (
+            patch("src.api.services.auth.time.time", return_value=_EPOCH + 0.2),
+            patch("src.api.services.auth.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await _issue(service, not_before_epoch=_EPOCH)
+        sleep.assert_awaited_once()
+        (wait,) = sleep.await_args_list[0].args
+        assert _EPOCH + 0.2 + wait >= _EPOCH + 1
+
+    async def test_v1_a_minted_iat_is_after_not_before_epoch_with_a_none_read(self) -> None:
+        """Real clock: epoch written this second, read indeterminate → iat is strictly later."""
+        epoch = int(time.time())
+        service, jwt_service = _service(None)
+
+        tokens = await service.issue_session(
+            uuid4(),
+            product_id="vex",
+            context=TEST_REQUEST_CONTEXT,
+            not_before_epoch=epoch,
+        )
+
+        payload = jwt_service.decode_access_token(tokens.access_token)
+        assert payload is not None
+        assert payload.iat > epoch
+
+    @pytest.mark.parametrize(("not_before", "read"), [(_EPOCH, _EPOCH - 5), (_EPOCH - 5, _EPOCH)])
+    async def test_v1_b_waits_on_the_larger_of_both_in_either_order(
+        self, not_before: int, read: int
+    ) -> None:
+        service, _ = _service(read)
+        with (
+            patch("src.api.services.auth.time.time", return_value=_EPOCH + 0.2),
+            patch("src.api.services.auth.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await _issue(service, not_before_epoch=not_before)
+        sleep.assert_awaited_once()
+        (wait,) = sleep.await_args_list[0].args
+        assert _EPOCH + 0.2 + wait >= _EPOCH + 1
+
+    async def test_v1_b_earlier_second_and_no_read_does_not_sleep(self) -> None:
+        service, _ = _service(None)
+        with (
+            patch("src.api.services.auth.time.time", return_value=_EPOCH + 30.0),
+            patch("src.api.services.auth.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await _issue(service, not_before_epoch=_EPOCH)
+        sleep.assert_not_awaited()
+
+    async def test_v1_b_wait_is_still_capped(self) -> None:
+        service, _ = _service(None)
+        with (
+            patch("src.api.services.auth.time.time", return_value=_EPOCH - 60.0),
+            patch("src.api.services.auth.asyncio.sleep", new=AsyncMock()) as sleep,
+        ):
+            await _issue(service, not_before_epoch=_EPOCH)
+        sleep.assert_not_awaited()

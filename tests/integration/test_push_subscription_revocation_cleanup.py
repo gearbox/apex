@@ -21,6 +21,8 @@ import pytest
 from src.api.security import PasswordService, generate_token, hash_token
 from src.api.services.auth import AuthService, TokenReuseDetectedError
 from src.api.services.email_verification import EmailVerificationService
+from src.api.services.ops_event_bus import OpsEventBus
+from src.api.services.session_termination import make_session_termination_factory
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user import UserService
 from src.core.enums import RefreshTokenRevocationReason
@@ -179,7 +181,10 @@ class TestResetPasswordDeletesPushSubscriptions:
         svc = EmailVerificationService(
             email_service=AsyncMock(),
             app_url="https://app.example.com",
-            token_revocation_service=_noop_token_revocation(),
+            session_termination_factory=make_session_termination_factory(
+                token_revocation=_noop_token_revocation(),
+                ops_event_bus=OpsEventBus(enabled=False),
+            ),
         )
 
         await svc.reset_password(raw_token, "new-password", session=db_session)
@@ -349,8 +354,9 @@ class TestPushDeletionFailureDoesNotBlockPrimaryAction:
         svc = EmailVerificationService(
             email_service=AsyncMock(),
             app_url="https://app.example.com",
-            token_revocation_service=_noop_token_revocation(),
-            ops_event_bus=ops_event_bus,
+            session_termination_factory=make_session_termination_factory(
+                token_revocation=_noop_token_revocation(), ops_event_bus=ops_event_bus
+            ),
         )
 
         with patch.object(

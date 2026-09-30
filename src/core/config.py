@@ -1339,9 +1339,10 @@ class Settings(BaseSettings):
         default="Apex",
         description="Sender display name shown in email clients.",
     )
-    email_send_timeout_seconds: float = Field(
-        default=10.0,
+    email_send_timeout_seconds: int = Field(
+        default=10,
         gt=0,
+        le=60,
         description="Timeout (seconds) for each Resend API request when sending email.",
     )
 

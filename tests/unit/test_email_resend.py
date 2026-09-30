@@ -82,12 +82,12 @@ class TestInit:
             ResendEmailService(api_key="k", from_address="a@b.com")
 
     def test_configures_sdk_once_at_construction(self) -> None:
-        ResendEmailService(api_key="re_abc", from_address="a@b.com", send_timeout_seconds=3.5)
+        ResendEmailService(api_key="re_abc", from_address="a@b.com", send_timeout_seconds=4)
 
         assert resend.api_key == "re_abc"
         client = resend.default_async_http_client
         assert client is not None
-        assert client._timeout == 3.5  # type: ignore[attr-defined]
+        assert client._timeout == 4  # type: ignore[attr-defined]
 
 
 class TestSend:

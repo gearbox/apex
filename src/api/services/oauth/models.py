@@ -28,6 +28,9 @@ class OAuthHandoff(msgspec.Struct, frozen=True, kw_only=True):
     product_id: str
     user_id: UUID
     binding_hash: str
+    not_before_epoch: int | None = None
+    """Revocation epoch written by an unverified-account claim; ``/exchange`` must
+    mint strictly after it. Defaulted so a handoff from the previous build decodes."""
 
 
 class PendingSignup(msgspec.Struct, frozen=True, kw_only=True):
@@ -61,6 +64,8 @@ class LoginOutcome:
     """The callback resolved to an existing (possibly just-linked) account."""
 
     user_id: UUID
+    not_before_epoch: int | None = None
+    """Set only on the claim path: the epoch ``terminate_all`` wrote."""
 
 
 @dataclass(frozen=True, slots=True)

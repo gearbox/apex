@@ -75,7 +75,11 @@ from src.api.services.pricing import PricingService
 from src.api.services.provisioning_script import ProvisioningScriptService
 from src.api.services.provisioning_webhook import ProvisioningWebhookService
 from src.api.services.push import PushService, PywebpushSender
-from src.api.services.session_termination import SessionTerminationService
+from src.api.services.session_termination import (
+    SessionTerminationFactory,
+    SessionTerminationService,
+    make_session_termination_factory,
+)
 from src.api.services.sse_ticket import SSETicketService
 from src.api.services.storage import R2StorageService, R2StorageSettings, StorageError
 from src.api.services.telegram.sender import HttpxTelegramSender
@@ -130,6 +134,9 @@ class ServiceContainer:
     db_manager: DatabaseManager | None = None
     jwt_service: JWTService | None = None
     token_revocation_service: TokenRevocationService | None = None
+    # One construction rule for SessionTerminationService (closure over the shared
+    # token-revocation service + ops bus); used by request scope and singletons.
+    session_termination_factory: SessionTerminationFactory | None = None
     legal_registry: LegalDocumentRegistry | None = None
     # OAuth sign-in: provider clients (per product) + their shared HTTP client
     oauth_registry: OAuthProviderRegistry | None = None
@@ -398,12 +405,9 @@ def get_session_termination_service(session: AsyncSession) -> SessionTermination
     Returns:
         SessionTerminationService bound to the request session (never commits).
     """
-    return SessionTerminationService(
-        session=session,
-        user_repo=UserRepository(session),
-        token_revocation=get_token_revocation_service(),
-        ops_event_bus=get_ops_event_bus(),
-    )
+    if _services.session_termination_factory is None:
+        raise RuntimeError("Session termination factory not initialized")
+    return _services.session_termination_factory(session, UserRepository(session))
 
 
 def get_oauth_registry() -> OAuthProviderRegistry:
@@ -1113,12 +1117,17 @@ async def init_services(settings: Settings) -> JWTService:
         raise RuntimeError(
             "token_revocation_service must be initialized before email_verification_service"
         )
+    if _services.ops_event_bus is None:
+        raise RuntimeError("ops_event_bus must be initialized before session_termination_factory")
+    _services.session_termination_factory = make_session_termination_factory(
+        token_revocation=_services.token_revocation_service,
+        ops_event_bus=_services.ops_event_bus,
+    )
     _services.email_verification_service = EmailVerificationService(
         email_service=_services.email_service,
         app_url=settings.app_url,
         app_name=settings.app_name,
-        token_revocation_service=_services.token_revocation_service,
-        ops_event_bus=_services.ops_event_bus,
+        session_termination_factory=_services.session_termination_factory,
     )
 
     # Initialize and start Aisha job poller

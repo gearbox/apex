@@ -13,8 +13,6 @@ Docs:    https://resend.com/docs/send-with-python
 
 from __future__ import annotations
 
-from typing import cast
-
 import resend
 import structlog
 
@@ -47,7 +45,7 @@ class ResendEmailService(EmailService):
         api_key: str,
         from_address: str,
         from_name: str = "Apex",
-        send_timeout_seconds: float = 10.0,
+        send_timeout_seconds: int = 10,
     ) -> None:
         try:
             import resend
@@ -69,8 +67,7 @@ class ResendEmailService(EmailService):
         # Process-global SDK state: the key and async client are module attributes
         # of ``resend``, so one Resend account per process (there is only one).
         resend.api_key = api_key
-        # The SDK types the timeout as int, but hands it straight to httpx.
-        resend.default_async_http_client = HTTPXClient(timeout=cast("int", send_timeout_seconds))
+        resend.default_async_http_client = HTTPXClient(timeout=send_timeout_seconds)
 
         self._from_address = from_address
         self._from_name = from_name
