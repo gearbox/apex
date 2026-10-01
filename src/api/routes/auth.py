@@ -144,7 +144,7 @@ class AuthController(Controller):
         else:
             return response
 
-    @post("/verify-email")
+    @post("/verify-email", status_code=HTTP_200_OK)
     async def verify_email(
         self,
         data: Annotated[VerifyEmailRequest, Body()],
@@ -175,6 +175,7 @@ class AuthController(Controller):
 
     @post(
         "/resend-verification",
+        status_code=HTTP_200_OK,
         guards=[auth_guard],
         dependencies={"current_user_id": Provide(get_current_user_id)},
         opt={"legal_exempt": True},
@@ -468,7 +469,7 @@ class AuthController(Controller):
             headers=CLEAR_SITE_DATA_HEADER,
         )
 
-    @post("/forgot-password")
+    @post("/forgot-password", status_code=HTTP_200_OK)
     async def forgot_password(
         self,
         data: Annotated[ForgotPasswordRequest, Body()],
@@ -503,7 +504,7 @@ class AuthController(Controller):
             status_code=HTTP_200_OK,
         )
 
-    @post("/reset-password")
+    @post("/reset-password", status_code=HTTP_200_OK)
     async def reset_password(
         self,
         data: Annotated[ResetPasswordRequest, Body()],
