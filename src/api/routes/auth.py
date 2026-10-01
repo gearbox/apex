@@ -469,7 +469,7 @@ class AuthController(Controller):
             headers=CLEAR_SITE_DATA_HEADER,
         )
 
-    @post("/forgot-password")
+    @post("/forgot-password", status_code=HTTP_200_OK)
     async def forgot_password(
         self,
         data: Annotated[ForgotPasswordRequest, Body()],

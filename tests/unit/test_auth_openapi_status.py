@@ -1,4 +1,4 @@
-"""Keep auth recovery route response metadata aligned with runtime HTTP 200 responses."""
+"""Keep all four account recovery route response metadata aligned with runtime HTTP 200 responses."""
 
 from __future__ import annotations
 
@@ -16,6 +16,7 @@ def test_account_recovery_routes_document_http_200() -> None:
     schema = app.openapi_schema.to_schema()
 
     for path in (
+        "/v1/auth/forgot-password",
         "/v1/auth/verify-email",
         "/v1/auth/resend-verification",
         "/v1/auth/reset-password",
