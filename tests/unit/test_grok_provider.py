@@ -37,6 +37,7 @@ def _make_resolved_source(
         content_type="video/mp4" if media_kind is MediaKind.VIDEO else "image/png",
         storage_key=storage_key,
         size_bytes=1,
+        duration_ms=None,
         job_id=uuid4() if source is LibraryAssetSource.OUTPUT else None,
     )
 

@@ -45,6 +45,7 @@ from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.job_state_transition import GenerationOutputData, JobStateTransitionService
 from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.media_ingest import ImageIngestPolicy, InvalidMediaError, MediaIngestor
+from src.api.services.media_ingest.profile_log import VideoProfileOrigin, log_video_profile
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import (
@@ -57,6 +58,7 @@ from src.core.enums import (
     VideoPollStatus,
     VideoResolution,
 )
+from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.core.uid import new_id
 from src.db.models import GenerationJob, GenerationMaterializationAttempt, GenerationOutput
 from src.db.repositories.job import JobRepository
@@ -72,6 +74,7 @@ if TYPE_CHECKING:
 
     from src.api.services.billing import BalanceEvent, BillingService
     from src.api.services.event_bus import EventBus
+    from src.api.services.media_ingest import VideoStreamProfile
     from src.api.services.ops_event_bus import OpsEventBus
 logger = structlog.get_logger(__name__)
 
@@ -99,6 +102,8 @@ class _MaterializedVideo:
     storage_keys: list[str]
     attempt_id: UUID | None = None
     product_id: str | None = None
+    stream_profile: VideoStreamProfile | None = None
+    """Probed facts of the stored original; logged once the output row is committed."""
 
 
 class GrokJobError(Exception):
@@ -1112,6 +1117,7 @@ class GrokJobService:
                     job_id=str(job_id),
                     output_count=len(materialized.outputs),
                 )
+                self._log_video_profile(job_id, materialized)
             else:
                 # Another terminal transition won.  Never delete based on a
                 # stale in-memory list: first reconcile DB references, then
@@ -1265,6 +1271,22 @@ class GrokJobService:
         await session.refresh(job)
         return job
 
+    @staticmethod
+    def _log_video_profile(job_id: UUID, materialized: _MaterializedVideo) -> None:
+        """Log the stored video original's stream facts (the first, non-thumbnail output)."""
+        if materialized.stream_profile is None or not materialized.outputs:
+            return
+        original = materialized.outputs[0]
+        log_video_profile(
+            origin=VideoProfileOrigin.GROK_OUTPUT,
+            asset_ref=format_asset_ref(LibraryAssetSource.OUTPUT, original.id),
+            profile=materialized.stream_profile,
+            width=original.width,
+            height=original.height,
+            duration_ms=original.duration_ms,
+            job_id=job_id,
+        )
+
     async def _materialize_video_result(
         self,
         *,
@@ -1397,6 +1419,7 @@ class GrokJobService:
                 storage_keys=uploaded_keys,
                 attempt_id=attempt_id,
                 product_id=product_id,
+                stream_profile=prepared.stream_profile,
             )
         except BaseException:
             if attempt_id is not None and session is not None and product_id is not None:

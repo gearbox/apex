@@ -57,6 +57,7 @@ interface MediaOriginal {
   height: number | null;
   content_type: string;   // e.g. "image/png", "video/mp4"
   size_bytes: number;
+  duration_ms: number | null; // video duration in ms from ingest; null for images and legacy rows
 }
 
 interface MediaObject {

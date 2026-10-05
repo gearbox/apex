@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
 import errno
 from datetime import UTC, datetime, timedelta
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -16,6 +18,7 @@ from src.api.services.media_ingest import (
     MediaIngestService,
     MediaProcessingError,
     PreparedVideo,
+    VideoStreamProfile,
 )
 from src.api.services.user_content import (
     UserContentService,
@@ -70,6 +73,17 @@ def _prepared_video(*, format: MediaFormat = MediaFormat.MP4) -> PreparedVideo:
                     frame_timestamp_ms=0,
                 ),
             ),
+        ),
+        stream_profile=VideoStreamProfile(
+            container=format,
+            codec="h264",
+            codec_profile="High",
+            pix_fmt="yuv420p",
+            color_transfer="bt709",
+            color_primaries="bt709",
+            rotation_degrees=0,
+            sample_aspect_ratio="1:1",
+            has_audio=False,
         ),
     )
 
@@ -312,6 +326,8 @@ class TestUploadVideoRoute:
         upload_file.read = AsyncMock(return_value=b"fake mp4 bytes")
         form = MagicMock()
         form.data = upload_file
+        form.source_asset_ref = None
+        form.source_timestamp_ms = None
 
         with patch(
             "src.api.services.media_ingest.service.tempfile.mkdtemp",
@@ -327,3 +343,76 @@ class TestUploadVideoRoute:
         assert response.status_code == HTTP_503_SERVICE_UNAVAILABLE
         assert response.content.error == "service_unavailable"
         storage.upload.assert_not_awaited()
+
+
+class TestVideoProfileLog:
+    """I13 — ``media.video_profile`` is logged once per stored video, from the probed facts."""
+
+    @staticmethod
+    async def _upload(service: UserContentService, storage: AsyncMock, **db: object) -> MagicMock:
+        storage.upload = AsyncMock(return_value=_make_upload_result())
+        db_video = _make_db_video(**db)
+        service._image_repo.create = AsyncMock(return_value=db_video)
+        with patch(
+            "src.api.services.user_content.extract_video_thumbnail",
+            AsyncMock(return_value=None),
+        ):
+            await service.upload_image(
+                user_id=uuid4(),
+                data=b"video",
+                filename="clip.mp4",
+                content_type="video/mp4",
+            )
+        return db_video
+
+    async def test_video_upload_logs_one_profile_event(
+        self, video_profile_events: list[dict[str, Any]]
+    ) -> None:
+        service, storage = _make_service()
+
+        db_video = await self._upload(service, storage)
+
+        events = [e for e in video_profile_events if e["event"] == "media.video_profile"]
+        assert len(events) == 1
+        event = events[0]
+        assert event["origin"] == "upload"
+        assert event["asset_ref"] == f"upload:{db_video.id}"
+        assert event["container"] == "mp4"
+        assert event["codec"] == "h264"
+        assert event["codec_profile"] == "High"
+        assert event["pix_fmt"] == "yuv420p"
+        assert event["color_transfer"] == "bt709"
+        assert event["color_primaries"] == "bt709"
+        assert event["hdr"] is False
+        assert event["rotation_degrees"] == 0
+        assert event["sample_aspect_ratio"] == "1:1"
+        assert event["has_audio"] is False
+        assert (event["width"], event["height"], event["duration_ms"]) == (1280, 720, 8000)
+        assert "job_id" not in event
+
+    async def test_hdr_flag_is_derived_from_the_transfer_characteristic(
+        self, video_profile_events: list[dict[str, Any]]
+    ) -> None:
+        service, storage = _make_service()
+        hdr = dataclasses.replace(
+            _prepared_video().stream_profile, color_transfer="smpte2084", color_primaries="bt2020"
+        )
+        service._media_ingestor.prepare_video = AsyncMock(
+            return_value=dataclasses.replace(_prepared_video(), stream_profile=hdr)
+        )
+
+        await self._upload(service, storage)
+
+        (event,) = [e for e in video_profile_events if e["event"] == "media.video_profile"]
+        assert event["hdr"] is True
+
+    async def test_failed_video_preparation_logs_no_profile(
+        self, video_profile_events: list[dict[str, Any]]
+    ) -> None:
+        service, storage = _make_service()
+        service._media_ingestor.prepare_video = AsyncMock(side_effect=InvalidMediaError("bad"))
+
+        with pytest.raises(UserContentValidationError):
+            await self._upload(service, storage)
+
+        assert not [e for e in video_profile_events if e["event"] == "media.video_profile"]

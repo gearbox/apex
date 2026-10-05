@@ -38,6 +38,7 @@ class ResolvedSourceMedia:
     content_type: str
     storage_key: str
     size_bytes: int
+    duration_ms: int | None
     job_id: UUID | None
 
 
@@ -122,6 +123,7 @@ class SourceMediaResolver:
                     content_type=row.content_type,
                     storage_key=row.storage_key,
                     size_bytes=row.size_bytes,
+                    duration_ms=row.duration_ms,
                     job_id=job_id,
                 )
             )

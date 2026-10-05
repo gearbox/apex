@@ -138,6 +138,12 @@ class ContentProxyController(Controller):
     path = "/v1/content"
     tags: Sequence[str] | None = ("Content",)
     dependencies = {"current_user_id": Provide(get_current_user_id)}  # noqa: RUF012
+    # Every response varies by Origin. Litestar's CORS middleware adds ``Vary: Origin``
+    # only when the request carries an ``Origin`` header, so without this a no-cors
+    # response (plain ``<video>``/``<img>``) is cached as ``immutable`` with no ``Vary``
+    # and then reused for a CORS-mode request (``crossorigin="use-credentials"``) that
+    # needs ``Access-Control-Allow-Origin`` — the CORS check fails and never revalidates.
+    response_headers = {"Vary": "Origin"}  # noqa: RUF012
 
     @get("/outputs/{output_id:uuid}", guards=[content_auth_guard])
     async def proxy_output(

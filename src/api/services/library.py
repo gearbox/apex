@@ -303,6 +303,7 @@ class LibraryService:
             height=row.height,
             content_type=row.content_type,
             size_bytes=row.size_bytes,
+            duration_ms=row.duration_ms,
             derivatives=derivatives,
         )
         has_generation_metadata = row.source == LibraryAssetSource.OUTPUT
@@ -390,6 +391,7 @@ class LibraryService:
             height=image.height,
             content_type=image.content_type,
             size_bytes=image.size_bytes,
+            duration_ms=image.duration_ms,
             derivatives=derivatives,
         )
 
@@ -486,6 +488,7 @@ class LibraryService:
             height=output.height,
             content_type=output.content_type,
             size_bytes=output.size_bytes,
+            duration_ms=output.duration_ms,
             derivatives=derivatives,
         )
 
@@ -1158,6 +1161,7 @@ class LibraryService:
                             height=upload.height,
                             content_type=upload.content_type,
                             size_bytes=upload.size_bytes,
+                            duration_ms=upload.duration_ms,
                             derivatives=list(upload_derivatives.get(upload.id, [])),
                         ),
                     )
@@ -1185,6 +1189,7 @@ class LibraryService:
                             height=output.height,
                             content_type=output.content_type,
                             size_bytes=output.size_bytes,
+                            duration_ms=output.duration_ms,
                             derivatives=list(output_derivatives.get(output.id, [])),
                         ),
                     )
@@ -1214,6 +1219,7 @@ class LibraryService:
                         height=job.source_output.height,
                         content_type=job.source_output.content_type,
                         size_bytes=job.source_output.size_bytes,
+                        duration_ms=job.source_output.duration_ms,
                         derivatives=list(job.source_output.derivatives),
                     ),
                 )
@@ -1231,6 +1237,7 @@ class LibraryService:
                         height=job.input_image.height,
                         content_type=job.input_image.content_type,
                         size_bytes=job.input_image.size_bytes,
+                        duration_ms=job.input_image.duration_ms,
                         derivatives=list(job.input_image.derivatives),
                     ),
                 )
@@ -1379,6 +1386,7 @@ class LibraryService:
                     height=row.height,
                     content_type=row.content_type,
                     size_bytes=row.size_bytes,
+                    duration_ms=row.duration_ms,
                     derivatives=derivatives,
                 ),
                 created_at=row.created_at,
@@ -1618,6 +1626,7 @@ class LibraryService:
                 height=output.height,
                 content_type=output.content_type,
                 size_bytes=output.size_bytes,
+                duration_ms=output.duration_ms,
                 derivatives=derivatives,
             ),
         )
@@ -1631,6 +1640,7 @@ def _build_media_object(
     height: int | None,
     content_type: str,
     size_bytes: int,
+    duration_ms: int | None,
     derivatives: Sequence[GenerationOutput | UserImage],
 ) -> MediaObject:
     """Build a MediaObject from normalized fields shared by both source tables.
@@ -1650,6 +1660,7 @@ def _build_media_object(
         height=height,
         content_type=content_type,
         size_bytes=size_bytes,
+        duration_ms=duration_ms,
     )
 
     variants: list[ImageVariant] = []

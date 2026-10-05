@@ -632,6 +632,7 @@ def _make_resolved_source_image(
         content_type="image/png",
         storage_key=storage_key,
         size_bytes=1,
+        duration_ms=None,
         job_id=uuid4() if source is LibraryAssetSource.OUTPUT else None,
     )
 

@@ -18,7 +18,13 @@ from typing import TYPE_CHECKING
 
 import structlog
 
+from src.api.schemas.unified_generation import SourceMediaReference
 from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.services.frame_lineage import FrameLineage, FrameLineageReason
+from src.api.services.generation.source_media import (
+    SourceMediaResolver,
+    SourceMediaValidationError,
+)
 from src.api.services.image_normalization import (
     ImageNormalizationError,
     ImageTooLargeError,
@@ -33,6 +39,7 @@ from src.api.services.media_ingest import (
     MediaIngestor,
     MediaProcessingError,
 )
+from src.api.services.media_ingest.profile_log import VideoProfileOrigin, log_video_profile
 from src.api.services.storage import (
     MediaFormat,
     R2StorageService,
@@ -43,6 +50,8 @@ from src.api.services.storage import (
 )
 from src.api.services.storage.schemas import ALLOWED_VIDEO_CONTENT_TYPES
 from src.api.services.thumbnail import extract_video_thumbnail
+from src.core.enums import MediaKind
+from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
@@ -95,6 +104,18 @@ class UserContentTooLargeError(UserContentValidationError):
     """Raised when an uploaded image's pixel count exceeds the configured cap."""
 
 
+class UserContentFrameLineageError(UserContentValidationError):
+    """Raised when an uploaded frame's claimed source video fails validation.
+
+    ``reason`` is for server-side logs only; the route maps every reason to one
+    public error so the response is never an existence oracle.
+    """
+
+    def __init__(self, reason: FrameLineageReason) -> None:
+        super().__init__(reason.value)
+        self.reason = reason
+
+
 class UserContentStorageError(UserContentError):
     """Raised when the storage backend fails for reasons unrelated to client input."""
 
@@ -119,7 +140,6 @@ class UserContentService:
         retention_days: int = 7,
         max_input_megapixels: float = 100.0,
         video_max_seconds: int = 300,
-        ffmpeg_timeout_seconds: float = 30.0,
         media_ingestor: MediaIngestor,
     ) -> None:
         """Initialize user content service.
@@ -134,7 +154,6 @@ class UserContentService:
                 decompression-bomb uploads.
             video_max_seconds: Preparation-time rejection cap for uploaded
                 video duration.
-            ffmpeg_timeout_seconds: Timeout for legacy thumbnail extraction.
         """
         self._storage = storage
         self._session = session
@@ -145,7 +164,6 @@ class UserContentService:
         self._retention_days = retention_days
         self._max_input_megapixels = max_input_megapixels
         self._video_max_seconds = video_max_seconds
-        self._ffmpeg_timeout_seconds = ffmpeg_timeout_seconds
         self._media_ingestor = media_ingestor
 
     # -------------------------------------------------------------------------
@@ -159,8 +177,9 @@ class UserContentService:
         data: bytes,
         filename: str,
         content_type: str,
+        lineage: FrameLineage | None = None,
     ) -> UploadedImage:
-        """Upload an image or video for use in generation / frame extraction.
+        """Upload an image or video for use in generation, optionally as a captured frame.
 
         Despite the name, this also accepts uploaded videos (``content_type``
         in ``ALLOWED_VIDEO_CONTENT_TYPES``) — routed to ``_upload_video``.
@@ -176,18 +195,33 @@ class UserContentService:
         object, which may differ from what the client originally sent (e.g. a
         mislabeled HEIC upload is stored as PNG).
 
+        When ``lineage`` is given the upload is a frame the client captured from a
+        source video it already has: the source (an owned, same-product video
+        upload/output) is validated first, before any media work, and the frame
+        is stored through the ordinary image path — client bytes, so the UPLOAD
+        policy — with its lineage written atomically with the row. An upload
+        source's retention window slides, as for any other active use.
+
         Args:
             user_id: Owner of the image.
             data: Raw image or video bytes.
             filename: Original filename.
             content_type: MIME type.
+            lineage: Source video + capture timestamp for a client-captured frame.
 
         Returns:
             UploadedImage with storage details.
 
         Raises:
+            UserContentFrameLineageError: If ``lineage`` is given and the source or
+                timestamp is invalid, or the upload is itself a video.
             UserContentValidationError: If validation fails.
         """
+        if lineage is not None:
+            if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
+                raise UserContentFrameLineageError(FrameLineageReason.VIDEO_FILE)
+            await self._validate_frame_lineage(user_id, lineage)
+
         if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
             return await self._upload_video(
                 user_id=user_id,
@@ -263,6 +297,17 @@ class UserContentService:
                 product_id=self._product_id,
                 width=prepared.width,
                 height=prepared.height,
+                source_upload_id=(
+                    lineage.source.asset_id
+                    if lineage and lineage.source.source is LibraryAssetSource.UPLOAD
+                    else None
+                ),
+                source_output_id=(
+                    lineage.source.asset_id
+                    if lineage and lineage.source.source is LibraryAssetSource.OUTPUT
+                    else None
+                ),
+                source_timestamp_ms=lineage.timestamp_ms if lineage else None,
             )
             await MediaHashLedger(self._session).register_upload(db_image, prepared.hash_set)
             await self._session.flush()
@@ -274,6 +319,8 @@ class UserContentService:
                 filename=filename,
                 size_bytes=len(prepared.data),
             )
+            if lineage is not None:
+                await self._touch_frame_source_expiry(user_id, lineage, expires_at)
 
             created_derivatives: list[UserImage] = []
             # Generate sm + md WEBP thumbnails — non-fatal
@@ -330,6 +377,55 @@ class UserContentService:
             raise UserContentStorageError(
                 f"Storage backend unavailable ({type(e).__name__})"
             ) from e
+
+    async def _validate_frame_lineage(self, user_id: UUID, lineage: FrameLineage) -> None:
+        """Require the lineage source to be an owned, same-product video containing the timestamp.
+
+        Reuses ``SourceMediaResolver`` so ownership, product scoping and thumbnail
+        rejection behave exactly as they do for generation inputs, with no existence
+        oracle: every failure is a ``UserContentFrameLineageError`` whose ``reason``
+        only reaches the logs.
+        """
+        try:
+            (source,) = await SourceMediaResolver().resolve(
+                [
+                    SourceMediaReference(
+                        asset_ref=format_asset_ref(lineage.source.source, lineage.source.asset_id)
+                    )
+                ],
+                user_id=user_id,
+                session=self._session,
+                # Always pass it: ``None`` silently disables the product check.
+                product_id=self._product_id,
+            )
+        except SourceMediaValidationError as e:
+            raise UserContentFrameLineageError(FrameLineageReason.SOURCE_UNAVAILABLE) from e
+        if source.media_kind is not MediaKind.VIDEO:
+            raise UserContentFrameLineageError(FrameLineageReason.SOURCE_NOT_VIDEO)
+        if source.duration_ms is None:
+            raise UserContentFrameLineageError(FrameLineageReason.SOURCE_DURATION_UNKNOWN)
+        if lineage.timestamp_ms > source.duration_ms:
+            raise UserContentFrameLineageError(FrameLineageReason.TIMESTAMP_OUT_OF_RANGE)
+
+    async def _touch_frame_source_expiry(
+        self, user_id: UUID, lineage: FrameLineage, expires_at: datetime
+    ) -> None:
+        """Slide an upload source's retention window: capturing a frame is active use.
+
+        Output sources are deliberately not touched.
+        """
+        if lineage.source.source is not LibraryAssetSource.UPLOAD:
+            return
+        touched = await self._image_repo.touch_expiry_many(
+            [lineage.source.asset_id], user_id=user_id, expires_at=expires_at
+        )
+        if touched:
+            logger.info(
+                "user_content.frame_source_expiry_extended",
+                image_id=str(lineage.source.asset_id),
+                user_id=str(user_id),
+                retention_days=self._retention_days,
+            )
 
     async def _upload_video(
         self,
@@ -397,6 +493,14 @@ class UserContentService:
             user_id=str(user_id),
             filename=filename,
             size_bytes=len(prepared.data),
+            duration_ms=prepared.duration_ms,
+        )
+        log_video_profile(
+            origin=VideoProfileOrigin.UPLOAD,
+            asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, db_image.id),
+            profile=prepared.stream_profile,
+            width=prepared.width,
+            height=prepared.height,
             duration_ms=prepared.duration_ms,
         )
 

@@ -12,7 +12,7 @@ from PIL import Image
 
 from src.api.services.media_ingest import InvalidMediaError
 from src.api.services.media_ingest.image_strip import strip_image_metadata
-from src.api.services.media_ingest.types import PreparedImage, PreparedVideo
+from src.api.services.media_ingest.types import PreparedImage, PreparedVideo, VideoStreamProfile
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet, PdqHash
 
@@ -155,9 +155,20 @@ def test_prepared_media_type_validation() -> None:
         PreparedImage(b"x", MediaFormat.MP4, 1, 1, still, False, False)
     with pytest.raises(ValueError, match="dimensions"):
         PreparedImage(b"x", MediaFormat.PNG, 0, 1, still, False, False)
+    profile = VideoStreamProfile(
+        container=MediaFormat.MP4,
+        codec="h264",
+        codec_profile=None,
+        pix_fmt=None,
+        color_transfer=None,
+        color_primaries=None,
+        rotation_degrees=0,
+        sample_aspect_ratio=None,
+        has_audio=False,
+    )
     with pytest.raises(ValueError, match="video format"):
-        PreparedVideo(b"x", MediaFormat.PNG, 1, 1, 1000, video)
+        PreparedVideo(b"x", MediaFormat.PNG, 1, 1, 1000, video, profile)
     with pytest.raises(ValueError, match="dimensions and duration"):
-        PreparedVideo(b"x", MediaFormat.MP4, 1, 1, 0, video)
+        PreparedVideo(b"x", MediaFormat.MP4, 1, 1, 0, video, profile)
     with pytest.raises(ValueError, match="timestamps"):
-        PreparedVideo(b"x", MediaFormat.MP4, 1, 1, 1000, still)
+        PreparedVideo(b"x", MediaFormat.MP4, 1, 1, 1000, still, profile)

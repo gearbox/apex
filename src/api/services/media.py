@@ -43,6 +43,7 @@ def _build_media(
         height=full.height,
         content_type=full.content_type,
         size_bytes=full.size_bytes,
+        duration_ms=full.duration_ms,
     )
 
     variants: list[ImageVariant] = []

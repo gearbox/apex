@@ -274,8 +274,7 @@ def get_user_content(
         product_id=product_id,
         retention_days=settings.retention_days,
         max_input_megapixels=settings.image_max_input_megapixels,
-        video_max_seconds=settings.frame_extract_max_video_seconds,
-        ffmpeg_timeout_seconds=settings.frame_extract_ffmpeg_timeout_seconds,
+        video_max_seconds=settings.media_video_max_duration_seconds,
         media_ingestor=_services.media_ingestor,
     )
 

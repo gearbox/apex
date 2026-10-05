@@ -36,6 +36,7 @@ from src.api.services.media_ingest.types import (
     ImageIngestPolicy,
     PreparedImage,
     PreparedVideo,
+    VideoStreamProfile,
 )
 from src.api.services.media_tools import (
     MediaToolError,
@@ -86,6 +87,26 @@ class _VideoProbe:
     duration_source: DurationSource
     video_stream_index: int
     audio_stream_index: int | None
+    codec: str
+    codec_profile: str | None
+    pix_fmt: str | None
+    color_transfer: str | None
+    color_primaries: str | None
+    rotation_degrees: int
+    sample_aspect_ratio: str | None
+
+    def stream_profile(self) -> VideoStreamProfile:
+        return VideoStreamProfile(
+            container=self.format,
+            codec=self.codec,
+            codec_profile=self.codec_profile,
+            pix_fmt=self.pix_fmt,
+            color_transfer=self.color_transfer,
+            color_primaries=self.color_primaries,
+            rotation_degrees=self.rotation_degrees,
+            sample_aspect_ratio=self.sample_aspect_ratio,
+            has_audio=self.audio_stream_index is not None,
+        )
 
 
 class MediaIngestService:
@@ -396,6 +417,7 @@ class MediaIngestService:
                     sampling_profile=sampling_profile,
                     samples=tuple(samples),
                 ),
+                stream_profile=prepared_probe.stream_profile(),
             )
         except (InvalidMediaError, UnsupportedMediaError, MediaProcessingError):
             raise
@@ -484,7 +506,7 @@ class MediaIngestService:
                 "-v",
                 "error",
                 "-show_entries",
-                "stream=index,codec_type,codec_name,width,height,duration,duration_ts,time_base,disposition:stream_tags=DURATION:format=duration,format_name",
+                "stream=index,codec_type,codec_name,width,height,duration,duration_ts,time_base,disposition,pix_fmt,profile,color_transfer,color_primaries,sample_aspect_ratio:stream_tags=DURATION:stream_side_data=rotation:format=duration,format_name",
                 "-of",
                 "json",
                 str(path),
@@ -523,9 +545,37 @@ class MediaIngestService:
                 duration_source=duration_source,
                 video_stream_index=int(visual["index"]),
                 audio_stream_index=int(audio["index"]) if audio is not None else None,
+                codec=str(visual["codec_name"]),
+                codec_profile=self._optional_text(visual.get("profile")),
+                pix_fmt=self._optional_text(visual.get("pix_fmt")),
+                color_transfer=self._optional_text(visual.get("color_transfer")),
+                color_primaries=self._optional_text(visual.get("color_primaries")),
+                rotation_degrees=self._rotation_degrees(visual.get("side_data_list")),
+                sample_aspect_ratio=self._optional_text(visual.get("sample_aspect_ratio")),
             )
         except (KeyError, TypeError, ValueError, StopIteration, json.JSONDecodeError) as exc:
             raise InvalidMediaError("video has no usable visual stream") from exc
+
+    @staticmethod
+    def _optional_text(value: object) -> str | None:
+        """Informational probe fact: anything but a non-empty string becomes ``None``."""
+        return value if isinstance(value, str) and value else None
+
+    @staticmethod
+    def _rotation_degrees(side_data: object) -> int:
+        """Display-matrix rotation normalized to 0/90/180/270 (ffprobe reports e.g. ``-90``).
+
+        Informational: a missing or odd value is ``0``, never a rejection.
+        """
+        if not isinstance(side_data, list):
+            return 0
+        for entry in side_data:
+            if isinstance(entry, dict) and "rotation" in entry:
+                try:
+                    return int(float(entry["rotation"])) % 360
+                except (TypeError, ValueError, OverflowError):
+                    return 0
+        return 0
 
     @staticmethod
     def _stream_duration_seconds(

@@ -1,6 +1,19 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-09-29 — **Admin view of a reported asset**: new `GET /v1/content/feedback/{report_id}`
+> _Last updated: 2026-10-01 — **Client-side frame extraction support** (Phase A, additive; the
+> `/v1/frames/*` API and the storage access/download routes keep working and are deprecated — they are
+> removed in Phase B once the frontend has migrated). (1) `MediaOriginal` gains `duration_ms: int | null`
+> on every surface that serializes a media original (video duration from ingest; `null` for images and
+> legacy rows). (2) `POST /v1/storage/upload` accepts two optional multipart fields,
+> `source_asset_ref` + `source_timestamp_ms`, recording the source video of a frame the browser captured;
+> every lineage failure returns the single `400 invalid_frame_lineage`. (3) Every `/v1/content/*`
+> response now carries `Vary: Origin` (200/206/304/404/416/502, with or without a request `Origin`) so a
+> no-cors cache entry can't poison a later credentialed CORS-mode `<video crossorigin>` request.
+> (4) Config: `FRAME_EXTRACT_MAX_VIDEO_SECONDS` is renamed `MEDIA_VIDEO_MAX_DURATION_SECONDS` (no alias).
+> See `docs/contracts/video-frame-extraction-fe-contract.md`. Frontend should regenerate types
+> (`gen:api`)._
+>
+> _Prior (2026-09-29): **Admin view of a reported asset**: new `GET /v1/content/feedback/{report_id}`
 > (§9, ADMIN/SUPERADMIN, cookie- or Bearer-authenticated, `Cache-Control: private, no-store`, audit-logged)
 > streams the asset a feedback report points at; `FeedbackReportAdmin` gains `asset_url`. The owner routes
 > `/v1/content/outputs|uploads/{id}` are unchanged and still 404 for an admin who is not the owner._
@@ -934,6 +947,7 @@ interface MediaOriginal {
   height: number | null;
   content_type: string; // "image/png", "image/jpeg", "image/webp", "video/mp4", etc.
   size_bytes: number;
+  duration_ms: number | null; // video duration in ms (probed at ingest); null for images and legacy rows
 }
 
 interface ImageVariant {
@@ -1321,6 +1335,10 @@ Request:  multipart/form-data, field "data" (max 20MB)
           Images:  PNG, JPEG, WebP, HEIC/HEIF, AVIF — non-PNG/JPEG/WebP inputs
                     are converted to PNG.
           Videos:  MP4, WebM, QuickTime (.mov) — stored as-is, never re-encoded.
+          Optional frame lineage (a frame the client captured from a video it has;
+          both fields or neither — see docs/contracts/video-frame-extraction-fe-contract.md):
+            source_asset_ref:    "upload:<uuid>" | "output:<uuid>"  (the source VIDEO)
+            source_timestamp_ms: decimal integer string, 0 <= ts <= source duration_ms
 Response: {
   id: UUID,
   filename: string,
@@ -1329,14 +1347,26 @@ Response: {
   media: MediaObject    // original + sm/md WEBP variants (generated synchronously)
 }
 Status:   201 Created
-Errors:   400 (invalid_file_type | file_too_large | empty_file | validation_error)
+Errors:   400 (invalid_file_type | file_too_large | empty_file | validation_error |
+               invalid_frame_lineage)
           413 (file_too_large — decoded image exceeds the pixel cap)
           502 (upstream_error — object storage failed; message "Storage backend unavailable")
           503 (service_unavailable — media processing out of capacity or failed
                operationally; retryable; message "Media processing is temporarily unavailable")
-Note:     Returns image id used for I2I/I2V generation requests, or (for
-          videos) as source_upload_id on POST /v1/frames/preview|extract (§9b).
+Note:     Returns the id/asset_ref used for I2I/I2V generation requests.
           Thumbnail/poster generation is non-fatal; variants may be empty on failure.
+
+          Frame lineage: with both lineage fields present the upload is a captured
+          frame (an image; a video file with lineage is rejected). The source must
+          be an owned, same-product, non-thumbnail VIDEO with a known duration, and
+          the timestamp must not exceed it. The frame is stored with lineage (source
+          upload/output + timestamp), shows up in the source's library lineage, and
+          — for an upload source — slides that source's retention window. Exactly one
+          field present, or any lineage problem, returns the single error
+            { "error": "invalid_frame_lineage",
+              "message": "Frame source is not available", "status_code": 400 }
+          — one status/code/message for every reason (no existence oracle; the reason
+          is logged server-side only as storage.upload_frame_lineage_rejected).
 
           Videos are probed server-side (ffprobe) before acceptance — the
           declared Content-Type is never trusted. A validation_error 400 is
@@ -1347,8 +1377,9 @@ Note:     Returns image id used for I2I/I2V generation requests, or (for
             { "error": "validation_error",
               "message": "Video duration 620.0s exceeds maximum 300s", "status_code": 400 }
 
-          Video duration is not currently exposed on any response — poll a
-          preview job (§9b) to learn frame timestamps within the clip.
+          Video duration is returned as media.original.duration_ms (also on every
+          library / group / lineage / job-output surface; null for images). The cap
+          is MEDIA_VIDEO_MAX_DURATION_SECONDS (default 300) for every ingested video.
 ```
 
 > **Removed (2026-07-22):** `GET /v1/storage/uploads` (list, and its `ImageListItem` response
@@ -1462,6 +1493,10 @@ Both endpoints below honor a `Range: bytes=<start>-<end>` request header — the
 - A range whose start is at or beyond the object's size → `416 Range Not Satisfiable`, `Content-Range: bytes */<size>`, no body.
 - **Multipart ranges are out of scope** — a comma-separated `Range` header (multiple ranges in one request) is treated as if no `Range` header were sent: a normal full `200`.
 - No `Range` header, or a malformed one → full body, `200 OK`.
+
+#### CORS and `Vary: Origin`
+
+Every response from these routes (200, 206, 304, 404, 416, 502 — with or without a request `Origin`) carries `Vary: Origin`. Responses are `private, max-age=<ttl>, immutable`; the app plays them without `crossorigin` (no `Origin` header) while the frame extractor loads them with `<video crossorigin="use-credentials">` (CORS mode). Litestar's CORS middleware only adds `Vary: Origin` when the request has an `Origin`, so without this the browser would reuse an immutable no-cors entry for the CORS-mode request, find no `Access-Control-Allow-Origin`, and never revalidate. Allowed product origins get the exact `Access-Control-Allow-Origin` plus `Access-Control-Allow-Credentials: true` on 200/206/304.
 
 #### Conditional GET
 

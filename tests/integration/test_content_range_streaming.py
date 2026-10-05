@@ -37,6 +37,7 @@ from src.api.services.token_revocation import TokenRevocationService
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
 
+    from litestar.config.cors import CORSConfig
     from litestar.types import Receive, Scope, Send
 
 TEST_SECRET = "test_secret_key_for_testing_only_256bits_long"
@@ -138,7 +139,13 @@ class _NotFoundContentProxy(ContentProxyService):
         raise ContentNotFoundError("not found")
 
 
-def _make_app(content_proxy: Any, r2_storage: Any, jwt_service: JWTService) -> Litestar:
+def _make_app(
+    content_proxy: Any,
+    r2_storage: Any,
+    jwt_service: JWTService,
+    *,
+    cors_config: CORSConfig | None = None,
+) -> Litestar:
     class FakeProductMiddleware(AbstractMiddleware):
         async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
             if scope["type"] in ("http", "websocket"):
@@ -149,6 +156,7 @@ def _make_app(content_proxy: Any, r2_storage: Any, jwt_service: JWTService) -> L
     app = Litestar(
         route_handlers=[ContentProxyController],
         middleware=[FakeProductMiddleware],
+        cors_config=cors_config,
         dependencies={
             "product_id": Provide(lambda: PRODUCT_ID, sync_to_thread=False),
             "content_proxy": Provide(lambda: content_proxy, sync_to_thread=False),

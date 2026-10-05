@@ -1,223 +1,167 @@
-# Frontend Contract — Video Frame Extraction
+# Frontend Contract — Video Frame Extraction (client-side)
 
 > **Audience:** `gearbox/apex-frontend` (SvelteKit 2 / Svelte 5).
-> **Backend source of truth:** `gearbox/apex` branch `video-frame-extraction` @ `71a3fc241d213a1ab2ededc17da59d04bf433acc` (2026-07-12, master merged in) **plus** the `duration_ms` remediation commit (`feat(frames): expose probed duration_ms in preview job result`) — verify it is on the branch before integrating against §6. Every claim below was verified against that ref — routes (`src/api/routes/frames.py`), schemas (`src/api/schemas/frames.py`), worker (`src/api/services/frames/worker.py`), ffmpeg layer (`src/api/services/frames/ffmpeg.py`), upload path (`src/api/services/user_content.py`), and settings (`src/core/config.py`).
-> **Authority:** `gen:api` (OpenAPI) is authoritative for **types**; this document is authoritative for **semantics** — the polling model, presigned-URL expiry for previews, timestamp bounds, and the new upload error cases. Run `gen:api` after the branch merges.
+> **Backend source:** `gearbox/apex` branch `feat/client-frame-extraction-support` (Phase A of the client-side frame-extraction arc). Copy this file verbatim into the frontend repo.
+> **Authority:** `gen:api` (OpenAPI) is authoritative for **types**; this document is authoritative for **semantics** — what the browser decodes, which fields to send, the single lineage error, and caching behaviour. Run `gen:api` after the branch merges.
 
 ---
 
 ## 0. Feature summary
 
-Users can take any video — a generated `GenerationOutput` (Grok T2V/I2V) or a newly-supported **user-uploaded video** — and:
+Frame extraction happens **entirely in the browser**. The frontend loads a video it already has access to, seeks to the timestamps the user picks, captures each frame to an image, and uploads it. The backend does no decoding and no job queue:
 
-1. **Preview** — request a strip of N uniformly-spaced, downscaled frames. Async job → presigned WEBP URLs + the exact timestamp of each frame.
-2. **Extract** — submit selected timestamps; each becomes a **full-resolution PNG** saved as a regular upload (with lineage back to the source video), immediately usable as `input_image_id` for i2i/i2v generation and downloadable via the existing content proxy.
+1. **Decode** the video through a hidden `<video crossorigin="use-credentials">` pointed at its stable content URL (§1).
+2. **Capture** each frame (canvas → PNG/JPEG/WebP blob).
+3. **Upload** the frame with `POST /v1/storage/upload`, adding two optional multipart fields that record *which video, at what time* (§3). The frame is stored as an ordinary upload with lineage back to the source, immediately usable as an `asset_ref` input for i2i/i2v generation.
 
-Frame extraction is **free** — no token charge, no `Idempotency-Key` header required on any of the three new endpoints.
-
----
-
-## 1. Expanded upload content types
-
-`POST /v1/storage/upload` now also accepts video files, up to the existing 20 MB request cap (unchanged):
-
-| Content-Type | Extension |
-|---|---|
-| `video/mp4` | `.mp4` |
-| `video/webm` | `.webm` |
-| `video/quicktime` | `.mov` |
-
-The existing image types (`image/png`, `image/jpeg`, `image/webp`, `image/heic`, `image/heif`, `image/avif`) are unchanged.
-
-**Server-side probe — never trust the declared MIME.** Uploaded video bytes are probed with ffprobe before acceptance. Two new rejection cases, both the existing `400 validation_error` envelope:
-
-```json
-{ "error": "validation_error", "message": "File is not a decodable video", "status_code": 400 }
-```
-
-```json
-{ "error": "validation_error", "message": "Video duration 620.0s exceeds maximum 300s", "status_code": 400 }
-```
-
-The duration cap is server-configured (`FRAME_EXTRACT_MAX_VIDEO_SECONDS`, default **300 s**). Surface the message verbatim — it is safe to display.
-
-**Response shape is unchanged** (`UploadResponse` — `id`, `filename`, `created_at`, `expires_at`, `media`). For an accepted video:
-
-- `media.media_type` is `"video"`.
-- `media.original.content_type` is the video's MIME type as uploaded — **video bytes are stored as-is, never re-encoded** (unlike images, which are normalized).
-- `media.original.width`/`height` come from the ffprobe result.
-- `media.variants` may contain poster-frame WEBP thumbnails (same `sm`/`md` bucket convention as video output posters). **Best-effort — may be `[]`.** Never block on it.
-- `duration_ms` is probed and stored server-side but is not in the upload response — the FE receives it from the preview job (§2, §6), which is the first point the scrubber UI needs it.
+Frame extraction is **free** — no token charge, no `Idempotency-Key` header. The old server-side preview/extract job API (`/v1/frames/*`) is deprecated and removed in Phase B (§8).
 
 ---
 
-## 2. New endpoints
+## 1. Loading the video (CORS-mode, credentialed)
 
-All three require `Authorization: Bearer <token>` (standard access-token guard, same as every other `/v1/*` write endpoint). None require `Idempotency-Key`.
+Video bytes come from the existing content proxy, via the `media.original.url` of the asset (`/v1/content/outputs/{id}` or `/v1/content/uploads/{id}`). These URLs are stable and carry no presigned token — authentication is the first-party `apex_content` cookie (see `GET /v1/content/*` in `BACKEND_API_REFERENCE.md` §9).
 
-### `POST /v1/frames/preview`
-
-Request a low-res, N-frame preview strip for a video (generation output or uploaded video).
+To read pixels back out of a `<video>` without tainting the canvas, the element **must** make a CORS-mode credentialed request:
 
 ```ts
-interface FramePreviewRequest {
-  source_output_id?: string | null; // UUID — exactly one of these two
-  source_upload_id?: string | null; // UUID
-  frame_count?: number;             // 2–60, default 12
-}
+const video = document.createElement("video");
+video.crossOrigin = "use-credentials"; // set BEFORE src
+video.muted = true;
+video.preload = "auto";
+video.playsInline = true;
+video.src = media.original.url; // absolute URL on the API origin
 ```
 
-Exactly one of `source_output_id` / `source_upload_id` must be set — `400 invalid_source` otherwise. The source must be a video (by stored `content_type`) and must belong to the authenticated user — `400 not_a_video` / `404 not_found` otherwise. Unknown body fields are rejected (`forbid_unknown_fields`).
+The backend answers a credentialed request from a registered product origin with the exact `Access-Control-Allow-Origin: <origin>` and `Access-Control-Allow-Credentials: true`, on `200`, `206` (Range) and `304`. Range requests are supported (single range), which is what lets the browser seek without downloading the whole file.
 
-**Response `202`:**
+### Why every content response carries `Vary: Origin`
 
-```ts
-interface FrameJobCreatedResponse {
-  job_id: string;   // UUID
-  status: "queued";
-}
-```
+The rest of the app plays the same URLs **without** `crossorigin` — a no-cors request that carries no `Origin` header. Content responses are `Cache-Control: private, max-age=<ttl>, immutable`. Without `Vary: Origin`, the browser would cache the no-cors response, reuse it for the extractor's CORS-mode request, find no `Access-Control-Allow-Origin` on it, fail the CORS check — and, because the entry is `immutable`, **never revalidate**. So a user who watches a video in the library and then opens "Extract frames" would get a permanently broken extractor.
 
-### `POST /v1/frames/extract`
+The backend therefore sends `Vary: Origin` on **every** `/v1/content/*` response — `200`, `206`, `304`, `404`, `416`, `502`, with or without a request `Origin`. Consequences for the frontend:
 
-Request full-resolution frame extraction at specific timestamps.
-
-```ts
-interface FrameExtractRequest {
-  source_output_id?: string | null;
-  source_upload_id?: string | null;
-  timestamps_ms: number[]; // 1–50 entries, each >= 0
-}
-```
-
-Same source validation as `/preview`. The `timestamps_ms` *shape* (count, `>= 0`) is validated at the request layer (standard msgspec `400` on a malformed body); whether each timestamp is within the video's duration is validated **after the job starts running** (the worker probes the file anyway) — an out-of-range timestamp fails the whole job asynchronously with a precise message, e.g. `Timestamps out of range [0, 5120)ms: [5120]`. The valid range is `[0, duration_ms)` — **upper bound exclusive**, since an end-of-stream seek frequently decodes nothing. The bound itself, `duration_ms`, comes from the preview result — see §6 for the clamping rule that makes an out-of-range failure unreachable.
-
-**Response:** same `FrameJobCreatedResponse`, `status: "queued"`.
-
-### `GET /v1/frames/jobs/{job_id}`
-
-Poll a job's status/result. Ownership-checked — `404 not_found` for a job belonging to another user.
-
-```ts
-interface FrameJobSource {
-  type: "output" | "upload";
-  id: string; // UUID
-}
-
-interface PreviewFrame {
-  index: number;
-  timestamp_ms: number;
-  url: string; // presigned R2 URL — TTL-bounded, regenerated per poll, never persisted (§4)
-}
-
-interface FramePreviewResult {
-  frames: PreviewFrame[];
-  expires_in_seconds: number; // TTL of every url above, as of this response (default 3600)
-  duration_ms: number;        // server-probed (ffprobe) source duration — the authoritative
-                              // timestamp bound: valid extract timestamps are [0, duration_ms)
-}
-
-interface ExtractedFrame {
-  timestamp_ms: number;
-  upload_id: string;   // UUID — same kind of id as POST /v1/storage/upload returns
-  media: MediaObject;  // standard media envelope — see thumbnails-gallery-contract.md
-}
-
-interface FrameExtractResult {
-  frames: ExtractedFrame[];
-}
-
-interface FrameJobResponse {
-  job_id: string;
-  kind: "preview" | "extract";
-  status: "queued" | "running" | "completed" | "failed";
-  created_at: string;            // ISO 8601
-  started_at?: string | null;
-  finished_at?: string | null;
-  error?: string | null;         // populated only when status === "failed"; safe to display
-  source: FrameJobSource;
-  preview?: FramePreviewResult | null;   // present only when kind=preview AND status=completed
-  extracted?: FrameExtractResult | null; // present only when kind=extract AND status=completed
-}
-```
+- **Do not** work around this with cache-busting query strings or `cache: "reload"`; the stable URL is correct.
+- **Do not** switch all `<video>`/`<img>` playback to CORS mode — only the extractor element needs it.
+- Expect the first extractor load of an already-watched video to be a cache miss for that variant (the CORS-mode entry is stored separately); this is intended.
 
 ---
 
-## 3. Polling model
+## 2. Video duration: `MediaOriginal.duration_ms`
 
-Both `POST /preview` and `POST /extract` are **fire-and-forget** — `202` immediately, never blocking on ffmpeg. Poll `GET /v1/frames/jobs/{job_id}` until `status` is terminal:
+`MediaOriginal` now carries the video's duration, probed at ingest:
 
 ```ts
-const POLL_INTERVAL_MS = 1_000;
-const POLL_BUDGET_MS = 7 * 60_000; // see stale-sweep note below
-
-async function pollFrameJob(jobId: string): Promise<FrameJobResponse> {
-  const deadline = Date.now() + POLL_BUDGET_MS;
-  for (;;) {
-    const res = await apiFetch(`/v1/frames/jobs/${jobId}`);
-    const job: FrameJobResponse = await res.json();
-    if (job.status === "completed" || job.status === "failed") return job;
-    if (Date.now() > deadline) throw new Error("frame job polling timed out");
-    await sleep(POLL_INTERVAL_MS); // jobs typically finish in low single-digit seconds
-  }
+interface MediaOriginal {
+  url: string;
+  width?: number | null;
+  height?: number | null;
+  content_type: string;
+  size_bytes: number;
+  duration_ms: number | null; // NEW. Video duration in ms; null for images and legacy rows
 }
 ```
 
-- No SSE/push for job progress — jobs are short-lived (seconds), a cheap DB-only polling GET is sufficient. If long uploaded videos become common this may grow an SSE variant; not today.
-- **Bounded polling is safe by construction:** a job stuck in `running` (worker died mid-execution) is failed server-side by a stale sweep after `FRAME_EXTRACT_STALE_RUNNING_SECONDS` (default **300 s**). Worst case, a job reaches a terminal state within ~5 minutes plus one sweep interval — a 7-minute client budget covers it with margin. A job never stays non-terminal forever.
-- On `status === "failed"`, `error` is a human-readable message (ffmpeg/ffprobe failure, or an out-of-range timestamp for extract jobs) — safe to display.
+- Present on **every** surface that serializes a media original: the upload response, library list/detail, group detail (outputs and `source_media`), lineage graph nodes, and job outputs.
+- For a video ingested through the current pipeline it is a positive integer. It is `null` for images, and may be `null` for a legacy video row that predates ingest probing.
+- This is the **authoritative upper bound** for frame timestamps (§3). It is the container/stream duration as measured by the server; `videoEl.duration` may differ from it by a frame or two and is fine for cosmetic display only.
+- A video with `duration_ms === null` cannot be used as a lineage source — treat it as "frame extraction unavailable" (§6).
+
+Uploaded and generated videos are rejected at ingest above `MEDIA_VIDEO_MAX_DURATION_SECONDS` (default **300 s**, one cap for every ingested video); the existing `400 validation_error` message on upload is safe to show verbatim.
 
 ---
 
-## 4. URL expiry semantics
+## 3. Uploading a captured frame
 
-**Preview frames** (`FramePreviewResult.frames[].url`) are **presigned R2 URLs generated fresh on every `GET /jobs/{id}` call** — never the same URL twice, never persisted server-side. `expires_in_seconds` (default **3600**) is the validity of *that response's* URLs. If a held `FrameJobResponse` goes stale, just re-poll the same `job_id` — you get fresh URLs with a fresh TTL.
+`POST /v1/storage/upload` (multipart) accepts two **optional** extra fields:
 
-**Do not cache preview URLs beyond the current page session.** Unlike `/v1/content/*` proxy paths (stable, cacheable indefinitely — see `thumbnails-gallery-contract.md`), preview frames live at a non-authenticated R2 prefix (`frame-previews/...`) that expires via an R2 lifecycle rule (default **2 days**). No proxy indirection, by design — preview frames are stateless, no DB rows.
-
-**Extracted frames are different:** `ExtractedFrame.media` is the standard `MediaObject` — `original.url` / `variants[].url` are stable `/v1/content/uploads/{id}` proxy paths, cached indefinitely per the existing contract. Once an extract job completes, its frames behave exactly like anything from `POST /v1/storage/upload`: same download semantics, same deletion (`DELETE /v1/content/{id}`), same retention/expiry (`expires_at` stamped at extraction time, sliding retention applies when used as generation input).
-
----
-
-## 5. Output formats & server defaults
-
-| What | Value | Source of truth |
+| Field | Type | Rule |
 |---|---|---|
-| Preview frame format | WEBP, longest edge ≤ `FRAME_PREVIEW_MAX_EDGE` (default **512 px**), never upscaled | `ffmpeg.py` scale filter |
-| Extracted frame format | **PNG**, full source resolution | `_CODEC_BY_FORMAT` |
-| Preview URL TTL | `FRAME_PREVIEW_URL_TTL_SECONDS`, default **3600 s** | `config.py` |
-| Preview R2 retention | `FRAME_PREVIEW_RETENTION_DAYS`, default **2 days** (R2 lifecycle rule) | `config.py` |
-| Max uploaded video duration | `FRAME_EXTRACT_MAX_VIDEO_SECONDS`, default **300 s** | `config.py` |
-| Stale `running` job failed after | `FRAME_EXTRACT_STALE_RUNNING_SECONDS`, default **300 s** | `config.py` |
-| Preview strip spacing | `timestamp[i] = round(i * duration_ms / frame_count)`, `i = 0..N-1` — first frame at 0, **no frame at the exact end** | `compute_uniform_timestamps` |
+| `data` | file | the frame image (PNG/JPEG/WebP; unchanged from a normal image upload, 20 MB cap) |
+| `source_asset_ref` | string | `upload:<uuid>` or `output:<uuid>` — the **video** the frame came from (the video's `media.asset_ref`) |
+| `source_timestamp_ms` | string | plain decimal integer, `0 ≤ ts ≤ duration_ms` of the source |
 
-Defaults may differ per environment; treat them as illustrative, not constants to hard-code.
+- **Both absent** → an ordinary upload; behaviour is exactly as before.
+- **Exactly one present** → `400 invalid_frame_lineage`.
+- **Both present** → a *frame upload*, validated as below.
+
+Send `source_timestamp_ms` as a bare integer string (`"2500"`): no sign, no decimal point, no exponent, no whitespace, no leading `+`, at most 10 digits and at most `2147483647`. `"1e3"`, `" 12"`, `"-0"`, `"12.0"` and `""` are all rejected. Round the captured time to whole milliseconds client-side. `0` and `duration_ms` itself are both accepted; in practice clamp to `Math.max(0, duration_ms - 1)` because a seek to the exact end frequently decodes nothing.
+
+The response is the normal `UploadResponse` (`id`, `filename`, `created_at`, `expires_at`, `media`). The frame is an image with sm/md variants like any upload, and a new row in the library.
+
+### The single error: `invalid_frame_lineage`
+
+```json
+{ "error": "invalid_frame_lineage", "message": "Frame source is not available", "status_code": 400 }
+```
+
+Every lineage failure returns this **one** status, code and message, deliberately — the response never reveals *why* (it would be an existence oracle for other users' assets). It covers: malformed or partial fields; a source that doesn't exist, belongs to another user or another product, or is a thumbnail; a source that is not a video; a source with unknown duration; a timestamp past `duration_ms`; or an upload that is itself a video file.
+
+Treat it as "this frame couldn't be linked to that video": show a generic failure, and do not retry the same request. A frame-less retry (plain upload without the two fields) is always possible if the user still wants the image.
+
+### What the backend does for a frame upload
+
+- The frame bytes are untrusted client bytes and go through the normal **image-upload** pipeline (decoded, metadata-stripped, normalized) — the client's `Content-Type` is only an early filter.
+- Lineage is stored **with** the row. It appears in the source's library lineage (`GET /v1/library/assets/{asset_ref}/lineage` descendants, with `source_timestamp_ms`).
+- Capturing a frame from an **upload** source slides that upload's retention window (and its thumbnails'), same as using it as generation input, so a video can't expire under an in-flight extraction session. An **output** source is not touched.
 
 ---
 
-## 6. Timestamp bounds
+## 4. Suggested flow
 
-`FramePreviewResult.duration_ms` is the **server-authoritative duration** (ffprobe), and the only value the scrubber may use as its upper bound. Valid extract timestamps are exactly `[0, duration_ms)` — **upper bound exclusive**, so the last selectable millisecond is `duration_ms - 1`.
+1. The user opens a video from the library (an asset with `media.media_type === "video"` and `media.original.duration_ms != null`).
+2. Create the hidden `<video crossorigin="use-credentials">` (§1), wait for `loadedmetadata`/`seeked`.
+3. The user scrubs within `[0, duration_ms - 1]`; for each selected time: `video.currentTime = t / 1000`, await `seeked`, draw to a canvas at the **decoded** dimensions (`video.videoWidth/Height`), `canvas.toBlob(…, "image/png")`.
+4. Upload each blob with the lineage fields (§3). On success, the new `UploadResponse.media.asset_ref` is immediately a valid generation input.
+5. On `invalid_frame_lineage`, show a generic "couldn't save this frame" message.
 
-- **Clamp every user selection to `Math.min(ts, duration_ms - 1)`** before calling `POST /extract`. Done that way, an out-of-range failure is impossible by construction.
-- **Never use `videoEl.duration` as the bound.** Container metadata read by the browser can disagree with ffprobe by a frame or two; the server value wins. `videoEl.duration` is fine for cosmetic display, nothing else.
-- Any `PreviewFrame.timestamp_ms` is a guaranteed-valid extract input as-is (the strip is computed from the same probe and never touches the exact end).
-- The out-of-range job failure path (§3, `error: "Timestamps out of range [0, N)ms: […]"`) still exists as a backstop — reachable only if the client skips the clamp.
-
----
-
-## 7. Lineage & deletion semantics
-
-- Extracted frames are ordinary uploads. Their origin (source video + timestamp) is recoverable via the `FrameJobResponse` that produced them (`source.type`/`source.id` + `ExtractedFrame.timestamp_ms`) — it is **not** embedded in upload/gallery list responses. If product wants "extracted from video" badges in the gallery grid, that is a follow-up, not in this contract.
-- Deleting the source video (`DELETE /v1/content/{id}`) does **not** delete frames already extracted from it — they become ordinary, source-less uploads. No special client handling needed.
-- Creating a frame job against an uploaded video **extends the source upload's retention** (same sliding-retention `touch_expiry` behavior as using an upload in generation) — a video won't expire out from under an in-flight extraction flow.
+Canvas dimensions: use the decoded `videoWidth`/`videoHeight`, **not** `media.original.width/height`. Stored dimensions are the coded size and do not account for display-matrix rotation, so a portrait clip recorded rotated reports landscape there. (A rotation-corrected `width`/`height` is a known follow-up.)
 
 ---
 
-## 8. Suggested FE flow (scrubber UX)
+## 5. HDR behaviour (parity with the old server extractor)
 
-1. User picks a video: a gallery output (`source_output_id`) or a fresh upload via `POST /v1/storage/upload` (`source_upload_id` = `UploadResponse.id`).
-2. `POST /v1/frames/preview` (default 12 frames) → poll → render the strip; each thumbnail is labeled with its `timestamp_ms`.
-3. User selects one or more frames, or scrubs freely within `[0, duration_ms)` from the preview result — clamp to `duration_ms - 1` per §6.
-4. `POST /v1/frames/extract` with the chosen `timestamps_ms` → poll → each `ExtractedFrame.upload_id` is immediately valid as `input_image_id` for i2i/i2v, and `media` renders it like any other upload.
-5. On `failed`, show `error` verbatim and let the user adjust timestamps or retry.
+No tone mapping happens anywhere. A frame captured from an HDR video is exactly what the browser's canvas produces; the previous server-side extractor only scaled and was equally un-tone-mapped, so this is behaviour parity, not a regression. The backend records whether each stored video is HDR/rotated/non-H.264 in server logs (`media.video_profile`, informational only) so a future conversion feature can be justified with data — it is not exposed in the API.
+
+---
+
+## 6. Videos the browser can't decode — the unsupported state
+
+There is no browser-compatibility derivative: the server stores videos as uploaded (remuxed, never transcoded). A video in a codec/profile the user's browser cannot decode (for example HEVC on a browser without a HEVC decoder) will make the hidden `<video>` fire `error` (`MediaError.code === MEDIA_ERR_SRC_NOT_SUPPORTED` / `MEDIA_ERR_DECODE`) or never reach `loadedmetadata`.
+
+Show an explicit **unsupported state** for it rather than an endless spinner: "Your browser can't read this video, so frames can't be extracted here." Generated outputs are expected to be browser-safe by construction (H.264/yuv420p/MP4), so this state is chiefly reachable for user-uploaded videos.
+
+### "Report this video"
+
+Offer a **Report this video** action in the unsupported state. It posts to the existing feedback endpoint with the asset's ref — the backend stores the reference, not a copy:
+
+```ts
+await apiFetch("/v1/feedback", {
+  method: "POST",
+  body: JSON.stringify({
+    category: "bug",
+    message: "Frame extraction isn't available for this video in my browser.", // 10–4000 code points
+    asset_ref: media.asset_ref, // "upload:<uuid>" | "output:<uuid>"
+    client_path: location.pathname, // pathname only
+  }),
+});
+```
+
+See `feedback-contract.md` for validation and the `404 asset_not_found` case.
+
+---
+
+## 7. Everything else is unchanged
+
+- Image upload types, the 20 MB cap, video upload types (`video/mp4`, `video/webm`, `video/quicktime`) and their `400 validation_error` rejections are unchanged.
+- Extracted frames are ordinary uploads: same download semantics, same deletion (`DELETE /v1/content/{id}`), same retention. Deleting the source video does **not** delete frames already extracted from it — they become ordinary, source-less uploads.
+- Frame extraction needs no billing, no `Idempotency-Key`, and no polling.
+
+---
+
+## 8. Deprecated — removed in Phase B
+
+These remain functional through Phase A so the old frontend keeps working while the migration lands. **Do not build anything new on them.** They are deleted in Phase B once the frontend is verified on staging:
+
+- `POST /v1/frames/preview`, `POST /v1/frames/extract`, `GET /v1/frames/jobs/{job_id}` — the server-side extraction job API and its presigned preview-frame URLs.
+- The browser-facing presigned-URL storage routes: `GET /v1/storage/uploads/{image_id}`, `GET /v1/storage/uploads/{image_id}/download`, `GET /v1/storage/outputs/{output_id}`, `GET /v1/storage/outputs/{output_id}/download`. Use the stable `/v1/content/*` URLs from `media.original.url` instead.
