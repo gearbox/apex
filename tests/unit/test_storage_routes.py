@@ -8,7 +8,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
 from unittest.mock import AsyncMock, MagicMock
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from litestar.status_codes import (
@@ -23,8 +23,10 @@ from litestar.status_codes import (
 
 from src.api.schemas.media import MediaObject, MediaOriginal
 from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.services.frame_lineage import FrameLineage, FrameLineageReason
 from src.api.services.user_content import (
     UserContentError,
+    UserContentFrameLineageError,
     UserContentNotFoundError,
     UserContentStorageError,
     UserContentTooLargeError,
@@ -32,6 +34,7 @@ from src.api.services.user_content import (
     UserContentValidationError,
 )
 from src.core.enums import OutputMediaType
+from src.core.library_ref import AssetRef, LibraryAssetSource
 
 pytestmark = pytest.mark.unit
 
@@ -107,6 +110,9 @@ def _upload_form(
     content_type: str = "image/png",
     filename: str = "photo.png",
     data: bytes = b"\x89PNG\r\n\x1a\n" + b"\x00" * 50,
+    *,
+    source_asset_ref: str | None = None,
+    source_timestamp_ms: str | None = None,
 ) -> MagicMock:
     upload_file = AsyncMock()
     upload_file.content_type = content_type
@@ -114,6 +120,8 @@ def _upload_form(
     upload_file.read = AsyncMock(return_value=data)
     form = MagicMock()
     form.data = upload_file
+    form.source_asset_ref = source_asset_ref
+    form.source_timestamp_ms = source_timestamp_ms
     return form
 
 
@@ -308,6 +316,130 @@ class TestUploadImageHandler:
         assert response.status_code == HTTP_201_CREATED
         call_kwargs = user_content.upload_image.call_args.kwargs
         assert call_kwargs["filename"] == "data.png"
+
+
+# Fixed (not uuid4): parametrize ids must be identical across xdist workers.
+_LINEAGE_SOURCE_ID = UUID("0f6c1c3e-6a54-4d0e-9d57-3c2d9b6f7a11")
+
+
+class TestUploadFrameLineage:
+    """A client-captured frame names its source video via two optional multipart fields."""
+
+    _LINEAGE_ERROR = "invalid_frame_lineage"
+    _LINEAGE_MESSAGE = "Frame source is not available"
+
+    @staticmethod
+    async def _upload(user_content: AsyncMock, form: MagicMock) -> object:
+        from src.api.routes.storage import StorageController
+
+        return await StorageController.upload_image.fn(  # type: ignore[attr-defined]
+            MagicMock(),
+            current_user_id=uuid4(),
+            user_content=user_content,
+            data=form,
+        )
+
+    async def test_valid_lineage_is_parsed_and_passed_to_the_service(self) -> None:
+        source_id = uuid4()
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(return_value=_make_uploaded_image())
+
+        response = await self._upload(
+            user_content,
+            _upload_form(source_asset_ref=f"output:{source_id}", source_timestamp_ms="1500"),
+        )
+
+        assert response.status_code == HTTP_201_CREATED  # type: ignore[attr-defined]
+        assert user_content.upload_image.call_args.kwargs["lineage"] == FrameLineage(
+            source=AssetRef(source=LibraryAssetSource.OUTPUT, asset_id=source_id),
+            timestamp_ms=1500,
+        )
+
+    async def test_no_lineage_fields_is_an_ordinary_upload(self) -> None:
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(return_value=_make_uploaded_image())
+
+        response = await self._upload(user_content, _upload_form())
+
+        assert response.status_code == HTTP_201_CREATED  # type: ignore[attr-defined]
+        assert user_content.upload_image.call_args.kwargs["lineage"] is None
+
+    @pytest.mark.parametrize(
+        ("asset_ref", "timestamp"),
+        [
+            (f"upload:{_LINEAGE_SOURCE_ID}", None),  # partial
+            (None, "100"),  # partial
+            ("not-a-ref", "100"),  # malformed ref
+            (f"upload:{_LINEAGE_SOURCE_ID}", "1e3"),  # malformed timestamp
+            (f"upload:{_LINEAGE_SOURCE_ID}", "-1"),
+            (f"upload:{_LINEAGE_SOURCE_ID}", "12.0"),
+            (f"upload:{_LINEAGE_SOURCE_ID}", ""),
+            (f"upload:{_LINEAGE_SOURCE_ID}", "99999999999"),  # oversized
+        ],
+    )
+    async def test_malformed_or_partial_lineage_is_rejected_before_any_work(
+        self, asset_ref: str | None, timestamp: str | None
+    ) -> None:
+        user_content = AsyncMock()
+        form = _upload_form(source_asset_ref=asset_ref, source_timestamp_ms=timestamp)
+
+        response = await self._upload(user_content, form)
+
+        assert response.status_code == HTTP_400_BAD_REQUEST  # type: ignore[attr-defined]
+        assert response.content.error == self._LINEAGE_ERROR  # type: ignore[attr-defined]
+        assert response.content.message == self._LINEAGE_MESSAGE  # type: ignore[attr-defined]
+        user_content.upload_image.assert_not_called()
+        form.data.read.assert_not_called()  # rejected before the body is read
+
+    @pytest.mark.parametrize("content_type", ["video/mp4", "video/webm", "video/quicktime"])
+    async def test_video_upload_with_lineage_is_rejected_before_the_service(
+        self, content_type: str
+    ) -> None:
+        user_content = AsyncMock()
+        form = _upload_form(
+            content_type=content_type,
+            source_asset_ref=f"upload:{uuid4()}",
+            source_timestamp_ms="0",
+        )
+
+        response = await self._upload(user_content, form)
+
+        assert response.status_code == HTTP_400_BAD_REQUEST  # type: ignore[attr-defined]
+        assert response.content.error == self._LINEAGE_ERROR  # type: ignore[attr-defined]
+        user_content.upload_image.assert_not_called()
+
+    @pytest.mark.parametrize("reason", list(FrameLineageReason))
+    async def test_every_service_reason_maps_to_the_same_public_error(
+        self, reason: FrameLineageReason
+    ) -> None:
+        """No existence oracle: status, code and message never vary by reason."""
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(side_effect=UserContentFrameLineageError(reason))
+
+        response = await self._upload(
+            user_content,
+            _upload_form(source_asset_ref=f"upload:{uuid4()}", source_timestamp_ms="10"),
+        )
+
+        assert response.status_code == HTTP_400_BAD_REQUEST  # type: ignore[attr-defined]
+        assert response.content.error == self._LINEAGE_ERROR  # type: ignore[attr-defined]
+        assert response.content.message == self._LINEAGE_MESSAGE  # type: ignore[attr-defined]
+        assert reason.value not in response.content.message  # type: ignore[attr-defined]
+
+    async def test_lineage_error_is_not_swallowed_by_the_generic_validation_branch(self) -> None:
+        """P2 — ``UserContentFrameLineageError`` subclasses ``UserContentValidationError``."""
+        assert issubclass(UserContentFrameLineageError, UserContentValidationError)
+        user_content = AsyncMock()
+        user_content.upload_image = AsyncMock(
+            side_effect=UserContentFrameLineageError(FrameLineageReason.SOURCE_UNAVAILABLE)
+        )
+
+        response = await self._upload(
+            user_content,
+            _upload_form(source_asset_ref=f"upload:{uuid4()}", source_timestamp_ms="10"),
+        )
+
+        assert response.content.error != "validation_error"  # type: ignore[attr-defined]
 
 
 # ---------------------------------------------------------------------------

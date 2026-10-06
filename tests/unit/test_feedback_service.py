@@ -81,8 +81,7 @@ def _report(**overrides: Any) -> FeedbackReport:
         "message": "Something is definitely broken",
         "created_at": now,
         "updated_at": now,
-    }
-    fields.update(overrides)
+    } | overrides
     return FeedbackReport(**fields)
 
 
@@ -216,6 +215,12 @@ class TestNotificationWiring:
 # ---------------------------------------------------------------------------
 
 
+def _blank_out(text: str, values: list[str]) -> str:
+    for value in values:
+        text = text.replace(value, "")
+    return text
+
+
 class TestOpsPayload:
     def test_field_set_is_ids_and_enums_only(self) -> None:
         """C2 — adding a field here is a D10 review, not a drive-by change."""
@@ -269,11 +274,25 @@ class TestOpsPayload:
 
         assert notification is not None
         assert notification.notification_class is NotificationClass.FEEDBACK_SUBMITTED
-        for secret in (SECRET_MESSAGE, "4242", SECRET_PATH, SECRET_UA, "9.9.9"):
-            assert secret not in notification.text
-            assert secret not in wire
         assert str(report.id) in notification.text
         assert str(job_id) in notification.text
+
+        # Generated IDs and timestamps are random and may contain a secret's digits by
+        # chance (e.g. "4242"), so blank them out and scan only what remains. Any new
+        # field that carries user text is not on this allowlist, so it fails the scan.
+        id_values = [str(report.id), str(report.user_id), str(job_id)]
+        wire_doc = msgspec.json.decode(wire)
+        wire_doc.pop("timestamp")
+        wire_doc.pop("event_id")
+        for id_field in ("report_id", "user_id", "job_id"):
+            wire_doc["payload"].pop(id_field)
+        scanned = {
+            "wire": msgspec.json.encode(wire_doc).decode(),
+            "text": _blank_out(notification.text, id_values),
+        }
+        for secret in (SECRET_MESSAGE, "4242", SECRET_PATH, SECRET_UA, "9.9.9"):
+            for name, haystack in scanned.items():
+                assert secret not in haystack, f"{secret!r} leaked into {name}"
 
 
 # ---------------------------------------------------------------------------

@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING
-from unittest.mock import AsyncMock, MagicMock
+from typing import TYPE_CHECKING, Any
+from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
@@ -22,6 +22,7 @@ from tests.legal_support import make_legal_acceptance_service
 from tests.revocation_support import make_session_termination
 
 if TYPE_CHECKING:
+    from collections.abc import Generator
     from pathlib import Path
 
 _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
@@ -307,3 +308,23 @@ def zit_workflow_bundle(tmp_path: Path) -> Path:
     (bundle_dir / "bundle.yaml").write_text(json.dumps({"workflow": workflow}))
     (bundle_dir / "workflow.api.json").write_text(json.dumps(graph))
     return bundle_dir
+
+
+@pytest.fixture
+def video_profile_events() -> Generator[list[dict[str, Any]]]:
+    """Collect ``media.video_profile`` events by patching the module logger.
+
+    Not ``structlog.testing.capture_logs()``: with ``cache_logger_on_first_use`` the
+    module-level logger in ``profile_log`` stays bound to whichever processors list was
+    live on its first real call, so ``capture_logs()`` silently misses its events
+    depending on test order (see tests/unit/api/conftest.py). Events are shaped like
+    ``capture_logs()`` entries: ``{"event": name, **kwargs}``.
+    """
+    events: list[dict[str, Any]] = []
+
+    def _record(event: str, **kwargs: Any) -> None:
+        events.append({"event": event, **kwargs})
+
+    with patch("src.api.services.media_ingest.profile_log.logger") as mock_logger:
+        mock_logger.info.side_effect = _record
+        yield events

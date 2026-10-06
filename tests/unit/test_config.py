@@ -233,3 +233,45 @@ class TestBillingReconcilerMaxPerSweep:
 
     def test_default_accepted(self) -> None:
         assert hermetic_settings(jwt_secret_key=_JWT_SECRET).billing_reconciler_max_per_sweep == 50
+
+
+class TestMediaVideoMaxDuration:
+    """I14 — one setting caps the duration of every ingested video; the old name is gone."""
+
+    def test_default_is_300_seconds(self) -> None:
+        settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.media_video_max_duration_seconds == 300
+
+    def test_env_var_sets_the_cap(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("MEDIA_VIDEO_MAX_DURATION_SECONDS", "120")
+        settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.media_video_max_duration_seconds == 120
+
+    @pytest.mark.parametrize("value", [0, 3601])
+    def test_out_of_range_rejected(self, value: int) -> None:
+        with pytest.raises(ValidationError):
+            hermetic_settings(jwt_secret_key=_JWT_SECRET, media_video_max_duration_seconds=value)
+
+    def test_old_name_is_removed_without_an_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        assert "frame_extract_max_video_seconds" not in Settings.model_fields
+        # A stale env var neither crashes startup (extra="ignore") nor sets the new cap.
+        monkeypatch.setenv("FRAME_EXTRACT_MAX_VIDEO_SECONDS", "42")
+        settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)
+        assert settings.media_video_max_duration_seconds == 300
+
+    def test_user_content_service_is_wired_to_the_setting(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        from unittest.mock import MagicMock
+
+        from src.api.dependencies import common
+
+        monkeypatch.setattr(common._services, "media_ingestor", MagicMock())
+        settings = hermetic_settings(
+            jwt_secret_key=_JWT_SECRET, media_video_max_duration_seconds=77
+        )
+
+        service = common.get_user_content(MagicMock(), MagicMock(), settings, "vex")
+
+        assert service._video_max_seconds == 77
+        assert not hasattr(service, "_ffmpeg_timeout_seconds")

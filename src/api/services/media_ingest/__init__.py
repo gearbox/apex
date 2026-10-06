@@ -2,7 +2,13 @@
 
 from .errors import InvalidMediaError, MediaIngestError, MediaProcessingError, UnsupportedMediaError
 from .service import MediaIngestService
-from .types import ImageIngestPolicy, MediaIngestor, PreparedImage, PreparedVideo
+from .types import (
+    ImageIngestPolicy,
+    MediaIngestor,
+    PreparedImage,
+    PreparedVideo,
+    VideoStreamProfile,
+)
 
 __all__ = [
     "ImageIngestPolicy",
@@ -14,4 +20,5 @@ __all__ = [
     "PreparedImage",
     "PreparedVideo",
     "UnsupportedMediaError",
+    "VideoStreamProfile",
 ]

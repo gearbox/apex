@@ -536,6 +536,13 @@ def _probe(duration_ms: int | None, source: DurationSource) -> _VideoProbe:
         duration_source=source,
         video_stream_index=0,
         audio_stream_index=None,
+        codec="vp9",
+        codec_profile=None,
+        pix_fmt=None,
+        color_transfer=None,
+        color_primaries=None,
+        rotation_degrees=0,
+        sample_aspect_ratio=None,
     )
 
 

@@ -68,6 +68,7 @@ def _resolved_sources(media_kinds: tuple[MediaKind, ...]) -> list[ResolvedSource
                 content_type="image/png" if media_kind is MediaKind.IMAGE else "video/mp4",
                 storage_key=f"uploads/source-{position}",
                 size_bytes=1,
+                duration_ms=None,
                 job_id=None,
             )
         )
@@ -260,6 +261,7 @@ async def test_resolver_returns_interleaved_sources_in_request_order(monkeypatch
                     content_type="image/png",
                     storage_key="uploads/input.png",
                     size_bytes=10,
+                    duration_ms=None,
                 )
             }
         )
@@ -273,6 +275,7 @@ async def test_resolver_returns_interleaved_sources_in_request_order(monkeypatch
                     content_type="video/mp4",
                     storage_key="outputs/input.mp4",
                     size_bytes=20,
+                    duration_ms=None,
                     job_id=uuid4(),
                 )
             }
@@ -349,6 +352,7 @@ async def test_resolver_hides_thumbnail_and_wrong_product_as_unavailable(
                     content_type="image/png",
                     storage_key="uploads/input.png",
                     size_bytes=10,
+                    duration_ms=None,
                 )
             }
         )
@@ -373,3 +377,59 @@ async def test_resolver_hides_thumbnail_and_wrong_product_as_unavailable(
             session=AsyncMock(),
             product_id="vex",
         )
+
+
+@pytest.mark.parametrize("duration_ms", [None, 4321])
+async def test_resolver_carries_source_duration(monkeypatch, duration_ms: int | None) -> None:
+    """Frame lineage bounds a timestamp by the resolved source's ``duration_ms``."""
+    upload_id = uuid4()
+    output_id = uuid4()
+    upload_repo = SimpleNamespace(
+        get_many=AsyncMock(
+            return_value={
+                upload_id: SimpleNamespace(
+                    is_thumbnail=False,
+                    product_id="vex",
+                    content_type="video/mp4",
+                    storage_key="uploads/clip.mp4",
+                    size_bytes=10,
+                    duration_ms=duration_ms,
+                )
+            }
+        )
+    )
+    output_repo = SimpleNamespace(
+        get_many=AsyncMock(
+            return_value={
+                output_id: SimpleNamespace(
+                    is_thumbnail=False,
+                    product_id="vex",
+                    content_type="video/mp4",
+                    storage_key="outputs/clip.mp4",
+                    size_bytes=20,
+                    duration_ms=duration_ms,
+                    job_id=uuid4(),
+                )
+            }
+        )
+    )
+    monkeypatch.setattr(
+        "src.api.services.generation.source_media.UserImageRepository",
+        lambda _session: upload_repo,
+    )
+    monkeypatch.setattr(
+        "src.api.services.generation.source_media.OutputRepository",
+        lambda _session: output_repo,
+    )
+
+    resolved = await SourceMediaResolver().resolve(
+        [
+            SourceMediaReference(asset_ref=f"upload:{upload_id}"),
+            SourceMediaReference(asset_ref=f"output:{output_id}"),
+        ],
+        user_id=uuid4(),
+        session=AsyncMock(),
+        product_id="vex",
+    )
+
+    assert [source.duration_ms for source in resolved] == [duration_ms, duration_ms]

@@ -36,12 +36,19 @@ from src.api.schemas.storage import (
     UploadResponse,
 )
 from src.api.security import auth_guard
+from src.api.services.frame_lineage import (
+    FrameLineageError,
+    FrameLineageReason,
+    parse_frame_lineage,
+)
 from src.api.services.media import build_output_media
 from src.api.services.storage.schemas import (
     ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES,
+    ALLOWED_VIDEO_CONTENT_TYPES,
 )
 from src.api.services.user_content import (
     UserContentError,
+    UserContentFrameLineageError,
     UserContentNotFoundError,
     UserContentService,
     UserContentStorageError,
@@ -65,9 +72,32 @@ IMAGE_NOT_FOUND = "Image not found"
 OUTPUT_NOT_FOUND = "Output not found"
 
 
+def _invalid_frame_lineage(
+    reason: FrameLineageReason,
+) -> Response[UploadResponse | ErrorEnvelope]:
+    """The one public response for every frame-lineage failure (no existence oracle).
+
+    The specific reason is logged, never returned.
+    """
+    logger.warning("storage.upload_frame_lineage_rejected", reason=reason.value)
+    return Response(
+        content=ErrorEnvelope(
+            error="invalid_frame_lineage",
+            message="Frame source is not available",
+            status_code=HTTP_400_BAD_REQUEST,
+        ),
+        status_code=HTTP_400_BAD_REQUEST,
+    )
+
+
 @dataclass
 class UploadForm:
     data: UploadFile
+    # Frame lineage (client-captured video frame). Raw strings, parsed explicitly by
+    # ``parse_frame_lineage`` — never framework-coerced — so "1e3", " 12", "-0", "12.0"
+    # and "" are rejected uniformly. Both absent = ordinary upload; exactly one = error.
+    source_asset_ref: str | None = None
+    source_timestamp_ms: str | None = None
 
 
 # -----------------------------------------------------------------------------
@@ -94,19 +124,28 @@ class StorageController(Controller):
         user_content: UserContentService,
         data: Annotated[UploadForm, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[UploadResponse | ErrorEnvelope]:
-        """Upload an image or video for use in generation or frame extraction.
+        """Upload an image or video for use in generation, or a captured video frame.
 
         Accepts PNG, JPEG, WebP, HEIC/HEIF, or AVIF images up to 20MB;
         non-PNG/JPEG/WebP inputs are converted to PNG. Also accepts MP4,
         WebM, or QuickTime (.mov) videos up to 20MB — videos are probed
-        with ffprobe (rejected if undecodable, not a video, or over
-        ``frame_extract_max_video_seconds``) and stored as-is, with a JPEG
+        with ffprobe (rejected if undecodable, not a video, or longer than
+        ``media_video_max_duration_seconds``) and stored as-is, with a JPEG
         poster frame derivative. Returns storage details and expiration time.
 
-        Uploaded images can be referenced by ID in i2i generation requests;
-        uploaded videos can be referenced by ID in POST /v1/frames/preview
-        and /v1/frames/extract. Content is automatically deleted after the
+        Uploaded images and videos can be referenced by ``asset_ref`` in
+        generation requests. Content is automatically deleted after the
         retention period.
+
+        A frame the client captured from a video it already has is uploaded as an
+        image with two extra multipart fields: ``source_asset_ref``
+        (``upload:<uuid>`` / ``output:<uuid>``, the source video) and
+        ``source_timestamp_ms`` (decimal integer, ``0 <= ts <= duration_ms`` of the
+        source). Both or neither: the frame is stored with that lineage and shows up
+        under the source's library lineage. Any problem with the lineage — partial,
+        malformed, unknown/foreign/other-product source, not a video, timestamp out
+        of range, or the upload itself being a video — returns the single error
+        ``400 invalid_frame_lineage``.
         """
         # Validate content type
         content_type = data.data.content_type or "application/octet-stream"
@@ -120,6 +159,16 @@ class StorageController(Controller):
                 status_code=HTTP_400_BAD_REQUEST,
             )
         logger.debug("storage.upload_started", content_type=content_type)
+
+        # Frame lineage: parsed and shape-checked before any media work or DB access.
+        # The client-declared type is only an early filter; image preparation stays
+        # authoritative about the bytes.
+        try:
+            lineage = parse_frame_lineage(data.source_asset_ref, data.source_timestamp_ms)
+        except FrameLineageError as e:
+            return _invalid_frame_lineage(e.reason)
+        if lineage is not None and content_type in ALLOWED_VIDEO_CONTENT_TYPES:
+            return _invalid_frame_lineage(FrameLineageReason.VIDEO_FILE)
 
         # Read file data
         file_bytes = await data.data.read()
@@ -158,6 +207,7 @@ class StorageController(Controller):
                 data=file_bytes,
                 filename=data.data.filename or "data.png",
                 content_type=content_type,
+                lineage=lineage,
             )
             return Response(
                 content=UploadResponse(
@@ -180,6 +230,9 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_413_REQUEST_ENTITY_TOO_LARGE,
             )
+        except UserContentFrameLineageError as e:
+            # Must precede UserContentValidationError (its base class).
+            return _invalid_frame_lineage(e.reason)
         except UserContentValidationError as e:
             logger.warning("storage.upload_validation_failed", error=str(e))
             return Response(

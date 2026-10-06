@@ -80,6 +80,21 @@ and child processes get a null stdin. A user-caused undecodable input is logged
 at warning (`media_ingest.video_not_decodable`, no traceback); provider callers
 log their own error-level events for pipeline anomalies.
 
+`PreparedVideo` also carries a required `stream_profile: VideoStreamProfile` — the
+probed facts of the *prepared* visual stream (container, codec, codec profile,
+`pix_fmt`, colour transfer/primaries, display-matrix rotation in degrees
+normalized into `[0, 360)`, sample aspect ratio, audio presence, and a derived `is_hdr`). It is
+informational only and never a gate: every optional fact is read leniently and
+degrades to `None`/`0`, so a missing or odd value can never become
+`InvalidMediaError`, and acceptance behaviour is unchanged. The ingest boundary
+owns no storage or database context, so it does not log the profile; the two
+writers (`UserContentService._upload_video` and the Grok video materialization,
+after the output row commits) emit one `media.video_profile` event each, tagged
+with their `origin` and the original's `asset_ref`, through
+`media_ingest.profile_log.log_video_profile`. Nothing is persisted: the logs answer
+the one open question — how much stored video is HDR / rotated / non-H.264 — before
+any browser-compatibility conversion is considered.
+
 `POST /v1/storage/upload` maps the two failure classes to distinct statuses:
 an object-storage (R2) failure is `502 upstream_error`, while ingest capacity
 exhaustion or an operational processing failure is `503 service_unavailable`

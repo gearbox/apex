@@ -41,6 +41,34 @@ class PreparedImage:
 
 
 @dataclass(frozen=True, slots=True)
+class VideoStreamProfile:
+    """Probed facts about the prepared visual stream. Informational only — never a gate."""
+
+    container: MediaFormat
+    codec: str
+    """ffprobe ``codec_name``: h264, hevc, vp9, av1, ..."""
+    codec_profile: str | None
+    """e.g. ``High``, ``Main 10``."""
+    pix_fmt: str | None
+    """e.g. ``yuv420p``, ``yuv420p10le``."""
+    color_transfer: str | None
+    """e.g. ``bt709``, ``smpte2084``, ``arib-std-b67``."""
+    color_primaries: str | None
+    """e.g. ``bt709``, ``bt2020``."""
+    rotation_degrees: int
+    """Display-matrix rotation in degrees normalized into ``[0, 360)``; 0 when absent or unreadable."""
+    sample_aspect_ratio: str | None
+    has_audio: bool
+
+    @property
+    def is_hdr(self) -> bool:
+        return self.color_transfer in _HDR_TRANSFERS
+
+
+_HDR_TRANSFERS = frozenset({"smpte2084", "arib-std-b67"})
+
+
+@dataclass(frozen=True, slots=True)
 class PreparedVideo:
     """Sanitized/remuxed video bytes and PDQ samples from decoded output frames."""
 
@@ -50,6 +78,7 @@ class PreparedVideo:
     height: int
     duration_ms: int
     hash_set: HashSet
+    stream_profile: VideoStreamProfile
 
     def __post_init__(self) -> None:
         if not self.format.is_video:

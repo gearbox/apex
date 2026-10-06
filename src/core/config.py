@@ -1255,16 +1255,16 @@ class Settings(BaseSettings):
         le=1000,
         description="Maximum preserved APNG/WebP animation frames accepted at ingest.",
     )
+    media_video_max_duration_seconds: int = Field(
+        default=300,
+        ge=1,
+        le=3600,
+        description="Maximum accepted duration for user-uploaded videos (seconds).",
+    )
 
     # -------------------------------------------------------------------------
     # Video frame extraction
     # -------------------------------------------------------------------------
-    frame_extract_max_video_seconds: int = Field(
-        default=300,
-        ge=1,
-        le=3600,
-        description="Upload-time ffprobe rejection cap for uploaded video duration.",
-    )
     frame_extract_ffmpeg_timeout_seconds: int = Field(
         default=30,
         ge=1,

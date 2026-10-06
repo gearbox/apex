@@ -36,6 +36,7 @@ async def test_create_many_preserves_every_source_position_and_asset_ref(
             content_type=upload.content_type,
             storage_key=upload.storage_key,
             size_bytes=upload.size_bytes,
+            duration_ms=upload.duration_ms,
             job_id=None,
         )
         for position, upload in enumerate(uploads)

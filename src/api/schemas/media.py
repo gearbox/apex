@@ -37,6 +37,9 @@ class MediaOriginal(msgspec.Struct, kw_only=True):
 
     size_bytes: int
 
+    duration_ms: int | None = None
+    """Video duration in ms from ingest. None for images and for legacy rows without it."""
+
 
 class MediaObject(msgspec.Struct, kw_only=True):
     """Unified media envelope for images and videos.

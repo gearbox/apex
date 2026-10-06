@@ -19,6 +19,7 @@ def _source(position: int) -> ResolvedSourceMedia:
         content_type="image/png",
         storage_key=f"uploads/{asset_id}.png",
         size_bytes=10,
+        duration_ms=None,
         job_id=None,
     )
 

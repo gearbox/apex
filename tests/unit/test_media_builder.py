@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import pytest
 
+from src.api.services.library import _build_media_object
 from src.api.services.media import (
     OUTPUT_PREFIX,
     UPLOAD_PREFIX,
@@ -14,6 +15,7 @@ from src.api.services.media import (
     build_upload_media,
 )
 from src.core.enums import OutputMediaType
+from src.core.library_ref import LibraryAssetSource
 
 pytestmark = pytest.mark.unit
 
@@ -24,6 +26,7 @@ def _make_upload_row(
     width: int | None = 1024,
     height: int | None = 768,
     size_bytes: int = 500_000,
+    duration_ms: int | None = None,
     thumbnail_max_edge: int | None = None,
     is_thumbnail: bool = False,
 ) -> MagicMock:
@@ -33,6 +36,7 @@ def _make_upload_row(
     row.width = width
     row.height = height
     row.size_bytes = size_bytes
+    row.duration_ms = duration_ms
     row.thumbnail_max_edge = thumbnail_max_edge
     row.is_thumbnail = is_thumbnail
     return row
@@ -44,6 +48,7 @@ def _make_output_row(
     width: int | None = 1024,
     height: int | None = 768,
     size_bytes: int = 500_000,
+    duration_ms: int | None = None,
     thumbnail_max_edge: int | None = None,
 ) -> MagicMock:
     row = MagicMock()
@@ -52,6 +57,7 @@ def _make_output_row(
     row.width = width
     row.height = height
     row.size_bytes = size_bytes
+    row.duration_ms = duration_ms
     row.thumbnail_max_edge = thumbnail_max_edge
     return row
 
@@ -184,3 +190,52 @@ class TestVariantMissingDims:
         assert len(media.variants) == 1
         assert isinstance(media.variants[0].width, int)
         assert isinstance(media.variants[0].height, int)
+
+
+class TestOriginalDurationMs:
+    """I3 (unit) — ``MediaOriginal.duration_ms`` mirrors the row; images serialize ``null``."""
+
+    def test_upload_video_carries_row_duration(self) -> None:
+        full = _make_upload_row(content_type="video/mp4", duration_ms=8_000)
+        assert build_upload_media(full, []).original.duration_ms == 8_000
+
+    def test_output_video_carries_row_duration(self) -> None:
+        full = _make_output_row(content_type="video/mp4", duration_ms=1_234)
+        assert build_output_media(full, []).original.duration_ms == 1_234
+
+    def test_images_have_no_duration(self) -> None:
+        assert build_upload_media(_make_upload_row(), []).original.duration_ms is None
+        assert build_output_media(_make_output_row(), []).original.duration_ms is None
+
+    def test_legacy_video_row_without_duration_is_null(self) -> None:
+        full = _make_upload_row(content_type="video/mp4", duration_ms=None)
+        assert build_upload_media(full, []).original.duration_ms is None
+
+    def test_image_serializes_explicit_null(self) -> None:
+        import msgspec
+
+        original = build_upload_media(_make_upload_row(), []).original
+        assert msgspec.json.decode(msgspec.json.encode(original))["duration_ms"] is None
+
+    @pytest.mark.parametrize(
+        ("source", "duration_ms"),
+        [
+            (LibraryAssetSource.UPLOAD, 5_000),
+            (LibraryAssetSource.OUTPUT, 5_000),
+            (LibraryAssetSource.UPLOAD, None),
+        ],
+    )
+    def test_library_builder_threads_duration(
+        self, source: LibraryAssetSource, duration_ms: int | None
+    ) -> None:
+        media = _build_media_object(
+            source=source,
+            asset_id=uuid4(),
+            width=1,
+            height=1,
+            content_type="video/mp4" if duration_ms else "image/png",
+            size_bytes=1,
+            duration_ms=duration_ms,
+            derivatives=[],
+        )
+        assert media.original.duration_ms == duration_ms

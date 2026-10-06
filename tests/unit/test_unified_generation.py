@@ -321,6 +321,7 @@ def _make_resolved_source(
         content_type="video/mp4" if media_kind is MediaKind.VIDEO else "image/png",
         storage_key=f"{source}s/{asset_id}.png",
         size_bytes=1,
+        duration_ms=None,
         job_id=job_id,
     )
 
