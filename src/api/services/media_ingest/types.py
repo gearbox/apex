@@ -56,7 +56,7 @@ class VideoStreamProfile:
     color_primaries: str | None
     """e.g. ``bt709``, ``bt2020``."""
     rotation_degrees: int
-    """Display-matrix rotation normalized to 0/90/180/270; 0 when absent."""
+    """Display-matrix rotation in degrees normalized into ``[0, 360)``; 0 when absent or unreadable."""
     sample_aspect_ratio: str | None
     has_audio: bool
 

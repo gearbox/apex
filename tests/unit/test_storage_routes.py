@@ -389,7 +389,7 @@ class TestUploadFrameLineage:
         assert response.content.error == self._LINEAGE_ERROR  # type: ignore[attr-defined]
         assert response.content.message == self._LINEAGE_MESSAGE  # type: ignore[attr-defined]
         user_content.upload_image.assert_not_called()
-        form.data.read.assert_not_called()  # rejected without buffering the body
+        form.data.read.assert_not_called()  # rejected before the body is read
 
     @pytest.mark.parametrize("content_type", ["video/mp4", "video/webm", "video/quicktime"])
     async def test_video_upload_with_lineage_is_rejected_before_the_service(

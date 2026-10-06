@@ -323,13 +323,3 @@ async def test_grok_video_profile_is_logged_for_the_stored_original(
     assert event["codec"] == "h264"
     assert event["hdr"] is False
     assert (event["width"], event["height"], event["duration_ms"]) == (1280, 720, 8000)
-
-
-def test_grok_video_profile_is_skipped_without_a_profile(
-    video_profile_events: list[dict[str, Any]],
-) -> None:
-    from src.api.services.grok.job_service import GrokJobService, _MaterializedVideo
-
-    GrokJobService._log_video_profile(uuid4(), _MaterializedVideo(outputs=[], storage_keys=[]))
-
-    assert not [e for e in video_profile_events if e["event"] == "media.video_profile"]

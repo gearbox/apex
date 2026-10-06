@@ -563,7 +563,7 @@ class MediaIngestService:
 
     @staticmethod
     def _rotation_degrees(side_data: object) -> int:
-        """Display-matrix rotation normalized to 0/90/180/270 (ffprobe reports e.g. ``-90``).
+        """Display-matrix rotation in degrees normalized into ``[0, 360)`` (ffprobe reports e.g. ``-90``).
 
         Informational: a missing or odd value is ``0``, never a rejection.
         """

@@ -1259,7 +1259,7 @@ class Settings(BaseSettings):
         default=300,
         ge=1,
         le=3600,
-        description="Maximum accepted duration for any ingested video.",
+        description="Maximum accepted duration for user-uploaded videos (seconds).",
     )
 
     # -------------------------------------------------------------------------

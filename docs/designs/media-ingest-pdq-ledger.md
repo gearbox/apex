@@ -82,8 +82,8 @@ log their own error-level events for pipeline anomalies.
 
 `PreparedVideo` also carries a required `stream_profile: VideoStreamProfile` — the
 probed facts of the *prepared* visual stream (container, codec, codec profile,
-`pix_fmt`, colour transfer/primaries, display-matrix rotation normalized to
-0/90/180/270, sample aspect ratio, audio presence, and a derived `is_hdr`). It is
+`pix_fmt`, colour transfer/primaries, display-matrix rotation in degrees
+normalized into `[0, 360)`, sample aspect ratio, audio presence, and a derived `is_hdr`). It is
 informational only and never a gate: every optional fact is read leniently and
 degrades to `None`/`0`, so a missing or odd value can never become
 `InvalidMediaError`, and acceptance behaviour is unchanged. The ingest boundary

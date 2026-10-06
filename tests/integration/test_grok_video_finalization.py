@@ -28,8 +28,12 @@ from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
 )
-from src.api.services.media_ingest import InvalidMediaError, MediaProcessingError
-from src.core.enums import GenerationType, JobStatus, Provider, TransactionType
+from src.api.services.media_ingest import (
+    InvalidMediaError,
+    MediaProcessingError,
+    VideoStreamProfile,
+)
+from src.core.enums import GenerationType, JobStatus, MediaFormat, Provider, TransactionType
 from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.uid import new_id
 from src.db.models.billing import TokenAccount, TokenTransaction
@@ -164,6 +168,17 @@ def _materialized_video(job_id: UUID) -> _MaterializedVideo:
             )
         ],
         storage_keys=[],
+        stream_profile=VideoStreamProfile(
+            container=MediaFormat.MP4,
+            codec="h264",
+            codec_profile="High",
+            pix_fmt="yuv420p",
+            color_transfer="bt709",
+            color_primaries="bt709",
+            rotation_degrees=0,
+            sample_aspect_ratio="1:1",
+            has_audio=False,
+        ),
     )
 
 

@@ -112,7 +112,7 @@ async def test_display_matrix_rotation_is_normalized(tmp_path: Path, degrees: in
 
     prepared = await _service().prepare_video(rotated.read_bytes())
 
-    # ffprobe reports e.g. -90 for a 270° display matrix; the profile is always 0/90/180/270.
+    # ffprobe reports e.g. -90 for a 270° display matrix; the profile normalizes it into [0, 360).
     assert prepared.stream_profile.rotation_degrees == degrees
 
 
@@ -223,6 +223,7 @@ class TestOptionalFactsAreNeverAGate:
         ([{"rotation": -180}], 180),
         ([{"rotation": 360}], 0),
         ([{"rotation": 450}], 90),
+        ([{"rotation": 45}], 45),  # informational: not snapped to a right angle
         ([{"other": 1}, {"rotation": 90}], 90),  # first entry that carries rotation wins
         ([{"rotation": 90}, {"rotation": 180}], 90),
         ([{"rotation": "garbage"}], 0),

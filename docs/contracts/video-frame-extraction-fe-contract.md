@@ -1,8 +1,8 @@
 # Frontend Contract — Video Frame Extraction (client-side)
 
 > **Audience:** `gearbox/apex-frontend` (SvelteKit 2 / Svelte 5).
-> **Backend source:** `gearbox/apex` branch `feat/client-frame-extraction-support` (Phase A of the client-side frame-extraction arc). Copy this file verbatim into the frontend repo.
-> **Authority:** `gen:api` (OpenAPI) is authoritative for **types**; this document is authoritative for **semantics** — what the browser decodes, which fields to send, the single lineage error, and caching behaviour. Run `gen:api` after the branch merges.
+> **Backend source:** `gearbox/apex` `master`, Phase A of the client-side frame-extraction arc (`0.49.0`). Copy this file verbatim into the frontend repo.
+> **Authority:** `gen:api` (OpenAPI) is authoritative for **types**; this document is authoritative for **semantics** — what the browser decodes, which fields to send, the single lineage error, and caching behaviour. Run `gen:api` after the backend is deployed.
 
 ---
 
@@ -28,10 +28,12 @@ To read pixels back out of a `<video>` without tainting the canvas, the element 
 const video = document.createElement("video");
 video.crossOrigin = "use-credentials"; // set BEFORE src
 video.muted = true;
-video.preload = "auto";
+video.preload = "metadata"; // seeking fetches the needed ranges on demand
 video.playsInline = true;
-video.src = media.original.url; // absolute URL on the API origin
+video.src = toApiOrigin(media.original.url); // resolve the root-relative path against the API origin
 ```
+
+`media.original.url` is root-relative (`/v1/content/...`); assigned as-is it would resolve against the **frontend** origin. The frontend resolves it with its protected-content URL validator (`toMediaSrc`) and must never request a URL that fails validation.
 
 The backend answers a credentialed request from a registered product origin with the exact `Access-Control-Allow-Origin: <origin>` and `Access-Control-Allow-Credentials: true`, on `200`, `206` (Range) and `304`. Range requests are supported (single range), which is what lets the browser seek without downloading the whole file.
 
@@ -64,10 +66,11 @@ interface MediaOriginal {
 
 - Present on **every** surface that serializes a media original: the upload response, library list/detail, group detail (outputs and `source_media`), lineage graph nodes, and job outputs.
 - For a video ingested through the current pipeline it is a positive integer. It is `null` for images, and may be `null` for a legacy video row that predates ingest probing.
-- This is the **authoritative upper bound** for frame timestamps (§3). It is the container/stream duration as measured by the server; `videoEl.duration` may differ from it by a frame or two and is fine for cosmetic display only.
-- A video with `duration_ms === null` cannot be used as a lineage source — treat it as "frame extraction unavailable" (§6).
+- `duration_ms` is the **lineage upper bound**: a frame upload is rejected when `source_timestamp_ms > duration_ms` or when the source's `duration_ms` is `null`.
+- The decoded `video.duration` may differ by a frame or two. The UI may use it for the timeline, but every uploaded timestamp must be clamped to `[0, duration_ms]`.
+- If `duration_ms` is `null`, don't open the extractor; show "Frame extraction isn't available for this video".
 
-Uploaded and generated videos are rejected at ingest above `MEDIA_VIDEO_MAX_DURATION_SECONDS` (default **300 s**, one cap for every ingested video); the existing `400 validation_error` message on upload is safe to show verbatim.
+User-uploaded videos are rejected at ingest above `MEDIA_VIDEO_MAX_DURATION_SECONDS` (default **300 s**) with `400 validation_error`; the message is safe to show verbatim. Generated outputs are not subject to this cap.
 
 ---
 
@@ -131,21 +134,19 @@ There is no browser-compatibility derivative: the server stores videos as upload
 
 Show an explicit **unsupported state** for it rather than an endless spinner: "Your browser can't read this video, so frames can't be extracted here." Generated outputs are expected to be browser-safe by construction (H.264/yuv420p/MP4), so this state is chiefly reachable for user-uploaded videos.
 
+Treat any of these as the unsupported state:
+
+1. The element fires `error` (`MEDIA_ERR_SRC_NOT_SUPPORTED` / `MEDIA_ERR_DECODE`).
+2. `loadedmetadata` never fires.
+3. `loadedmetadata` fires but `video.videoWidth === 0 || video.videoHeight === 0`. Some browsers decode only the audio track of a video they can't decode.
+
+A `SecurityError` when reading canvas pixels (`toBlob` / `getImageData`) means the CORS-mode load failed (§1). It is not an auth problem, so don't prompt a re-login.
+
 ### "Report this video"
 
-Offer a **Report this video** action in the unsupported state. It posts to the existing feedback endpoint with the asset's ref — the backend stores the reference, not a copy:
+Offer a **Report this video** action in the unsupported state. It opens the frontend's existing feedback dialog with `assetRef = media.asset_ref` and `initialCategory = "bug"`. The **user** writes the message (10–4000 code points), and the dialog submits `POST /v1/feedback` with `asset_ref`. The backend stores the reference, not a copy.
 
-```ts
-await apiFetch("/v1/feedback", {
-  method: "POST",
-  body: JSON.stringify({
-    category: "bug",
-    message: "Frame extraction isn't available for this video in my browser.", // 10–4000 code points
-    asset_ref: media.asset_ref, // "upload:<uuid>" | "output:<uuid>"
-    client_path: location.pathname, // pathname only
-  }),
-});
-```
+Feedback reports are user-authored by design: don't POST automatically or with canned text, which would flood triage with content-free reports.
 
 See `feedback-contract.md` for validation and the `404 asset_not_found` case.
 

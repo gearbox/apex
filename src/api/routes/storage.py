@@ -160,9 +160,9 @@ class StorageController(Controller):
             )
         logger.debug("storage.upload_started", content_type=content_type)
 
-        # Frame lineage: parsed and shape-checked before reading the body, so a malformed
-        # claim is rejected without buffering the upload. The client-declared type is only
-        # an early filter here; image preparation stays authoritative about the bytes.
+        # Frame lineage: parsed and shape-checked before any media work or DB access.
+        # The client-declared type is only an early filter; image preparation stays
+        # authoritative about the bytes.
         try:
             lineage = parse_frame_lineage(data.source_asset_ref, data.source_timestamp_ms)
         except FrameLineageError as e:

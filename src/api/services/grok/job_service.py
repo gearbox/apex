@@ -100,10 +100,10 @@ class _MaterializedVideo:
 
     outputs: list[GenerationOutputData]
     storage_keys: list[str]
+    stream_profile: VideoStreamProfile
+    """Probed facts of the stored original; logged once the output row is committed."""
     attempt_id: UUID | None = None
     product_id: str | None = None
-    stream_profile: VideoStreamProfile | None = None
-    """Probed facts of the stored original; logged once the output row is committed."""
 
 
 class GrokJobError(Exception):
@@ -1274,8 +1274,8 @@ class GrokJobService:
     @staticmethod
     def _log_video_profile(job_id: UUID, materialized: _MaterializedVideo) -> None:
         """Log the stored video original's stream facts (the first, non-thumbnail output)."""
-        if materialized.stream_profile is None or not materialized.outputs:
-            return
+        # Invariant: a failed upload of position 0 (the original) raises, so a materialized
+        # result always carries the original first.
         original = materialized.outputs[0]
         log_video_profile(
             origin=VideoProfileOrigin.GROK_OUTPUT,
