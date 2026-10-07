@@ -1,12 +1,11 @@
 """User content service - orchestrates R2 storage and database operations.
 
-This is the main service layer for handling user content (uploads and outputs).
-It coordinates between R2 storage for actual file storage and PostgreSQL
-for metadata tracking and efficient queries.
+This is the service layer for ingesting user uploads (images, videos and
+client-captured video frames) and reporting storage usage. It coordinates
+between R2 storage for the file bytes and PostgreSQL for metadata tracking.
 
-All single-resource access methods require a user_id parameter and verify
-ownership before returning data. This ensures defense-in-depth: even if
-a route guard is misconfigured, the service layer will reject cross-user access.
+Reads of stored content go through ``ContentProxyService`` and ``LibraryService``,
+not through this module.
 """
 
 from __future__ import annotations
@@ -19,7 +18,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.schemas.unified_generation import SourceMediaReference
-from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.schemas.user_content import UploadedImage
 from src.api.services.frame_lineage import FrameLineage, FrameLineageReason
 from src.api.services.generation.source_media import (
     SourceMediaResolver,
@@ -41,10 +40,8 @@ from src.api.services.media_ingest import (
 )
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin, log_video_profile
 from src.api.services.storage import (
-    MediaFormat,
     R2StorageService,
     StorageError,
-    StorageNotFoundError,
     StorageType,
     StorageValidationError,
 )
@@ -52,7 +49,6 @@ from src.api.services.storage.schemas import ALLOWED_VIDEO_CONTENT_TYPES
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import MediaKind
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
-from src.db.repositories.job import JobRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
@@ -61,7 +57,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.db.models import GenerationOutput, UserImage
+    from src.db.models import UserImage
 
 logger = structlog.get_logger(__name__)
 
@@ -90,10 +86,6 @@ def sanitize_display_filename(raw: str | None) -> str | None:
 
 class UserContentError(Exception):
     """Base exception for user content operations."""
-
-
-class UserContentNotFoundError(UserContentError):
-    """Raised when requested content doesn't exist."""
 
 
 class UserContentValidationError(UserContentError):
@@ -157,7 +149,6 @@ class UserContentService:
         """
         self._storage = storage
         self._session = session
-        self._job_repo = JobRepository(session)
         self._output_repo = OutputRepository(session)
         self._image_repo = UserImageRepository(session)
         self._product_id = product_id
@@ -555,327 +546,6 @@ class UserContentService:
             created_at=db_image.created_at,
             expires_at=db_image.expires_at,
             media=media,
-        )
-
-    async def get_upload(self, image_id: UUID, *, user_id: UUID) -> UserImage | None:
-        """Get upload metadata by ID.
-
-        Args:
-            image_id: Image ID to look up.
-            user_id: Requesting user (must be owner).
-
-        Returns:
-            UserImage if found, None otherwise.
-        """
-        return await self._image_repo.get(image_id, user_id=user_id)
-
-    async def get_upload_by_key(self, storage_key: str) -> UserImage | None:
-        """Get upload metadata by storage key.
-
-        Args:
-            storage_key: R2 storage key.
-
-        Returns:
-            UserImage if found, None otherwise.
-        """
-        return await self._image_repo.get_by_key(storage_key)
-
-    async def get_upload_access(
-        self,
-        image_id: UUID,
-        *,
-        user_id: UUID,
-        expires_in: int = 3600,
-    ) -> ImageAccess:
-        """Get presigned URL for accessing an upload.
-
-        Args:
-            image_id: Image ID to access.
-            user_id: Requesting user (must be owner).
-            expires_in: URL validity in seconds.
-
-        Returns:
-            ImageAccess with presigned URL.
-
-        Raises:
-            UserContentNotFoundError: If image doesn't exist.
-        """
-        image = await self._image_repo.get(image_id, user_id=user_id)
-        if image is None:
-            raise UserContentNotFoundError(f"Image not found: {image_id}")
-
-        result = await self._storage.get_presigned_url(
-            image.storage_key,
-            expires_in=expires_in,
-        )
-
-        return ImageAccess(
-            storage_key=result.storage_key,
-            presigned_url=result.presigned_url,
-            content_type=result.content_type,
-            size_bytes=result.size_bytes,
-            expires_in_seconds=result.expires_in_seconds,
-        )
-
-    async def download_upload(self, image_id: UUID, *, user_id: UUID) -> bytes:
-        """Download upload content.
-
-        Args:
-            image_id: Image ID to download.
-            user_id: Requesting user (must be owner).
-
-        Returns:
-            Raw image bytes.
-
-        Raises:
-            UserContentNotFoundError: If image doesn't exist.
-        """
-        image = await self._image_repo.get(image_id, user_id=user_id)
-        if image is None:
-            raise UserContentNotFoundError(f"Image not found: {image_id}")
-
-        try:
-            return await self._storage.download(image.storage_key)
-        except StorageNotFoundError as e:
-            # DB record exists but R2 file missing - data inconsistency
-            logger.exception(
-                "r2.file_missing",
-                image_id=str(image_id),
-                storage_key=image.storage_key,
-            )
-            raise UserContentNotFoundError(f"Image file not found: {image_id}") from e
-
-    async def list_upload_derivatives(self, image_id: UUID) -> list[UserImage]:
-        """Return derivative (thumbnail) rows for a single upload.
-
-        Args:
-            image_id: Parent upload ID.
-
-        Returns:
-            List of derivative UserImage rows.
-        """
-        return list(await self._image_repo.list_derivatives(image_id))
-
-    async def batch_output_derivatives(
-        self, output_ids: list[UUID]
-    ) -> dict[UUID, list[GenerationOutput]]:
-        """Return derivative rows for a batch of outputs.
-
-        Args:
-            output_ids: Parent output IDs.
-
-        Returns:
-            Mapping from parent_output_id to list of derivative rows.
-        """
-        return await self._output_repo.batch_derivatives(output_ids)
-
-    async def delete_upload(self, image_id: UUID, *, user_id: UUID) -> bool:
-        """Delete an uploaded image.
-
-        Removes from both R2 and database.
-
-        Args:
-            image_id: Image ID to delete.
-            user_id: Requesting user (must be owner).
-
-        Returns:
-            True if deleted, False if not found.
-        """
-        image = await self._image_repo.get(image_id, user_id=user_id)
-        if image is None:
-            return False
-
-        # Delete derivative (thumbnail) R2 objects first; DB cascade removes rows.
-        derivatives = await self._image_repo.list_derivatives(image_id)
-        for derivative in derivatives:
-            await self._storage.delete(derivative.storage_key)
-
-        await self._storage.delete(image.storage_key)
-        await self._image_repo.delete(image_id, user_id=user_id)
-
-        logger.info("user_content.deleted", image_id=str(image_id))
-        return True
-
-    # -------------------------------------------------------------------------
-    # Output operations
-    # -------------------------------------------------------------------------
-
-    async def get_output(self, output_id: UUID, *, user_id: UUID) -> GenerationOutput | None:
-        """Get output metadata by ID.
-
-        Args:
-            output_id: Output ID to look up.
-            user_id: Requesting user (must be owner).
-
-        Returns:
-            GenerationOutput if found, None otherwise.
-        """
-        return await self._output_repo.get(output_id, user_id=user_id)
-
-    async def get_output_access(
-        self,
-        output_id: UUID,
-        *,
-        user_id: UUID,
-        expires_in: int = 3600,
-    ) -> ImageAccess:
-        """Get presigned URL for accessing an output.
-
-        Args:
-            output_id: Output ID to access.
-            user_id: Requesting user (must be owner).
-            expires_in: URL validity in seconds.
-
-        Returns:
-            ImageAccess with presigned URL.
-
-        Raises:
-            UserContentNotFoundError: If output doesn't exist.
-        """
-        output = await self._output_repo.get(output_id, user_id=user_id)
-        if output is None:
-            raise UserContentNotFoundError(f"Output not found: {output_id}")
-
-        result = await self._storage.get_presigned_url(
-            output.storage_key,
-            expires_in=expires_in,
-        )
-
-        return ImageAccess(
-            storage_key=result.storage_key,
-            presigned_url=result.presigned_url,
-            content_type=result.content_type,
-            size_bytes=result.size_bytes,
-            expires_in_seconds=result.expires_in_seconds,
-        )
-
-    async def download_output(self, output_id: UUID, *, user_id: UUID) -> bytes:
-        """Download output content.
-
-        Args:
-            output_id: Output ID to download.
-            user_id: Requesting user (must be owner).
-        Returns:
-            Raw image bytes.
-
-        Raises:
-            UserContentNotFoundError: If output doesn't exist or is not owned by the user.
-        """
-        output = await self._output_repo.get(output_id, user_id=user_id)
-        if output is None:
-            raise UserContentNotFoundError(f"Output not found: {output_id}")
-
-        try:
-            return await self._storage.download(output.storage_key)
-        except StorageNotFoundError as e:
-            logger.exception(
-                "r2.file_missing",
-                output_id=str(output_id),
-                storage_key=output.storage_key,
-            )
-            raise UserContentNotFoundError(f"Output file not found: {output_id}") from e
-
-    async def list_job_outputs(
-        self,
-        job_id: UUID,
-        *,
-        user_id: UUID,
-    ) -> list[GenerationOutput]:
-        """List outputs for a job.
-
-        Args:
-            job_id: Job to list outputs for.
-            user_id: Requesting user (must be owner of the outputs).
-
-        Returns:
-            List of GenerationOutput metadata ordered by index.
-        """
-        # Verify job ownership
-        job = await self._job_repo.get(job_id, user_id=user_id)
-        if job is None:
-            raise UserContentNotFoundError(f"Job not found: {job_id}")
-
-        outputs = await self._output_repo.list_by_job(job_id)
-        return list(outputs)
-
-    async def list_user_outputs(
-        self,
-        user_id: UUID,
-        *,
-        limit: int = 100,
-        cursor_ts: datetime | None = None,
-        cursor_id: UUID | None = None,
-    ) -> list[GenerationOutput]:
-        """List outputs for a user.
-
-        Uses limit+1 fetch pattern — caller checks ``len(result) > limit``
-        to determine ``has_more``.
-
-        Args:
-            user_id: User to list outputs for.
-            limit: Maximum results (fetch limit+1 for has_more).
-            cursor_ts: ``created_at`` of the last item on the previous page.
-            cursor_id: ``id`` of the last item on the previous page.
-
-        Returns:
-            List of GenerationOutput instances.
-        """
-        outputs = await self._output_repo.list_by_user(
-            user_id,
-            limit=limit,
-            cursor_ts=cursor_ts,
-            cursor_id=cursor_id,
-        )
-        return list(outputs)
-
-    # -------------------------------------------------------------------------
-    # Storage key utilities (for ComfyUI integration)
-    # -------------------------------------------------------------------------
-
-    def get_upload_storage_key(self, image_id: UUID, user_id: UUID, format: MediaFormat) -> str:
-        """Get the R2 storage key for an upload.
-
-        Useful for passing to ComfyUI S3 nodes.
-
-        Args:
-            image_id: Image file ID.
-            user_id: Owner of the image.
-            format: Image format.
-
-        Returns:
-            Full R2 storage key.
-        """
-        return self._storage.build_storage_key(
-            user_id=user_id,
-            file_id=image_id,
-            storage_type=StorageType.UPLOAD,
-            format=format,
-        )
-
-    def get_output_storage_key(
-        self,
-        output_id: UUID,
-        user_id: UUID,
-        job_id: UUID,
-        format: MediaFormat,
-    ) -> str:
-        """Get the R2 storage key for an output.
-
-        Args:
-            output_id: Output file ID.
-            user_id: Owner of the output.
-            job_id: Associated job.
-            format: Image format.
-
-        Returns:
-            Full R2 storage key.
-        """
-        return self._storage.build_storage_key(
-            user_id=user_id,
-            file_id=output_id,
-            storage_type=StorageType.OUTPUT,
-            format=format,
-            job_id=job_id,
         )
 
     # -------------------------------------------------------------------------

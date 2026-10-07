@@ -1657,29 +1657,3 @@ class GrokJobService:
             GenerationJob if found, None otherwise.
         """
         return await JobRepository(session).get(job_id)
-
-    async def get_job_outputs(
-        self,
-        session: AsyncSession,
-        job_id: UUID,
-    ) -> list[str]:
-        """Get presigned URLs for job outputs.
-
-        Args:
-            session: Database session.
-            job_id: Job ID.
-
-        Returns:
-            List of presigned URLs for accessing outputs.
-        """
-        outputs = await OutputRepository(session).list_by_job(job_id)
-
-        urls = []
-        for output in outputs:
-            result = await self._storage.get_presigned_url(
-                output.storage_key,
-                expires_in=3600,
-            )
-            urls.append(result.presigned_url)
-
-        return urls

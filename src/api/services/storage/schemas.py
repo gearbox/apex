@@ -13,7 +13,6 @@ __all__ = [
     "StorageStats",
     "StorageType",
     "StoredFile",
-    "UploadRequest",
     "UploadResult",
 ]
 
@@ -77,21 +76,11 @@ class StoredFile(msgspec.Struct, kw_only=True):
     job_id: UUID | None = None  # Associated job (for outputs)
 
 
-class UploadRequest(msgspec.Struct, kw_only=True):
-    """Request to upload a file."""
-
-    user_id: UUID
-    filename: str
-    content_type: str
-    size_bytes: int
-
-
 class UploadResult(msgspec.Struct, kw_only=True):
     """Result of a successful upload."""
 
     id: UUID
     storage_key: str
-    presigned_url: str | None = None  # For direct access
     expires_at: datetime | None = None
 
 

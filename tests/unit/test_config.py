@@ -71,28 +71,6 @@ class TestNodeCooldownThresholds:
             )
 
 
-class TestFrameExtractStaleRunningThreshold:
-    def test_default_matches_worst_case_runtime(self) -> None:
-        settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)
-        assert settings.frame_extract_stale_running_seconds == 1800
-
-    def test_below_worst_case_rejected(self) -> None:
-        with pytest.raises(ValueError, match="frame_extract_stale_running_seconds must be >="):
-            hermetic_settings(
-                jwt_secret_key=_JWT_SECRET,
-                frame_extract_stale_running_seconds=300,
-                frame_extract_ffmpeg_timeout_seconds=30,
-            )
-
-    def test_boundary_equal_to_worst_case_accepted(self) -> None:
-        settings = hermetic_settings(
-            jwt_secret_key=_JWT_SECRET,
-            frame_extract_stale_running_seconds=1800,
-            frame_extract_ffmpeg_timeout_seconds=30,
-        )
-        assert settings.frame_extract_stale_running_seconds == 1800
-
-
 class TestNowpaymentsIpnCallbackUrl:
     def test_unset_accepted(self) -> None:
         settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)
@@ -253,7 +231,16 @@ class TestMediaVideoMaxDuration:
             hermetic_settings(jwt_secret_key=_JWT_SECRET, media_video_max_duration_seconds=value)
 
     def test_old_name_is_removed_without_an_alias(self, monkeypatch: pytest.MonkeyPatch) -> None:
-        assert "frame_extract_max_video_seconds" not in Settings.model_fields
+        removed = (
+            "frame_extract_max_video_seconds",
+            "frame_extract_ffmpeg_timeout_seconds",
+            "frame_extract_poll_interval_seconds",
+            "frame_preview_max_edge",
+            "frame_preview_url_ttl_seconds",
+            "frame_preview_retention_days",
+            "frame_extract_stale_running_seconds",
+        )
+        assert not set(removed) & set(Settings.model_fields)
         # A stale env var neither crashes startup (extra="ignore") nor sets the new cap.
         monkeypatch.setenv("FRAME_EXTRACT_MAX_VIDEO_SECONDS", "42")
         settings = hermetic_settings(jwt_secret_key=_JWT_SECRET)

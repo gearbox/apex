@@ -98,7 +98,7 @@ class UserImage(Base):
     width: Mapped[int | None] = mapped_column(Integer, nullable=True)
     height: Mapped[int | None] = mapped_column(Integer, nullable=True)
 
-    # --- Video frame extraction lineage (migration 020) ---
+    # --- Extracted-frame lineage (client-captured frames; columns from migration 020) ---
     # At most one of source_output_id / source_upload_id is set — enforced by
     # ck_user_images_single_frame_source. ON DELETE SET NULL is deliberate:
     # deleting the source video must not delete extracted frames; lineage

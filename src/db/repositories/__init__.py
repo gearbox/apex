@@ -2,7 +2,6 @@
 
 from .base import BaseRepository
 from .billing import BillingRepository
-from .frame_extraction import FrameExtractionJobRepository
 from .gpu_session import GpuSessionRepository
 from .gpu_session_operation import EventOutcome, GpuSessionOperationRepository
 from .job import JobRepository
@@ -21,7 +20,6 @@ __all__ = [
     "BaseRepository",
     "BillingRepository",
     "EventOutcome",
-    "FrameExtractionJobRepository",
     "GpuSessionOperationRepository",
     "GpuSessionRepository",
     "JobRepository",

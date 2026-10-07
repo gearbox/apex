@@ -313,22 +313,6 @@ class MediaFormat(StrEnum):
         return self in (MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV)
 
 
-class FrameExtractionKind(StrEnum):
-    """Which phase of the video frame extraction flow a job performs."""
-
-    PREVIEW = "preview"
-    EXTRACT = "extract"
-
-
-class FrameExtractionStatus(StrEnum):
-    """Lifecycle status of a frame extraction job."""
-
-    QUEUED = "queued"
-    RUNNING = "running"
-    COMPLETED = "completed"
-    FAILED = "failed"
-
-
 class MediaKind(StrEnum):
     """Supported owned-library media kinds."""
 

@@ -40,7 +40,7 @@ logger = structlog.get_logger(__name__)
 class UnifiedJobController(Controller):
     """Cross-provider job history and status endpoints.
 
-    All responses include full generation parameters and presigned output URLs
+    All responses include full generation parameters and stable content-proxy output URLs
     so the frontend can render the gallery without extra API calls.
     """
 

@@ -1,8 +1,21 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-10-01 — **Client-side frame extraction support** (Phase A, additive; the
-> `/v1/frames/*` API and the storage access/download routes keep working and are deprecated — they are
-> removed in Phase B once the frontend has migrated). (1) `MediaOriginal` gains `duration_ms: int | null`
+> _Last updated: 2026-10-07 — **Server-side frame extraction and browser presigned-URL routes removed**
+> (Phase B, **breaking**, `0.50.0`; hard cutover — removed routes simply `404`, no `410` stubs).
+> Removed routes: `POST /v1/frames/preview`, `POST /v1/frames/extract`, `GET /v1/frames/jobs/{job_id}`;
+> `GET /v1/storage/uploads/{image_id}` (+ `/download`), `GET /v1/storage/outputs` (list),
+> `GET /v1/storage/outputs/{output_id}` (+ `/download`), `GET /v1/storage/jobs/{job_id}/outputs`.
+> `/v1/storage` now exposes only `POST /upload` and `GET /stats`; read content through
+> `/v1/content/*` (§9) and `/v1/library/*` (§10) / `/v1/jobs/{id}` (§6). Removed schemas:
+> `FrameJobResponse` (and its request/preview/extract DTOs), `ImageAccessResponse`, `OutputListItem` —
+> no API schema carries `presigned_url` / `expires_in_seconds` any more. Dropped table:
+> `frame_extraction_jobs` (migration `051`; the `user_images` lineage columns are kept — client-captured
+> frames still write them). Removed enums `FrameExtractionKind` / `FrameExtractionStatus`. Removed
+> settings: `FRAME_EXTRACT_FFMPEG_TIMEOUT_SECONDS`, `FRAME_EXTRACT_POLL_INTERVAL_SECONDS`,
+> `FRAME_PREVIEW_MAX_EDGE`, `FRAME_PREVIEW_URL_TTL_SECONDS`, `FRAME_PREVIEW_RETENTION_DAYS`,
+> `FRAME_EXTRACT_STALE_RUNNING_SECONDS`. Frontend should regenerate types (`gen:api`)._
+>
+> _Prior (2026-10-01): **Client-side frame extraction support** (Phase A, additive). (1) `MediaOriginal` gains `duration_ms: int | null`
 > on every surface that serializes a media original (video duration from ingest; `null` for images and
 > legacy rows). (2) `POST /v1/storage/upload` accepts two optional multipart fields,
 > `source_asset_ref` + `source_timestamp_ms`, recording the source video of a frame the browser captured;
@@ -1312,19 +1325,18 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 
 ## 8. Storage *(authenticated)*
 
-> **Library is the primary read surface.** `GET /v1/library/` (§10) supersedes both the removed
-> `GET /v1/storage/uploads` list and, for most UI purposes, `GET /v1/storage/outputs` below —
-> it's the single paginated grid over uploads + outputs with favorites/projects/tags/filters.
-> The endpoints in this section remain for upload creation, single-item presigned access, raw
-> byte download, and storage stats — none of that is replaced by Library.
+> **Upload + stats only.** `/v1/storage` exposes `POST /v1/storage/upload` and
+> `GET /v1/storage/stats`. Reading content goes through the content proxy (§9) and the library
+> (§10): `GET /v1/library/` is the single paginated grid over uploads + outputs, and
+> `GET /v1/jobs/{job_id}` (§6) returns a job's outputs. The former single-item presigned access,
+> raw-download and output-list routes were removed in `0.50.0`.
 
 > **Retention:** every upload and output row carries `expires_at`, set at creation to `now +
 > RETENTION_DAYS` (default 7 days). A periodic background sweeper (`ContentRetentionWorker`)
 > deletes expired rows and their R2 objects on a fixed interval. Once swept: the item drops out
-> of Storage/Library list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
+> of Library list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
 > `expires_at` is a plain timestamp (not a countdown) so the frontend can derive and tick a
-> "Delete in N days/hours/minutes" badge client-side — see `ImageListItem`/`OutputListItem`
-> below and `LibraryAssetItem` (§10).
+> "Delete in N days/hours/minutes" badge client-side — see `LibraryAssetItem` (§10).
 
 ### Uploads
 
@@ -1380,71 +1392,6 @@ Note:     Returns the id/asset_ref used for I2I/I2V generation requests.
           Video duration is returned as media.original.duration_ms (also on every
           library / group / lineage / job-output surface; null for images). The cap
           is MEDIA_VIDEO_MAX_DURATION_SECONDS (default 300) for every ingested video.
-```
-
-> **Removed (2026-07-22):** `GET /v1/storage/uploads` (list, and its `ImageListItem` response
-> schema) — use `GET /v1/library/?source=upload` (§10) instead.
-
-#### `GET /v1/storage/uploads/{image_id}`
-
-```
-Query:    expires_in? (60–86400 seconds, default 3600)
-Response: {
-  id: UUID,
-  storage_key: string,
-  presigned_url: string,
-  content_type: string,
-  size_bytes: int,
-  expires_in_seconds: int
-}
-Errors:   404 not_found
-```
-
-#### `GET /v1/storage/uploads/{image_id}/download`
-
-```
-Response: Raw bytes (with appropriate Content-Type header)
-Errors:   404 not_found
-```
-
-### Outputs
-
-#### `GET /v1/storage/outputs`
-
-```
-Query:    limit? (1–100, default 50), cursor? (opaque token)
-Response: CursorPage<OutputListItem>
-
-OutputListItem: {
-  id: UUID,
-  job_id: UUID,
-  output_index: int,
-  created_at: datetime,
-  expires_at: datetime,
-  media: MediaObject    // original + sm/md WEBP variants
-}
-```
-
-#### `GET /v1/storage/outputs/{output_id}`
-
-```
-Query:    expires_in? (60–86400 seconds, default 3600)
-Response: { id, storage_key, presigned_url, content_type, size_bytes, expires_in_seconds }
-Errors:   404 not_found
-```
-
-#### `GET /v1/storage/outputs/{output_id}/download`
-
-```
-Response: Raw bytes (with appropriate Content-Type header)
-Errors:   404 not_found
-```
-
-#### `GET /v1/storage/jobs/{job_id}/outputs`
-
-```
-Response: CursorPage<OutputListItem>  // has_more=false, no cursor (returns all outputs)
-Errors:   404
 ```
 
 ### Statistics
@@ -1547,84 +1494,6 @@ Note:     Streams the asset a feedback report points at, resolved as the reporte
 > `DELETE /v1/library/assets/{asset_ref}` (§10), which delegates to the same
 > `ContentProxyService.delete_content` logic (R2 removal + DB record removal + lineage
 > `SET NULL`) but resolves the target table from the `asset_ref` prefix instead of trying both.
-
----
-
-## 9b. Video Frame Extraction *(authenticated)*
-
-> Full contract: `docs/contracts/video-frame-extraction.md`.
-
-Takes any video — a `GenerationOutput` (Grok T2V/I2V) or a user-uploaded video (§8, `video/*` content type) — and either previews it as a low-res frame strip or extracts full-resolution frames at chosen timestamps. **Free** — no token charge, no `Idempotency-Key` header on any endpoint below. Both endpoints return `202` immediately with a `job_id`; the actual ffmpeg work runs on a background worker (`FrameExtractionWorker`) — poll `GET /v1/frames/jobs/{job_id}` until `status` is `completed` or `failed`.
-
-Exactly one of `source_output_id` / `source_upload_id` must be set on every request below (`400 invalid_source` otherwise); the resolved source must be owned by the caller, belong to the current product, and have a video content type (`400 not_a_video` / `404 not_found` otherwise).
-
-#### `POST /v1/frames/preview`
-
-```
-Request:  {
-  source_output_id?: UUID | null,   // exactly one of these two
-  source_upload_id?: UUID | null,
-  frame_count?: int                 // 2-60, default 12
-}
-Response: { job_id: UUID, status: "queued" }
-Status:   202 Accepted
-Errors:   400 invalid_source | not_a_video, 404 not_found
-```
-
-#### `POST /v1/frames/extract`
-
-```
-Request:  {
-  source_output_id?: UUID | null,
-  source_upload_id?: UUID | null,
-  timestamps_ms: int[]              // 1-50 entries, each >= 0
-}
-Response: { job_id: UUID, status: "queued" }
-Status:   202 Accepted
-Errors:   400 invalid_source | not_a_video, 404 not_found
-Note:     Whether each timestamp is within the video's actual duration is
-          checked once the worker probes the file (after the job starts
-          running) — an out-of-range timestamp fails the *job*
-          (status=failed, precise error), not the request.
-```
-
-#### `GET /v1/frames/jobs/{job_id}`
-
-```
-Response: {
-  job_id: UUID,
-  kind: "preview" | "extract",
-  status: "queued" | "running" | "completed" | "failed",
-  created_at: datetime,
-  started_at: datetime | null,
-  finished_at: datetime | null,
-  error: string | null,             // populated only when status=failed
-  source: { type: "output" | "upload", id: UUID },
-  preview?: {                       // present iff kind=preview AND status=completed
-    frames: [ { index: int, timestamp_ms: int, url: string } ],
-    expires_in_seconds: int
-  },
-  extracted?: {                     // present iff kind=extract AND status=completed
-    frames: [ { timestamp_ms: int, upload_id: UUID, media: MediaObject } ]
-  }
-}
-Errors:   404 not_found (job doesn't exist or isn't owned by the caller)
-Note:     preview.frames[].url is a presigned R2 URL generated FRESH on every
-          call — never persisted, never the same URL twice. expires_in_seconds
-          is that response's TTL (default 3600s); re-poll for fresh URLs
-          rather than caching. Preview frames live at a non-authenticated,
-          top-level R2 prefix that expires via an R2 lifecycle rule (default
-          2 days) — there is no /v1/content/... proxy indirection for them
-          (by design: stateless, no DB rows).
-
-          extracted.frames[].media is the same MediaObject as everything else
-          (§5b) — its urls are stable /v1/content/uploads/{id} proxy paths,
-          cacheable indefinitely, same as any other upload. Once an extract
-          job completes its frames are ordinary uploads: same download (§8),
-          same delete (DELETE /v1/library/assets/upload:{id}, §10), same
-          retention/expiry. Deleting the source video does NOT delete
-          frames already extracted from it.
-```
 
 ---
 
@@ -3468,7 +3337,7 @@ ComfyUI scheduler names accepted on `POST /v1/generate` (`scheduler`, Aisha imag
 
 Values: `"png"`, `"jpeg"`, `"webp"` (images), `"mp4"`, `"webm"`, `"mov"` (video)
 
-> Surfaced as the `format` field on job/library outputs. Generated image thumbnails are `webp`. `"webm"`/`"mov"` apply only to user-uploaded videos (§8/§9b) — generated video outputs are always `"mp4"`.
+> Surfaced as the `format` field on job/library outputs. Generated image thumbnails are `webp`. `"webm"`/`"mov"` apply only to user-uploaded videos (§8) — generated video outputs are always `"mp4"`.
 
 ### AccountType
 
@@ -3585,23 +3454,6 @@ Values: `"upload"`, `"output"`
 Used in `LibraryGroupLineage.source_type` (§10) to indicate whether a generation job's input came
 from a direct upload or a previous generation output.
 
-### FrameExtractionKind
-
-Values: `"preview"`, `"extract"`
-
-The `kind` field on a video frame extraction job (§9b) — which of the two flows a job performs.
-
-### FrameExtractionStatus
-
-| Value | Terminal? | Description |
-|-------|----------|-------------|
-| `queued` | No | Job created, awaiting the worker |
-| `running` | No | Worker has claimed the job and is running ffmpeg |
-| `completed` | Yes | Done — `preview`/`extracted` populated on `GET /v1/frames/jobs/{id}` |
-| `failed` | Yes | Error occurred — `error` populated with a human-readable message |
-
-**Polling strategy:** Poll `GET /v1/frames/jobs/{id}` (§9b) every ~1s while status is `queued` or `running`. Jobs are short-lived (typically low single-digit seconds) — no SSE variant exists for this.
-
 ---
 
 ## 18. Error Response Format
@@ -3690,11 +3542,9 @@ These URLs:
 
 **Frontend caching:** Because responses are `immutable`, browsers will serve cached bytes without revalidating for the `max-age` window. Use these URLs directly in `<img>` and `<video>` tags.
 
-### Presigned URLs (jobs / storage endpoints)
+### Presigned URLs
 
-- All R2 presigned URLs returned by `/v1/jobs` and `/v1/storage` endpoints are valid for **~1 hour** by default
-- Do **not** aggressively cache them — use `staleTime` of ~30 minutes in TanStack Query
-- URLs are generated on-demand when fetching jobs/outputs/uploads
+- The API returns **no browser-facing presigned URLs**. Job, library and storage responses carry stable content-proxy paths (§9) only.
 - R2 storage key pattern:
   - Uploads: `users/{user_id}/uploads/{file_id}.{ext}`
   - Outputs: `users/{user_id}/outputs/{job_id}/{file_id}.{ext}`

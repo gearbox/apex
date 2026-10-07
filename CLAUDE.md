@@ -67,7 +67,7 @@ The backend serves two distinct products from the same codebase:
 │   │   │   │                   #   GET /v1/admin/health/stream (SSE), GET /v1/admin/health/history
 │   │   │   ├── content.py      # ContentProxyController: GET /v1/content/outputs/{id}, /uploads/{id},
 │   │   │   │                   #   /feedback/{report_id} (admin-only, no-store, audit-logged)
-│   │   │   ├── storage.py      # StorageController: upload, single-item access/download, stats
+│   │   │   ├── storage.py      # StorageController: POST /v1/storage/upload (incl. client-captured frame lineage), GET /stats
 │   │   │   ├── library.py      # LibraryController: GET /v1/library/, /assets/{asset_ref}[/lineage],
 │   │   │   │                   #   /groups/{job_id}; PATCH/PUT/DELETE favorite/delete; POST assets/bulk
 │   │   │   ├── library_project.py  # LibraryProjectController: CRUD /v1/library/projects

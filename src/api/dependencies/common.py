@@ -27,8 +27,6 @@ from src.api.services.email import EmailService, LogEmailService, ResendEmailSer
 from src.api.services.email_verification import EmailVerificationService
 from src.api.services.event_bus import EventBus
 from src.api.services.feedback import FeedbackService
-from src.api.services.frames.service import FrameExtractionService
-from src.api.services.frames.worker import FrameExtractionWorker
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.service import GenerationService
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
@@ -154,7 +152,6 @@ class ServiceContainer:
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
-    frame_extraction_worker: FrameExtractionWorker | None = None
     media_ingestor: MediaIngestService | None = None
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
@@ -276,25 +273,6 @@ def get_user_content(
         max_input_megapixels=settings.image_max_input_megapixels,
         video_max_seconds=settings.media_video_max_duration_seconds,
         media_ingestor=_services.media_ingestor,
-    )
-
-
-def get_frame_extraction_service(
-    r2_storage: R2StorageService,
-    session: AsyncSession,
-    settings: Settings,
-    product_id: str,
-) -> FrameExtractionService:
-    """Provide frame extraction service.
-
-    Creates a new instance per request with the injected session.
-    """
-    return FrameExtractionService(
-        session=session,
-        r2_storage=r2_storage,
-        product_id=product_id,
-        preview_url_ttl_seconds=settings.frame_preview_url_ttl_seconds,
-        retention_days=settings.retention_days,
     )
 
 
@@ -460,7 +438,6 @@ def get_user_service(session: AsyncSession) -> UserService:
         repository=repository,
         password_service=get_password_service(),
         age_verification_service=AgeVerificationService(),
-        r2_storage=_services.r2_storage,
         legal_acceptance_service=get_legal_acceptance_service(session),
         identity_repository=UserIdentityRepository(session),
         session_termination=get_session_termination_service(session),
@@ -1019,20 +996,6 @@ async def init_services(settings: Settings) -> JWTService:
     # writers share its admission/concurrency limits.
     _services.media_ingestor = build_media_ingest_service(settings)
 
-    # Initialize and start the frame extraction worker (requires R2; not
-    # gated behind any provider config flag — core capability).
-    if workers_enabled and _services.r2_storage is not None:
-        _services.frame_extraction_worker = FrameExtractionWorker(
-            db_manager=_services.db_manager,
-            r2_storage=_services.r2_storage,
-            settings=settings,
-            media_ingestor=_services.media_ingestor,
-            redis_enabled=redis_enabled,
-            redis_client_factory=get_operational_redis_client,
-        )
-        await _services.frame_extraction_worker.start()
-        logger.info("frame_extraction_worker.started")
-
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
         grok_client = GrokClient(settings)
@@ -1567,7 +1530,6 @@ async def init_services(settings: Settings) -> JWTService:
         for w in (
             _services.token_cleanup_worker,
             _services.content_retention_worker,
-            _services.frame_extraction_worker,
             _services.aisha_job_poller,
             _services.gpu_provisioning_worker,
             _services.orphaned_tunnel_cleanup_worker,
@@ -1636,9 +1598,6 @@ async def shutdown_services() -> None:
     if _services.payment_currency_sync_worker is not None:
         await _services.payment_currency_sync_worker.stop()
 
-    if _services.frame_extraction_worker is not None:
-        await _services.frame_extraction_worker.stop()
-
     if _services.push_dispatcher is not None:
         await _services.push_dispatcher.stop()
 
@@ -1704,8 +1663,6 @@ dependencies = {
     "r2_storage": Provide(get_r2_storage, sync_to_thread=False),
     "session": Provide(get_db_session),
     "user_content": Provide(get_user_content, sync_to_thread=False),
-    # Video frame extraction
-    "frame_extraction_service": Provide(get_frame_extraction_service, sync_to_thread=False),
     # Grok services
     "grok_job_service": Provide(get_grok_job_service, sync_to_thread=False),
     # Billing services

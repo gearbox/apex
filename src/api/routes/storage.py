@@ -1,7 +1,8 @@
 """Storage API routes for user content management.
 
-Provides endpoints for uploading images, retrieving content,
-and managing user storage.
+Provides endpoints for uploading images/videos (including client-captured
+video frames) and reading storage statistics. Content is read through the
+content proxy (``/v1/content``) and the library (``/v1/library``).
 """
 
 from __future__ import annotations
@@ -15,12 +16,10 @@ from litestar import Controller, Response, get, post
 from litestar.datastructures import UploadFile  # noqa: TC002
 from litestar.di import Provide
 from litestar.enums import RequestEncodingType
-from litestar.params import Body, Parameter
+from litestar.params import Body
 from litestar.status_codes import (
-    HTTP_200_OK,
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
-    HTTP_404_NOT_FOUND,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
     HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
@@ -28,10 +27,7 @@ from litestar.status_codes import (
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
-from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.schemas.storage import (
-    ImageAccessResponse,
-    OutputListItem,
     StorageStatsResponse,
     UploadResponse,
 )
@@ -41,7 +37,6 @@ from src.api.services.frame_lineage import (
     FrameLineageReason,
     parse_frame_lineage,
 )
-from src.api.services.media import build_output_media
 from src.api.services.storage.schemas import (
     ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES,
     ALLOWED_VIDEO_CONTENT_TYPES,
@@ -49,7 +44,6 @@ from src.api.services.storage.schemas import (
 from src.api.services.user_content import (
     UserContentError,
     UserContentFrameLineageError,
-    UserContentNotFoundError,
     UserContentService,
     UserContentStorageError,
     UserContentTooLargeError,
@@ -68,8 +62,6 @@ logger = structlog.get_logger(__name__)
 
 ALLOWED_CONTENT_TYPES = ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES
 MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
-IMAGE_NOT_FOUND = "Image not found"
-OUTPUT_NOT_FOUND = "Output not found"
 
 
 def _invalid_frame_lineage(
@@ -108,7 +100,7 @@ class UploadForm:
 class StorageController(Controller):
     """User content storage endpoints.
 
-    Handles image uploads, downloads, and storage management.
+    Handles uploads and storage statistics only.
     All content is stored in Cloudflare R2 with metadata in PostgreSQL.
     """
 
@@ -273,286 +265,6 @@ class StorageController(Controller):
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
             )
-
-    @get("/uploads/{image_id:uuid}")
-    async def get_upload_access(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        image_id: UUID,
-        expires_in: Annotated[
-            int,
-            Parameter(
-                ge=60,
-                le=86400,
-                description="URL validity in seconds (1 min to 24 hours)",
-            ),
-        ] = 3600,
-    ) -> Response[ImageAccessResponse | ErrorEnvelope]:
-        """Get a presigned URL to access an uploaded image.
-
-        Returns a temporary URL valid for the specified duration.
-        Only returns URLs for images owned by the authenticated user.
-        """
-        try:
-            access = await user_content.get_upload_access(
-                image_id,
-                user_id=current_user_id,
-                expires_in=expires_in,
-            )
-
-            return Response(
-                content=ImageAccessResponse(
-                    id=str(image_id),
-                    storage_key=access.storage_key,
-                    presigned_url=access.presigned_url,
-                    content_type=access.content_type,
-                    size_bytes=access.size_bytes,
-                    expires_in_seconds=access.expires_in_seconds,
-                ),
-                status_code=HTTP_200_OK,
-            )
-
-        except UserContentNotFoundError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-    @get("/uploads/{image_id:uuid}/download")
-    async def download_upload(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        image_id: UUID,
-    ) -> Response[bytes | ErrorEnvelope]:
-        """Download an uploaded image directly.
-
-        Returns the raw image bytes with appropriate content type.
-        For large files, prefer using the presigned URL from GET /uploads/{id}.
-        """
-        try:
-            # Get metadata for content type
-            image = await user_content.get_upload(image_id, user_id=current_user_id)
-            if image is None:
-                return Response(
-                    content=ErrorEnvelope(
-                        error="not_found", message=IMAGE_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
-                    ),
-                    status_code=HTTP_404_NOT_FOUND,
-                )
-
-            data = await user_content.download_upload(image_id, user_id=current_user_id)
-
-            return Response(
-                content=data,
-                status_code=HTTP_200_OK,
-                headers={"Content-Type": image.content_type},
-            )
-
-        except UserContentNotFoundError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="not_found", message="Image not found", status_code=HTTP_404_NOT_FOUND
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-    # -------------------------------------------------------------------------
-    # Output access endpoints
-    # -------------------------------------------------------------------------
-
-    @get("/outputs/{output_id:uuid}")
-    async def get_output_access(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        output_id: UUID,
-        expires_in: Annotated[
-            int,
-            Parameter(
-                ge=60,
-                le=86400,
-                description="URL validity in seconds",
-            ),
-        ] = 3600,
-    ) -> Response[ImageAccessResponse | ErrorEnvelope]:
-        """Get a presigned URL to access a generated output.
-
-        Returns a temporary URL valid for the specified duration.
-        """
-        try:
-            access = await user_content.get_output_access(
-                output_id,
-                user_id=current_user_id,
-                expires_in=expires_in,
-            )
-
-            return Response(
-                content=ImageAccessResponse(
-                    id=str(output_id),
-                    storage_key=access.storage_key,
-                    presigned_url=access.presigned_url,
-                    content_type=access.content_type,
-                    size_bytes=access.size_bytes,
-                    expires_in_seconds=access.expires_in_seconds,
-                ),
-                status_code=HTTP_200_OK,
-            )
-
-        except UserContentNotFoundError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="not_found", message=OUTPUT_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-    @get("/outputs/{output_id:uuid}/download")
-    async def download_output(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        output_id: UUID,
-    ) -> Response[bytes | ErrorEnvelope]:
-        """Download a generated output directly.
-
-        Returns the raw image bytes with appropriate content type.
-        """
-        try:
-            output = await user_content.get_output(output_id, user_id=current_user_id)
-            if output is None:
-                return Response(
-                    content=ErrorEnvelope(
-                        error="not_found",
-                        message=OUTPUT_NOT_FOUND,
-                        status_code=HTTP_404_NOT_FOUND,
-                    ),
-                    status_code=HTTP_404_NOT_FOUND,
-                )
-
-            data = await user_content.download_output(output_id, user_id=current_user_id)
-
-            return Response(
-                content=data,
-                status_code=HTTP_200_OK,
-                headers={"Content-Type": output.content_type},
-            )
-
-        except UserContentNotFoundError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="not_found", message=OUTPUT_NOT_FOUND, status_code=HTTP_404_NOT_FOUND
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-    @get("/outputs")
-    async def list_outputs(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        limit: Annotated[int, Parameter(ge=1, le=100)] = 50,
-        cursor: str | None = None,
-    ) -> CursorPage[OutputListItem]:
-        """List generated outputs for a user.
-
-        Returns paginated list ordered by creation date (newest first).
-
-        Query parameters:
-          - ``limit``: Page size 1-100 (default 50)
-          - ``cursor``: Opaque cursor from a previous response's ``next_cursor``
-            field.  Pass to fetch the next page.
-        """
-        cursor_ts = None
-        cursor_id = None
-        if cursor is not None:
-            cursor_ts, cursor_id = decode_cursor(cursor)
-
-        outputs = await user_content.list_user_outputs(
-            current_user_id,
-            limit=limit,
-            cursor_ts=cursor_ts,
-            cursor_id=cursor_id,
-        )
-
-        has_more = len(outputs) > limit
-        if has_more:
-            outputs = outputs[:limit]
-
-        derivatives_map = await user_content.batch_output_derivatives([out.id for out in outputs])
-        items = [
-            OutputListItem(
-                id=str(out.id),
-                job_id=str(out.job_id),
-                output_index=out.output_index,
-                created_at=out.created_at,
-                expires_at=out.expires_at,
-                media=build_output_media(out, derivatives_map.get(out.id, [])),
-            )
-            for out in outputs
-        ]
-
-        next_cursor: str | None = None
-        if has_more and outputs:
-            last = outputs[-1]
-            next_cursor = encode_cursor(last.created_at, last.id)
-
-        return CursorPage(
-            items=items,
-            limit=limit,
-            has_more=has_more,
-            next_cursor=next_cursor,
-        )
-
-    @get("/jobs/{job_id:uuid}/outputs")
-    async def list_job_outputs(
-        self,
-        current_user_id: UUID,
-        user_content: UserContentService,
-        job_id: UUID,
-    ) -> Response[CursorPage[OutputListItem] | ErrorEnvelope]:
-        """List outputs for a specific job.
-
-        Returns outputs ordered by output index (batch order).
-        Only accessible by the job owner.
-        """
-        try:
-            outputs = await user_content.list_job_outputs(job_id, user_id=current_user_id)
-        except UserContentNotFoundError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="not_found",
-                    message="Job outputs not found",
-                    status_code=HTTP_404_NOT_FOUND,
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
-
-        derivatives_map = await user_content.batch_output_derivatives([out.id for out in outputs])
-        items = [
-            OutputListItem(
-                id=str(out.id),
-                job_id=str(out.job_id),
-                output_index=out.output_index,
-                created_at=out.created_at,
-                expires_at=out.expires_at,
-                media=build_output_media(out, derivatives_map.get(out.id, [])),
-            )
-            for out in outputs
-        ]
-
-        return Response(
-            content=CursorPage(
-                items=items,
-                limit=len(items),
-                has_more=False,
-                next_cursor=None,
-            ),
-            status_code=HTTP_200_OK,
-        )
 
     # -------------------------------------------------------------------------
     # Statistics

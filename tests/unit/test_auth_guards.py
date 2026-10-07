@@ -357,7 +357,6 @@ class TestStorageControllerAuth:
         from src.api.services.user_content import UserContentService
 
         mock_content_service = AsyncMock(spec=UserContentService)
-        mock_content_service.list_user_outputs.return_value = []
         mock_content_service.get_user_stats.return_value = {
             "upload_count": 0,
             "output_count": 0,
@@ -381,22 +380,10 @@ class TestStorageControllerAuth:
             resp = client.post("/v1/storage/upload")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
-    def test_list_outputs_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_storage_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get("/v1/storage/outputs")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
     def test_stats_requires_auth(self, jwt_service: JWTService) -> None:
         app = self._create_storage_app(jwt_service)
         with TestClient(app=app) as client:
             resp = client.get("/v1/storage/stats")
-            assert resp.status_code == HTTP_401_UNAUTHORIZED
-
-    def test_get_upload_access_requires_auth(self, jwt_service: JWTService) -> None:
-        app = self._create_storage_app(jwt_service)
-        with TestClient(app=app) as client:
-            resp = client.get(f"/v1/storage/uploads/{uuid4()}")
             assert resp.status_code == HTTP_401_UNAUTHORIZED
 
     def test_stats_with_auth_uses_authenticated_user_id(

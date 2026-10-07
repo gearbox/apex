@@ -104,7 +104,6 @@ def _make_service(*, video_max_seconds: int = 300) -> tuple[UserContentService, 
     )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
-    service._job_repo = AsyncMock()
     return service, storage
 
 
