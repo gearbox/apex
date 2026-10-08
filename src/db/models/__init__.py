@@ -15,7 +15,6 @@ from .billing import (
     TokenTransaction,
 )
 from .feedback import FeedbackReport
-from .frame_extraction import FrameExtractionJob
 from .generation_model import GenerationModel
 from .gpu_session import GpuSession
 from .gpu_session_command import GpuSessionCommand
@@ -46,7 +45,6 @@ __all__ = [
     "Base",
     "EmailVerificationToken",
     "FeedbackReport",
-    "FrameExtractionJob",
     "GenerationJob",
     "GenerationJobSource",
     "GenerationMaterializationAttempt",

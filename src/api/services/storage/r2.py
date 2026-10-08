@@ -85,14 +85,12 @@ class R2StorageSettings:
         access_key_id: str,
         secret_access_key: str,
         bucket_name: str,
-        public_url_base: str | None = None,
         retention_days: int = DEFAULT_RETENTION_DAYS,
     ) -> None:
         self.account_id = account_id
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.bucket_name = bucket_name
-        self.public_url_base = public_url_base
         self.retention_days = retention_days
 
     @property
@@ -294,9 +292,9 @@ class R2StorageService:
         """Store bytes at a caller-chosen key.
 
         Deliberately bypasses build_storage_key and upload validation — for
-        internal derived artifacts (preview frames, video posters, cached
-        currency logos) whose key layout is owned by the caller. Not for
-        user-supplied content: use upload() for that.
+        internal derived artifacts (video posters, cached currency logos) whose key
+        layout is owned by the caller. Not for user-supplied content: use upload()
+        for that.
         """
         try:
             async with self._get_client() as client:
@@ -347,26 +345,6 @@ class R2StorageService:
         except Exception as e:
             logger.exception("r2.download_unexpected_error", error=str(e))
             raise StorageDownloadError(f"Download failed: {e}", cause=e) from e
-
-    async def sign_key(self, storage_key: str, *, expires_in: int = 3600) -> str:
-        """Generate a presigned URL for a storage key without fetching object metadata.
-
-        Cheaper than get_presigned_url — skips the head_object round-trip.
-        Use this when the key is known to exist (e.g. already stored in the DB).
-
-        Args:
-            storage_key: R2 object key.
-            expires_in: URL validity in seconds (default 1 hour).
-
-        Returns:
-            Presigned URL string.
-        """
-        async with self._get_client() as client:
-            return await client.generate_presigned_url(
-                "get_object",
-                Params={"Bucket": self._settings.bucket_name, "Key": storage_key},
-                ExpiresIn=expires_in,
-            )
 
     async def get_presigned_url(
         self,

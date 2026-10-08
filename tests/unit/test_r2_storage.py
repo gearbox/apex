@@ -206,61 +206,6 @@ class TestStorageKeyParsing:
         assert result is None
 
 
-class TestSignKey:
-    """Tests for R2StorageService.sign_key (no head_object round-trip)."""
-
-    async def test_sign_key_returns_presigned_url(self, r2_service: R2StorageService) -> None:
-        """sign_key calls generate_presigned_url and returns the URL string."""
-        expected_url = "https://test-account.r2.cloudflarestorage.com/test-key?sig=abc"
-        storage_key = "users/uid/outputs/job/img.jpg"
-
-        mock_client = AsyncMock()
-        mock_client.generate_presigned_url = AsyncMock(return_value=expected_url)
-
-        @asynccontextmanager
-        async def _fake_get_client():
-            yield mock_client
-
-        with patch.object(r2_service, "_get_client", _fake_get_client):
-            url = await r2_service.sign_key(storage_key)
-
-        assert url == expected_url
-        mock_client.generate_presigned_url.assert_awaited_once_with(
-            "get_object",
-            Params={"Bucket": r2_service._settings.bucket_name, "Key": storage_key},
-            ExpiresIn=3600,
-        )
-
-    async def test_sign_key_custom_expiry(self, r2_service: R2StorageService) -> None:
-        """sign_key passes custom expires_in to generate_presigned_url."""
-        mock_client = AsyncMock()
-        mock_client.generate_presigned_url = AsyncMock(return_value="https://url")
-
-        @asynccontextmanager
-        async def _fake_get_client():
-            yield mock_client
-
-        with patch.object(r2_service, "_get_client", _fake_get_client):
-            await r2_service.sign_key("some/key", expires_in=1800)
-
-        _, kwargs = mock_client.generate_presigned_url.call_args
-        assert kwargs["ExpiresIn"] == 1800
-
-    async def test_sign_key_does_not_call_head_object(self, r2_service: R2StorageService) -> None:
-        """sign_key must not issue a head_object request."""
-        mock_client = AsyncMock()
-        mock_client.generate_presigned_url = AsyncMock(return_value="https://url")
-
-        @asynccontextmanager
-        async def _fake_get_client():
-            yield mock_client
-
-        with patch.object(r2_service, "_get_client", _fake_get_client):
-            await r2_service.sign_key("any/key")
-
-        mock_client.head_object.assert_not_awaited()
-
-
 class TestUpload:
     """Tests for R2StorageService.upload — Issue B regression.
 
@@ -329,12 +274,12 @@ class TestPutRaw:
 
         with patch.object(r2_service, "_get_client", _fake_get_client):
             await r2_service.put_raw(
-                "frame-previews/u/j/000.webp", b"webpbytes", content_type="image/webp"
+                "derived/u/j/000.webp", b"webpbytes", content_type="image/webp"
             )
 
         mock_client.put_object.assert_awaited_once_with(
             Bucket=r2_service._settings.bucket_name,
-            Key="frame-previews/u/j/000.webp",
+            Key="derived/u/j/000.webp",
             Body=b"webpbytes",
             ContentType="image/webp",
         )

@@ -68,7 +68,6 @@ services:
       DEBUG: "false"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      WORKERS: "2"
 
       # --- Logging ---
       # More verbose than prod: DEBUG level but still JSON for structured output
@@ -171,14 +170,6 @@ services:
 
       # --- Media ingest ---
       MEDIA_VIDEO_MAX_DURATION_SECONDS: ${MEDIA_VIDEO_MAX_DURATION_SECONDS:-300}
-
-      # --- Video frame extraction ---
-      FRAME_EXTRACT_FFMPEG_TIMEOUT_SECONDS: ${FRAME_EXTRACT_FFMPEG_TIMEOUT_SECONDS:-30}
-      FRAME_EXTRACT_POLL_INTERVAL_SECONDS: ${FRAME_EXTRACT_POLL_INTERVAL_SECONDS:-2}
-      FRAME_PREVIEW_MAX_EDGE: ${FRAME_PREVIEW_MAX_EDGE:-512}
-      FRAME_PREVIEW_URL_TTL_SECONDS: ${FRAME_PREVIEW_URL_TTL_SECONDS:-3600}
-      FRAME_PREVIEW_RETENTION_DAYS: ${FRAME_PREVIEW_RETENTION_DAYS:-2}
-      FRAME_EXTRACT_STALE_RUNNING_SECONDS: ${FRAME_EXTRACT_STALE_RUNNING_SECONDS:-1800}
 
       # --- Apex web-push (optional; for push notifications) ---
       VAPID_PRIVATE_KEY: ${VAPID_PRIVATE_KEY:?VAPID_PRIVATE_KEY is required for web-push}

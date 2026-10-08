@@ -13,11 +13,10 @@ import pytest
 from PIL import Image, PngImagePlugin
 
 from src.api.schemas.media import MediaObject, MediaOriginal
-from src.api.schemas.user_content import ImageAccess, UploadedImage
+from src.api.schemas.user_content import UploadedImage
 from src.api.services.media_ingest import MediaProcessingError
-from src.api.services.storage import StorageError, StorageNotFoundError, StorageValidationError
+from src.api.services.storage import StorageError, StorageValidationError
 from src.api.services.user_content import (
-    UserContentNotFoundError,
     UserContentService,
     UserContentStorageError,
     UserContentTooLargeError,
@@ -25,7 +24,7 @@ from src.api.services.user_content import (
     UserContentValidationError,
     sanitize_display_filename,
 )
-from src.core.enums import MediaFormat, OutputMediaType
+from src.core.enums import OutputMediaType
 from tests.media_ingest_support import make_media_ingestor
 
 _CANONICAL_FILENAME_RE = re.compile(r"^[0-9a-f-]{36}\.(png|jpeg|webp)$")
@@ -118,12 +117,10 @@ def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentSe
         storage=storage,
         session=session,
         product_id="vex",
-        max_input_megapixels=max_input_megapixels,
         media_ingestor=make_media_ingestor(max_image_megapixels=max_input_megapixels),
     )
     service._image_repo = AsyncMock()
     service._output_repo = AsyncMock()
-    service._job_repo = AsyncMock()
     return service, storage
 
 
@@ -548,269 +545,6 @@ class TestUploadImageNormalization:
 
         storage.upload.assert_not_called()
         service._image_repo.create.assert_not_called()  # type: ignore[attr-defined]
-
-
-# ---------------------------------------------------------------------------
-# get_upload / get_upload_by_key
-# ---------------------------------------------------------------------------
-
-
-class TestGetUpload:
-    async def test_delegates_to_image_repo(self) -> None:
-        service, _ = _make_service()
-        img = _make_db_image()
-        service._image_repo.get = AsyncMock(return_value=img)
-
-        result = await service.get_upload(img.id, user_id=uuid4())
-        assert result is img
-
-    async def test_returns_none_when_not_found(self) -> None:
-        service, _ = _make_service()
-        service._image_repo.get = AsyncMock(return_value=None)
-
-        result = await service.get_upload(uuid4(), user_id=uuid4())
-        assert result is None
-
-    async def test_get_by_key_delegates_to_repo(self) -> None:
-        service, _ = _make_service()
-        img = _make_db_image()
-        service._image_repo.get_by_key = AsyncMock(return_value=img)
-
-        result = await service.get_upload_by_key("some/key")
-        assert result is img
-
-
-# ---------------------------------------------------------------------------
-# get_upload_access
-# ---------------------------------------------------------------------------
-
-
-class TestGetUploadAccess:
-    async def test_returns_image_access_for_existing_image(self) -> None:
-        service, storage = _make_service()
-        img = _make_db_image()
-        service._image_repo.get = AsyncMock(return_value=img)
-
-        presigned = MagicMock()
-        presigned.storage_key = img.storage_key
-        presigned.presigned_url = "https://r2.example.com/key?sig=abc"
-        presigned.content_type = "image/png"
-        presigned.size_bytes = 1024
-        presigned.expires_in_seconds = 3600
-        storage.get_presigned_url = AsyncMock(return_value=presigned)
-
-        result = await service.get_upload_access(img.id, user_id=uuid4())
-
-        assert isinstance(result, ImageAccess)
-        assert result.presigned_url == presigned.presigned_url
-
-    async def test_raises_not_found_when_image_missing(self) -> None:
-        service, _ = _make_service()
-        service._image_repo.get = AsyncMock(return_value=None)
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.get_upload_access(uuid4(), user_id=uuid4())
-
-
-# ---------------------------------------------------------------------------
-# download_upload
-# ---------------------------------------------------------------------------
-
-
-class TestDownloadUpload:
-    async def test_returns_bytes_for_existing_image(self) -> None:
-        service, storage = _make_service()
-        img = _make_db_image()
-        service._image_repo.get = AsyncMock(return_value=img)
-        storage.download = AsyncMock(return_value=b"\x89PNG\r\n\x1a\n")
-
-        result = await service.download_upload(img.id, user_id=uuid4())
-        assert result == b"\x89PNG\r\n\x1a\n"
-
-    async def test_raises_not_found_when_db_record_missing(self) -> None:
-        service, _ = _make_service()
-        service._image_repo.get = AsyncMock(return_value=None)
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.download_upload(uuid4(), user_id=uuid4())
-
-    async def test_raises_not_found_when_r2_file_missing(self) -> None:
-        service, storage = _make_service()
-        img = _make_db_image()
-        service._image_repo.get = AsyncMock(return_value=img)
-        storage.download = AsyncMock(side_effect=StorageNotFoundError("r2 key missing"))
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.download_upload(img.id, user_id=uuid4())
-
-
-# ---------------------------------------------------------------------------
-# upload derivatives
-# ---------------------------------------------------------------------------
-
-
-class TestListUploads:
-    async def test_list_upload_derivatives_delegates(self) -> None:
-        service, _ = _make_service()
-        thumb = _make_db_image()
-        service._image_repo.list_derivatives = AsyncMock(return_value=[thumb])
-
-        result = await service.list_upload_derivatives(uuid4())
-        assert result == [thumb]
-
-    async def test_batch_output_derivatives_delegates(self) -> None:
-        service, _ = _make_service()
-        output_id = uuid4()
-        service._output_repo.batch_derivatives = AsyncMock(return_value={output_id: []})
-
-        result = await service.batch_output_derivatives([output_id])
-        assert output_id in result
-
-
-# ---------------------------------------------------------------------------
-# delete_upload
-# ---------------------------------------------------------------------------
-
-
-class TestDeleteUpload:
-    async def test_returns_true_and_deletes_from_r2_and_db(self) -> None:
-        service, storage = _make_service()
-        img = _make_db_image()
-        thumb = _make_db_image()
-        service._image_repo.get = AsyncMock(return_value=img)
-        service._image_repo.list_derivatives = AsyncMock(return_value=[thumb])
-        service._image_repo.delete = AsyncMock(return_value=True)
-        storage.delete = AsyncMock()
-
-        result = await service.delete_upload(img.id, user_id=uuid4())
-
-        assert result is True
-        assert storage.delete.call_count == 2  # thumb + main image
-
-    async def test_returns_false_when_image_not_found(self) -> None:
-        service, _ = _make_service()
-        service._image_repo.get = AsyncMock(return_value=None)
-
-        result = await service.delete_upload(uuid4(), user_id=uuid4())
-        assert result is False
-
-
-# ---------------------------------------------------------------------------
-# get_output / get_output_access / download_output
-# ---------------------------------------------------------------------------
-
-
-class TestGetOutput:
-    async def test_delegates_to_output_repo(self) -> None:
-        service, _ = _make_service()
-        out = _make_db_output()
-        service._output_repo.get = AsyncMock(return_value=out)
-
-        result = await service.get_output(out.id, user_id=uuid4())
-        assert result is out
-
-    async def test_get_output_access_returns_image_access(self) -> None:
-        service, storage = _make_service()
-        out = _make_db_output()
-        service._output_repo.get = AsyncMock(return_value=out)
-
-        presigned = MagicMock()
-        presigned.storage_key = out.storage_key
-        presigned.presigned_url = "https://r2.example.com/out"
-        presigned.content_type = "image/png"
-        presigned.size_bytes = 2048
-        presigned.expires_in_seconds = 3600
-        storage.get_presigned_url = AsyncMock(return_value=presigned)
-
-        result = await service.get_output_access(out.id, user_id=uuid4())
-        assert isinstance(result, ImageAccess)
-
-    async def test_get_output_access_raises_when_not_found(self) -> None:
-        service, _ = _make_service()
-        service._output_repo.get = AsyncMock(return_value=None)
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.get_output_access(uuid4(), user_id=uuid4())
-
-    async def test_download_output_returns_bytes(self) -> None:
-        service, storage = _make_service()
-        out = _make_db_output()
-        service._output_repo.get = AsyncMock(return_value=out)
-        storage.download = AsyncMock(return_value=b"\x89PNG")
-
-        result = await service.download_output(out.id, user_id=uuid4())
-        assert result == b"\x89PNG"
-
-    async def test_download_output_raises_when_not_found_in_db(self) -> None:
-        service, _ = _make_service()
-        service._output_repo.get = AsyncMock(return_value=None)
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.download_output(uuid4(), user_id=uuid4())
-
-    async def test_download_output_raises_when_r2_file_missing(self) -> None:
-        service, storage = _make_service()
-        out = _make_db_output()
-        service._output_repo.get = AsyncMock(return_value=out)
-        storage.download = AsyncMock(side_effect=StorageNotFoundError("missing"))
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.download_output(out.id, user_id=uuid4())
-
-
-# ---------------------------------------------------------------------------
-# list_job_outputs / list_user_outputs
-# ---------------------------------------------------------------------------
-
-
-class TestListOutputs:
-    async def test_list_job_outputs_raises_when_job_not_found(self) -> None:
-        service, _ = _make_service()
-        service._job_repo.get = AsyncMock(return_value=None)
-
-        with pytest.raises(UserContentNotFoundError):
-            await service.list_job_outputs(uuid4(), user_id=uuid4())
-
-    async def test_list_job_outputs_returns_outputs(self) -> None:
-        service, _ = _make_service()
-        job = MagicMock()
-        service._job_repo.get = AsyncMock(return_value=job)
-        outs = [_make_db_output()]
-        service._output_repo.list_by_job = AsyncMock(return_value=outs)
-
-        result = await service.list_job_outputs(uuid4(), user_id=uuid4())
-        assert result == outs
-
-    async def test_list_user_outputs_delegates(self) -> None:
-        service, _ = _make_service()
-        outs = [_make_db_output()]
-        service._output_repo.list_by_user = AsyncMock(return_value=outs)
-
-        result = await service.list_user_outputs(uuid4())
-        assert result == outs
-
-
-# ---------------------------------------------------------------------------
-# Storage key utilities
-# ---------------------------------------------------------------------------
-
-
-class TestStorageKeyUtilities:
-    def test_get_upload_storage_key(self) -> None:
-        service, storage = _make_service()
-        storage.build_storage_key = MagicMock(return_value="users/u/uploads/id.png")
-
-        result = service.get_upload_storage_key(uuid4(), uuid4(), MediaFormat.PNG)
-        assert result == "users/u/uploads/id.png"
-        storage.build_storage_key.assert_called_once()
-
-    def test_get_output_storage_key(self) -> None:
-        service, storage = _make_service()
-        storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/id.png")
-
-        result = service.get_output_storage_key(uuid4(), uuid4(), uuid4(), MediaFormat.PNG)
-        assert result == "users/u/outputs/j/id.png"
-        storage.build_storage_key.assert_called_once()
 
 
 # ---------------------------------------------------------------------------

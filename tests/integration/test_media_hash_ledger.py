@@ -20,7 +20,6 @@ from sqlalchemy import bindparam, func, select
 from sqlalchemy.exc import IntegrityError
 
 from src.api.services.billing import BillingService
-from src.api.services.frames.worker import FrameExtractionWorker
 from src.api.services.grok import GrokImageResult
 from src.api.services.grok.job_service import GrokJobService
 from src.api.services.media_hash_ledger import MediaHashLedger
@@ -30,7 +29,6 @@ from src.core.uid import new_id
 from src.db.models.media_hash import MediaHash
 from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.output import OutputRepository
-from src.db.repositories.user_image import UserImageRepository
 from src.db.types import PdqBit256
 from src.workers.aisha_job_poller import AishaJobPoller
 
@@ -41,7 +39,6 @@ if TYPE_CHECKING:
 
     from src.api.services.media_ingest import MediaIngestService
     from tests.integration.conftest import (
-        FrameExtractionJobFactory,
         GpuSessionFactory,
         JobFactory,
         UserFactory,
@@ -333,71 +330,6 @@ async def test_grok_image_stores_sanitized_bytes_and_stages_ledger_with_output(
     assert ledger[0].source_kind == "output"
     assert ledger[0].user_id == user.id
     assert ledger[0].product_id == user.product_id
-
-
-@pytest.mark.parametrize("image_format", ["PNG", "JPEG", "WEBP"])
-async def test_frame_writer_stores_sanitized_bytes_and_stages_ledger_with_upload(
-    db_session: AsyncSession,
-    make_user: UserFactory,
-    make_frame_extraction_job: FrameExtractionJobFactory,
-    tmp_path: Path,
-    media_ingestor: MediaIngestService,
-    image_format: str,
-) -> None:
-    user = await make_user(email=f"ledger-frame-{uuid4().hex}@example.com")
-    job = await make_frame_extraction_job(user=user)
-    source = _image_with_descriptive_carriers(image_format)
-    object_id = uuid4()
-    storage = MagicMock()
-    storage.upload = AsyncMock(
-        return_value=MagicMock(id=object_id, storage_key=f"test/{object_id}.{image_format.lower()}")
-    )
-    settings = MagicMock(
-        frame_extract_poll_interval_seconds=30,
-        frame_extract_ffmpeg_timeout_seconds=30,
-        frame_preview_max_edge=512,
-        retention_days=7,
-        frame_extract_stale_running_seconds=300,
-    )
-    worker = FrameExtractionWorker(
-        MagicMock(),
-        storage,
-        settings,
-        media_ingestor=media_ingestor,
-        redis_client_factory=MagicMock(),
-    )
-    with (
-        patch(
-            "src.api.services.frames.worker.frame_ffmpeg.extract_frame",
-            new=AsyncMock(return_value=source),
-        ),
-        patch(
-            "src.api.services.frames.worker.make_image_thumbnails",
-            new=AsyncMock(return_value=[]),
-        ),
-    ):
-        saved_id = await worker._extract_and_save_frame(
-            job,
-            tmp_path / "unused.mp4",
-            1000,
-            image_repo=UserImageRepository(db_session),
-            ledger=MediaHashLedger(db_session),
-            session=db_session,
-            expires_at=datetime.now(UTC) + timedelta(days=7),
-            uploaded_keys=[],
-        )
-    assert saved_id == object_id
-    assert _CANARY not in storage.upload.await_args.kwargs["data"]
-    upload = await db_session.get(UserImage, object_id)
-    ledger = (
-        (await db_session.execute(select(MediaHash).where(MediaHash.source_id == object_id)))
-        .scalars()
-        .all()
-    )
-    assert upload is not None
-    assert len(ledger) == 1
-    assert ledger[0].source_kind == "upload"
-    assert ledger[0].user_id == user.id
 
 
 async def test_video_upload_stores_remuxed_bytes_and_stages_frame_hashes(

@@ -151,7 +151,6 @@ Obtain credentials from **Cloudflare Dashboard → R2 → Manage R2 API Tokens**
 | `R2_ACCESS_KEY_ID` | *(empty)* | `str` | R2 API token access key ID. |
 | `R2_SECRET_ACCESS_KEY` | *(empty)* | `str` | R2 API token secret. Only shown once at creation — store it immediately. |
 | `R2_BUCKET_NAME` | `apex-user-content` | `str` | Target R2 bucket. Must exist before starting the service — Apex does not create it. |
-| `R2_PUBLIC_URL_BASE` | `None` | `str \| None` | Optional custom domain for public file URLs, e.g. `https://cdn.yourdomain.com`. When set, public URLs use this base instead of the default `*.r2.dev` URL. Leave unset when using presigned URLs only. |
 
 > **Storage key layout:**
 > - Uploads: `users/{user_id}/uploads/{file_id}.{ext}`
@@ -382,7 +381,6 @@ R2_ACCOUNT_ID=abc123...
 R2_ACCESS_KEY_ID=...
 R2_SECRET_ACCESS_KEY=...
 R2_BUCKET_NAME=apex-user-content
-R2_PUBLIC_URL_BASE=https://cdn.yourdomain.com   # optional
 
 # AI backends
 COMFYUI_HOST=<gpu-node-ip>

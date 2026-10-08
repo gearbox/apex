@@ -45,7 +45,6 @@ from src.api.routes.billing import BillingController, BillingWebhookController
 from src.api.routes.billing_public import BillingPublicController
 from src.api.routes.content import ContentProxyController
 from src.api.routes.feedback import FeedbackController
-from src.api.routes.frames import FramesController
 from src.api.routes.gpu_session import GpuSessionController
 from src.api.routes.health import AdminHealthController, HealthController
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
@@ -551,8 +550,6 @@ def create_app() -> Litestar:
             ProvisioningController,  # /v1/provisioning/scripts/*, /v1/provisioning/webhook/*
             # Storage
             StorageController,
-            # Video frame extraction
-            FramesController,
             # Jobs (unified, cross-provider)
             UnifiedJobController,
             # Real-time events (SSE)

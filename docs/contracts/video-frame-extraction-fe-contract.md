@@ -1,7 +1,7 @@
 # Frontend Contract — Video Frame Extraction (client-side)
 
 > **Audience:** `gearbox/apex-frontend` (SvelteKit 2 / Svelte 5).
-> **Backend source:** `gearbox/apex` `master`, Phase A of the client-side frame-extraction arc (`0.49.0`). Copy this file verbatim into the frontend repo.
+> **Backend source:** `gearbox/apex` `master` `0.50.0`. Copy this file verbatim into the frontend repo.
 > **Authority:** `gen:api` (OpenAPI) is authoritative for **types**; this document is authoritative for **semantics** — what the browser decodes, which fields to send, the single lineage error, and caching behaviour. Run `gen:api` after the backend is deployed.
 
 ---
@@ -14,7 +14,7 @@ Frame extraction happens **entirely in the browser**. The frontend loads a video
 2. **Capture** each frame (canvas → PNG/JPEG/WebP blob).
 3. **Upload** the frame with `POST /v1/storage/upload`, adding two optional multipart fields that record *which video, at what time* (§3). The frame is stored as an ordinary upload with lineage back to the source, immediately usable as an `asset_ref` input for i2i/i2v generation.
 
-Frame extraction is **free** — no token charge, no `Idempotency-Key` header. The old server-side preview/extract job API (`/v1/frames/*`) is deprecated and removed in Phase B (§8).
+Frame extraction is **free** — no token charge, no `Idempotency-Key` header. There is no server-side preview/extract job API: `/v1/frames/*` and the presigned-URL storage routes no longer exist (they return `404`). Use the stable `/v1/content/*` URLs from `media.original.url`.
 
 ---
 
@@ -157,12 +157,3 @@ See `feedback-contract.md` for validation and the `404 asset_not_found` case.
 - Image upload types, the 20 MB cap, video upload types (`video/mp4`, `video/webm`, `video/quicktime`) and their `400 validation_error` rejections are unchanged.
 - Extracted frames are ordinary uploads: same download semantics, same deletion (`DELETE /v1/content/{id}`), same retention. Deleting the source video does **not** delete frames already extracted from it — they become ordinary, source-less uploads.
 - Frame extraction needs no billing, no `Idempotency-Key`, and no polling.
-
----
-
-## 8. Deprecated — removed in Phase B
-
-These remain functional through Phase A so the old frontend keeps working while the migration lands. **Do not build anything new on them.** They are deleted in Phase B once the frontend is verified on staging:
-
-- `POST /v1/frames/preview`, `POST /v1/frames/extract`, `GET /v1/frames/jobs/{job_id}` — the server-side extraction job API and its presigned preview-frame URLs.
-- The browser-facing presigned-URL storage routes: `GET /v1/storage/uploads/{image_id}`, `GET /v1/storage/uploads/{image_id}/download`, `GET /v1/storage/outputs/{output_id}`, `GET /v1/storage/outputs/{output_id}/download`. Use the stable `/v1/content/*` URLs from `media.original.url` instead.

@@ -19,7 +19,6 @@ if TYPE_CHECKING:
     from src.api.security import PasswordService
     from src.api.services.legal.acceptance import LegalAcceptanceService, RequestContext
     from src.api.services.session_termination import SessionTerminationService
-    from src.api.services.storage import R2StorageService
     from src.core.product import ProductConfig
     from src.db.models import User
     from src.db.repositories import UserRepository
@@ -63,7 +62,6 @@ class UserService:
         legal_acceptance_service: LegalAcceptanceService,
         identity_repository: UserIdentityRepository,
         session_termination: SessionTerminationService,
-        r2_storage: R2StorageService | None = None,
     ) -> None:
         """Initialize user service.
 
@@ -82,12 +80,10 @@ class UserService:
                 tokens, access-token epoch, push cleanup) run after a password
                 change or account deactivation. Required — there is no
                 fallback that skips any of the steps (issue #142 A1).
-            r2_storage: R2 storage service for presigned URL generation (optional).
         """
         self._repo = repository
         self._password = password_service
         self._age_verification = age_verification_service
-        self._r2 = r2_storage
         self._legal = legal_acceptance_service
         self._identities = identity_repository
         self._sessions = session_termination

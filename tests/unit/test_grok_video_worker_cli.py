@@ -24,7 +24,6 @@ def settings() -> MagicMock:
     s.r2_access_key_id = "test-key"
     s.r2_secret_access_key = "test-secret"
     s.r2_bucket_name = "test-bucket"
-    s.r2_public_url_base = "https://pub.example.com"
     s.retention_days = 7
     s.grok_video_poll_interval = 5
     s.grok_video_max_poll_time = 600
@@ -170,7 +169,6 @@ class TestGrokVideoWorkerCLIRun:
             access_key_id=settings.r2_access_key_id,
             secret_access_key=settings.r2_secret_access_key,
             bucket_name=settings.r2_bucket_name,
-            public_url_base=settings.r2_public_url_base,
             retention_days=settings.retention_days,
         )
         mock_r2_cls.assert_called_once_with(mock_r2_settings_cls.return_value)
