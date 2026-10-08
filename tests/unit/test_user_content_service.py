@@ -117,7 +117,6 @@ def _make_service(*, max_input_megapixels: float = 100.0) -> tuple[UserContentSe
         storage=storage,
         session=session,
         product_id="vex",
-        max_input_megapixels=max_input_megapixels,
         media_ingestor=make_media_ingestor(max_image_megapixels=max_input_megapixels),
     )
     service._image_repo = AsyncMock()

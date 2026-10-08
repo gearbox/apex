@@ -97,7 +97,6 @@ class GrokVideoWorkerCLI:
             access_key_id=self._settings.r2_access_key_id,
             secret_access_key=self._settings.r2_secret_access_key,
             bucket_name=self._settings.r2_bucket_name,
-            public_url_base=self._settings.r2_public_url_base,
             retention_days=self._settings.retention_days,
         )
         r2_storage = R2StorageService(r2_settings)

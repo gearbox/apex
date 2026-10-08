@@ -1132,10 +1132,6 @@ class Settings(BaseSettings):
         default="apex-user-content",
         description="R2 bucket name for user content",
     )
-    r2_public_url_base: str | None = Field(
-        default=None,
-        description="Public URL base for R2 content (if using custom domain)",
-    )
     r2_public_assets_bucket: str | None = Field(
         default=None,
         description=(

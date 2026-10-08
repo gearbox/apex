@@ -130,7 +130,6 @@ class UserContentService:
         *,
         product_id: str,
         retention_days: int = 7,
-        max_input_megapixels: float = 100.0,
         video_max_seconds: int = 300,
         media_ingestor: MediaIngestor,
     ) -> None:
@@ -141,9 +140,6 @@ class UserContentService:
             session: Database session for metadata operations.
             product_id: Product this service is operating on.
             retention_days: Days to retain content before cleanup.
-            max_input_megapixels: Pixel-count cap enforced before decode
-                (see ``image_normalization.py``); guards against
-                decompression-bomb uploads.
             video_max_seconds: Preparation-time rejection cap for uploaded
                 video duration.
         """
@@ -153,7 +149,6 @@ class UserContentService:
         self._image_repo = UserImageRepository(session)
         self._product_id = product_id
         self._retention_days = retention_days
-        self._max_input_megapixels = max_input_megapixels
         self._video_max_seconds = video_max_seconds
         self._media_ingestor = media_ingestor
 

@@ -270,7 +270,6 @@ def get_user_content(
         session=session,
         product_id=product_id,
         retention_days=settings.retention_days,
-        max_input_megapixels=settings.image_max_input_megapixels,
         video_max_seconds=settings.media_video_max_duration_seconds,
         media_ingestor=_services.media_ingestor,
     )
@@ -904,7 +903,6 @@ async def init_services(settings: Settings) -> JWTService:
             access_key_id=settings.r2_access_key_id,
             secret_access_key=settings.r2_secret_access_key,
             bucket_name=settings.r2_bucket_name,
-            public_url_base=settings.r2_public_url_base,
             retention_days=settings.retention_days,
         )
         _services.r2_storage = R2StorageService(r2_settings)

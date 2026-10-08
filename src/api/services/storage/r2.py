@@ -85,14 +85,12 @@ class R2StorageSettings:
         access_key_id: str,
         secret_access_key: str,
         bucket_name: str,
-        public_url_base: str | None = None,
         retention_days: int = DEFAULT_RETENTION_DAYS,
     ) -> None:
         self.account_id = account_id
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.bucket_name = bucket_name
-        self.public_url_base = public_url_base
         self.retention_days = retention_days
 
     @property

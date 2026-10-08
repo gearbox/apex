@@ -152,7 +152,7 @@ Set `sizes` per layout (grid vs lightbox) so the browser picks the right variant
 - **Backfill is gradual.** Until the backfill command runs over old content: legacy image outputs may have only `md`; legacy **uploads may have no variants at all**; legacy **video covers may have no `sm`**. Any dimensionless legacy variant row is silently dropped by the serializer (logged server-side), so `variants` may be shorter than expected but will never contain null dims. Your fallback ladder must handle "fewer/zero variants" gracefully and not assume `sm` is present.
 - **Open label set.** Future sizes (`xs`, `xl`) may appear with no FE change required if you iterate `variants`. Hardcoding `media.variants.find(v => v.label === "md")!` is brittle — prefer "smallest ≥ target, else largest available, else original."
 - **Deletion:** `DELETE /v1/content/{id}` accepts an output **or** upload id (ownership + product scoped). Deleting a parent removes its variants server-side; the FE just drops the item.
-- **`ImageAccessResponse` (legacy):** a separate endpoint still returns `presigned_url`/`storage_key`. This is **not** part of the display contract — do not use it for rendering galleries/outputs. Use `MediaObject` everywhere for display.
+- There is no `presigned_url` anywhere in the API. Display and download always use `MediaObject` content-proxy URLs.
 
 ---
 

@@ -601,7 +601,6 @@ async def _run_impl(
         access_key_id=settings.r2_access_key_id,
         secret_access_key=settings.r2_secret_access_key,
         bucket_name=settings.r2_bucket_name,
-        public_url_base=settings.r2_public_url_base,
         retention_days=settings.retention_days,
     )
     r2 = R2StorageService(r2_settings)

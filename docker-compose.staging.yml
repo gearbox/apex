@@ -68,7 +68,6 @@ services:
       DEBUG: "false"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      WORKERS: "2"
 
       # --- Logging ---
       # More verbose than prod: DEBUG level but still JSON for structured output

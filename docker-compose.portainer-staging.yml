@@ -121,7 +121,6 @@ services:
       DEBUG: "false"
       API_HOST: "0.0.0.0"
       API_PORT: "8100"
-      WORKERS: "2"
 
       # --- Logging ---
       LOG_LEVEL: "DEBUG"
