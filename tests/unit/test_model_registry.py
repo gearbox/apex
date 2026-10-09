@@ -66,6 +66,19 @@ _EXPECTED_MODE_CONTRACTS: Mapping[
         GenerationType.I2V: (1, 1, frozenset({MediaKind.IMAGE}), ()),
         GenerationType.V2V: (1, 1, frozenset({MediaKind.VIDEO}), ()),
     },
+    ModelType.WAN_3_VIDEO: {
+        GenerationType.T2V: None,
+        GenerationType.I2V: (1, 1, frozenset({MediaKind.IMAGE}), (MediaSlot.FIRST_FRAME,)),
+        GenerationType.FLF2V: (
+            2,
+            2,
+            frozenset({MediaKind.IMAGE}),
+            (MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
+        ),
+        GenerationType.V2V: (1, 1, frozenset({MediaKind.VIDEO}), ()),
+        # "Image 1..N" in the prompt refers to source_media in request order.
+        GenerationType.R2V: (1, 8, frozenset({MediaKind.IMAGE}), ()),
+    },
     ModelType.AISHA_IMAGE: {
         GenerationType.T2I: None,
         # Provider limit = TextEncodeQwenImageEditPlus image1-image3; bundles narrow it.

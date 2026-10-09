@@ -118,7 +118,12 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=False,
             aspect_ratios=["1:1", "16:9"],
-            video=VideoConstraints(max_duration=15, resolutions=["480p", "720p"]),
+            video=VideoConstraints(
+                min_duration=1,
+                max_duration=15,
+                resolutions=["480p", "720p"],
+                supported_parameters=[],
+            ),
         )
         assert info.video is not None
         assert info.video.max_duration == 15
@@ -134,7 +139,12 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=False,
             aspect_ratios=["1:1"],
-            video=VideoConstraints(max_duration=15, resolutions=["480p", "720p"]),
+            video=VideoConstraints(
+                min_duration=1,
+                max_duration=15,
+                resolutions=["480p", "720p"],
+                supported_parameters=[],
+            ),
         )
         encoded = msgspec.json.encode(info)
         decoded = msgspec.json.decode(encoded, type=ModelInfo)

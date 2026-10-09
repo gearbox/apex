@@ -19,6 +19,7 @@ from src.core.enums import (
     ModelType,
     Provider,
     Resolution,
+    VideoParameter,
     VideoResolution,
 )
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
@@ -67,13 +68,36 @@ class ImageMeta:
 
 @dataclass(frozen=True, slots=True)
 class VideoMeta:
-    """Video-specific constraints."""
+    """Video-specific constraints.
+
+    Every field is required with no default: each video model must make a
+    conscious decision about each one (fail-loud at review time, not runtime).
+    """
+
+    min_duration: int
+    """Minimum video duration in seconds."""
 
     max_duration: int
     """Maximum video duration in seconds."""
 
     resolutions: tuple[VideoResolution, ...]
     """Supported video resolutions."""
+
+    supported_parameters: frozenset[VideoParameter]
+    """Optional request parameters this model honours; sending any other as
+    non-``None`` raises ``UnsupportedGenerationParameterError``."""
+
+    aspect_ratio_with_input_media: bool
+    """False: aspect_ratio must be omitted when source media is supplied (output follows the input)."""
+
+    max_input_video_seconds: int | None
+    """Per-clip cap on a video source (V2V). None = no model-specific cap."""
+
+    max_combined_duration: int | None
+    """V2V: input seconds + requested output seconds must not exceed this. None = no rule."""
+
+    bills_input_video_seconds: bool
+    """Pricing: whether input video seconds count toward billed_seconds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -204,8 +228,14 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             ),
         },
         video=VideoMeta(
+            min_duration=1,
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+            supported_parameters=frozenset(),
+            aspect_ratio_with_input_media=True,
+            max_input_video_seconds=None,
+            max_combined_duration=None,
+            bills_input_video_seconds=False,
         ),
         rate_limit=RateLimitMeta(max_requests=10, window_seconds=60),
     ),
@@ -293,14 +323,75 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             ),
         },
         video=VideoMeta(
+            min_duration=1,
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+            supported_parameters=frozenset(),
+            aspect_ratio_with_input_media=True,
+            max_input_video_seconds=None,
+            max_combined_duration=None,
+            bills_input_video_seconds=False,
         ),
         rate_limit=None,
         requires_age_verification=True,
         # Configured display hints only. They never feed an operation ETA.
         typical_bootstrap_seconds=900,
         typical_attach_seconds=420,
+    ),
+    ModelType.WAN_3_VIDEO: ModelMeta(
+        provider=Provider.ALIBABA,
+        max_prompt_length=4096,  # PromptStr cap; upstream allows 20 000, do not widen here
+        supports_negative_prompt=False,  # Wan 3.0 has no negative_prompt
+        aspect_ratios=(
+            AspectRatio.RATIO_16_9,
+            AspectRatio.RATIO_4_3,
+            AspectRatio.RATIO_1_1,
+            AspectRatio.RATIO_3_4,
+            AspectRatio.RATIO_9_16,
+        ),
+        max_concurrent_outputs=1,
+        generation_modes={
+            GenerationType.T2V: GenerationModeMeta(),
+            GenerationType.I2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=1,
+                    max=1,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME,),
+                )
+            ),
+            GenerationType.FLF2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=2,
+                    max=2,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
+                )
+            ),
+            GenerationType.V2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.VIDEO}))
+            ),
+            # "Image 1..N" in the prompt refers to source_media in request order.
+            GenerationType.R2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=8, media_types=frozenset({MediaKind.IMAGE}))
+            ),
+        },
+        video=VideoMeta(
+            min_duration=2,
+            max_duration=30,
+            resolutions=(
+                VideoResolution.RES_480P,
+                VideoResolution.RES_720P,
+                VideoResolution.RES_1080P,
+            ),
+            supported_parameters=frozenset({VideoParameter.AUDIO, VideoParameter.PROMPT_EXTEND}),
+            aspect_ratio_with_input_media=False,
+            max_input_video_seconds=15,
+            max_combined_duration=30,
+            bills_input_video_seconds=True,
+        ),
+        rate_limit=None,  # upstream quotas unknown; Throttling maps to RATE_LIMITED
+        requires_age_verification=False,
     ),
 }
 

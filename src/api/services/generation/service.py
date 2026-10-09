@@ -18,6 +18,11 @@ from src.api.services.generation.source_media import (
     SourceMediaResolver,
     SourceMediaValidationError,
 )
+from src.api.services.generation.video_validation import (
+    unsupported_video_parameters,
+    validate_video_request,
+    validate_video_sources,
+)
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.workflow.contract import (
@@ -57,6 +62,7 @@ if TYPE_CHECKING:
     from src.core.bundle_config import BundleMapping
     from src.core.generation_config import BundleGenerationConfig
     from src.core.generation_mode import GenerationModes, SourceMediaConstraints
+    from src.core.model_registry import VideoMeta
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
@@ -306,6 +312,18 @@ class GenerationService:
                     f"{[a.value for a in meta.aspect_ratios]}"
                 )
 
+        # 1.8 Video parameter validation (registry-driven), before any billing work.
+        # Image outputs never accept the video-only optional parameters.
+        video_meta: VideoMeta | None = None
+        if request.generation_type.output_kind is MediaKind.VIDEO:
+            model_meta = get_model_meta(request.model)
+            video_meta = validate_video_request(request, model_meta)
+            unsupported = unsupported_video_parameters(request, video_meta.supported_parameters)
+        else:
+            unsupported = unsupported_video_parameters(request, frozenset())
+        if unsupported:
+            raise UnsupportedGenerationParameterError(unsupported)
+
         # 2. Reject impossible source counts before resolving any asset. This
         # keeps count errors deterministic and avoids needless DB queries.
         self._validate_source_cardinality(request, contract)
@@ -322,6 +340,8 @@ class GenerationService:
 
         # 2.2 Per-item validation requires the ownership-checked rows.
         self._validate_resolved_sources(resolved_source_media, contract)
+        if video_meta is not None:
+            validate_video_sources(resolved_source_media, request, video_meta)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs

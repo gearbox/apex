@@ -45,6 +45,7 @@ class Provider(StrEnum):
 
     AISHA = "aisha"
     GROK = "grok"
+    ALIBABA = "alibaba"
 
     @property
     def provisioning_mode(self) -> ProvisioningMode:
@@ -68,6 +69,7 @@ class ProvisioningMode(StrEnum):
 _PROVISIONING_MODE_BY_PROVIDER: dict[Provider, ProvisioningMode] = {
     Provider.AISHA: ProvisioningMode.ON_DEMAND,
     Provider.GROK: ProvisioningMode.ALWAYS_ON,
+    Provider.ALIBABA: ProvisioningMode.ALWAYS_ON,
 }
 
 
@@ -82,6 +84,9 @@ class ModelType(StrEnum):
     GROK_IMAGINE_IMAGE = "grok-imagine-image"  # T2I, I2I (editing)
     GROK_2_IMAGE = "grok-2-image-1212"  # T2I only (older, different pricing)
     GROK_IMAGINE_VIDEO = "grok-imagine-video"  # T2V, I2V, V2V, FLF2V
+
+    # Alibaba Model Studio models
+    WAN_3_VIDEO = "wan3.0-video"  # T2V, I2V, FLF2V, V2V, R2V
 
     @property
     def provider(self) -> Provider:
@@ -128,7 +133,7 @@ class ModelType(StrEnum):
 
 
 class GenerationType(StrEnum):
-    """Generation type - text-to-image or image-to-image."""
+    """Generation type: what a request takes as input and emits as output."""
 
     T2I = "t2i"
     I2I = "i2i"
@@ -136,6 +141,7 @@ class GenerationType(StrEnum):
     I2V = "i2v"
     V2V = "v2v"  # Video-to-video (editing)
     FLF2V = "flf2v"  # First-last-frame to video
+    R2V = "r2v"  # Reference images to video
 
     @property
     def input_kinds(self) -> frozenset[MediaKind]:
@@ -192,10 +198,18 @@ class AspectRatio(StrEnum):
 
 
 class VideoResolution(StrEnum):
-    """Supported video resolutions for Grok."""
+    """Supported video resolutions; each model narrows via ``VideoMeta.resolutions``."""
 
     RES_480P = "480p"
     RES_720P = "720p"
+    RES_1080P = "1080p"
+
+
+class VideoParameter(StrEnum):
+    """Optional video request parameters a model may declare support for."""
+
+    AUDIO = "audio"
+    PROMPT_EXTEND = "prompt_extend"
 
 
 class Resolution(StrEnum):
@@ -344,6 +358,7 @@ _GENERATION_TYPE_MEDIA: Final[Mapping[GenerationType, tuple[frozenset[MediaKind]
     GenerationType.I2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
     GenerationType.FLF2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
     GenerationType.V2V: (frozenset({MediaKind.VIDEO}), MediaKind.VIDEO),
+    GenerationType.R2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
 }
 
 _META_BY_MEDIA: Final[Mapping[MediaKind, str]] = {

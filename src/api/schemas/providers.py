@@ -62,11 +62,27 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
 
+    min_duration: int
+    """Minimum video duration in seconds."""
+
     max_duration: int
     """Maximum video duration in seconds."""
 
     resolutions: list[str]
     """Supported video resolutions, e.g. ["480p", "720p"]."""
+
+    supported_parameters: list[str]
+    """Optional request parameters the model honours (sorted), e.g. ["audio", "prompt_extend"].
+    Sending any other optional video parameter as non-null is rejected."""
+
+    max_input_video_seconds: int | None = None
+    """Per-clip cap on a video source (v2v). null = no model-specific cap."""
+
+    max_combined_duration: int | None = None
+    """v2v: input seconds + requested output seconds must not exceed this. null = no rule."""
+
+    aspect_ratio_with_input_media: bool = True
+    """False: aspect_ratio must be omitted when source media is supplied."""
 
 
 class ModelRuntimeResponse(msgspec.Struct, kw_only=True):
