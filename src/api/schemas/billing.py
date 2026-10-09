@@ -8,7 +8,7 @@ from uuid import UUID
 
 import msgspec
 
-from src.core.enums import AccountType
+from src.core.enums import AccountType, VideoResolution
 
 # --- Response structs ---
 
@@ -48,6 +48,8 @@ class PricingRuleResponse(msgspec.Struct, kw_only=True):
     model: str | None
     token_cost: int
     input_token_cost: int
+    per_second_token_cost: int
+    video_resolution: str | None
     is_active: bool
     effective_from: datetime
     effective_until: datetime | None
@@ -161,9 +163,16 @@ class CreatePricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
     provider: str
     generation_type: str
     model: str | None = None
-    token_cost: int
+    token_cost: Annotated[int, msgspec.Meta(ge=0)]
     input_token_cost: Annotated[int, msgspec.Meta(ge=0)] = 0
+    per_second_token_cost: Annotated[int, msgspec.Meta(ge=0)] = 0
+    video_resolution: VideoResolution | None = None
+    """Narrows the rule to one video resolution; null = any. Part of the rule's identity."""
     notes: str | None = None
+
+    def __post_init__(self) -> None:
+        if self.token_cost == 0 and self.per_second_token_cost == 0:
+            raise ValueError("a pricing rule needs token_cost > 0 or per_second_token_cost > 0")
 
 
 class PatchPricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -171,6 +180,7 @@ class PatchPricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_onl
 
     token_cost: int | None = None
     input_token_cost: int | None = None
+    per_second_token_cost: Annotated[int, msgspec.Meta(ge=0)] | None = None
     is_active: bool | None = None
     effective_until: datetime | msgspec.UnsetType | None = msgspec.UNSET
     notes: str | msgspec.UnsetType | None = msgspec.UNSET

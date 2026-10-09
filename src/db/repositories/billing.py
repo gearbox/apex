@@ -5,7 +5,7 @@ from __future__ import annotations
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 
-from sqlalchemy import func, literal, or_, select, tuple_
+from sqlalchemy import case, func, literal, or_, select, tuple_
 from sqlalchemy.orm import joinedload
 
 from src.core.enums import AccountType, TransactionType
@@ -23,6 +23,8 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.core.enums import VideoResolution
 
 
 class _UnsetOptionalUpdate:
@@ -273,45 +275,51 @@ class BillingRepository:
         provider: str,
         generation_type: str,
         model: str | None,
+        video_resolution: VideoResolution | None = None,
     ) -> PricingRule | None:
         """Get the most specific active pricing rule.
 
-        Priority: exact match (with model) first, then wildcard (model IS NULL).
+        Four tiers, first hit wins (newest ``effective_from`` within a tier):
+
+        1. ``model`` and ``video_resolution`` both match
+        2. ``model`` matches, rule has no resolution
+        3. rule has no model, ``video_resolution`` matches
+        4. rule has no model and no resolution
+
+        With ``video_resolution=None`` (image jobs) only rules without a
+        resolution qualify, so a resolution-specific rule never prices an image.
         """
         now = datetime.now(UTC)
-        active_filter = [
-            PricingRule.is_active.is_(True),
-            PricingRule.effective_from <= now,
-            (PricingRule.effective_until.is_(None)) | (PricingRule.effective_until > now),
-        ]
-
-        # Try exact match first
-        if model is not None:
-            result = await self._session.execute(
-                select(PricingRule)
-                .where(
-                    PricingRule.provider == provider,
-                    PricingRule.generation_type == generation_type,
-                    PricingRule.model == model,
-                    *active_filter,
-                )
-                .order_by(PricingRule.effective_from.desc())
-                .limit(1)
+        model_matches = (
+            PricingRule.model.is_(None)
+            if model is None
+            else or_(PricingRule.model == model, PricingRule.model.is_(None))
+        )
+        resolution_matches = (
+            PricingRule.video_resolution.is_(None)
+            if video_resolution is None
+            else or_(
+                PricingRule.video_resolution == video_resolution.value,
+                PricingRule.video_resolution.is_(None),
             )
-            rule = result.scalar_one_or_none()
-            if rule is not None:
-                return rule
-
-        # Fallback to wildcard
+        )
+        # Lower rank = more specific. Model specificity outweighs resolution
+        # specificity, matching the tier order above.
+        rank = case((PricingRule.model.is_not(None), 0), else_=2) + case(
+            (PricingRule.video_resolution.is_not(None), 0), else_=1
+        )
         result = await self._session.execute(
             select(PricingRule)
             .where(
                 PricingRule.provider == provider,
                 PricingRule.generation_type == generation_type,
-                PricingRule.model.is_(None),
-                *active_filter,
+                model_matches,
+                resolution_matches,
+                PricingRule.is_active.is_(True),
+                PricingRule.effective_from <= now,
+                (PricingRule.effective_until.is_(None)) | (PricingRule.effective_until > now),
             )
-            .order_by(PricingRule.effective_from.desc())
+            .order_by(rank, PricingRule.effective_from.desc())
             .limit(1)
         )
         return result.scalar_one_or_none()
@@ -342,6 +350,8 @@ class BillingRepository:
         model: str | None,
         token_cost: int,
         input_token_cost: int = 0,
+        per_second_token_cost: int = 0,
+        video_resolution: VideoResolution | None = None,
         notes: str | None,
         created_by: UUID,
     ) -> PricingRule:
@@ -350,8 +360,10 @@ class BillingRepository:
             provider=provider,
             generation_type=generation_type,
             model=model,
+            video_resolution=video_resolution.value if video_resolution is not None else None,
             token_cost=token_cost,
             input_token_cost=input_token_cost,
+            per_second_token_cost=per_second_token_cost,
             notes=notes,
             created_by=created_by,
         )
@@ -365,6 +377,7 @@ class BillingRepository:
         *,
         token_cost: int | None = None,
         input_token_cost: int | None = None,
+        per_second_token_cost: int | None = None,
         is_active: bool | None = None,
         effective_until: OptionalUpdate[datetime] = UNSET_OPTIONAL_UPDATE,
         notes: OptionalUpdate[str] = UNSET_OPTIONAL_UPDATE,
@@ -376,6 +389,8 @@ class BillingRepository:
             rule.token_cost = token_cost
         if input_token_cost is not None:
             rule.input_token_cost = input_token_cost
+        if per_second_token_cost is not None:
+            rule.per_second_token_cost = per_second_token_cost
         if is_active is not None:
             rule.is_active = is_active
         if not isinstance(effective_until, _UnsetOptionalUpdate):

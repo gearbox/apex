@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.core.enums import VideoResolution
     from src.core.product import ProductConfig
     from src.db.models.billing import PricingRule
 
@@ -37,14 +38,16 @@ class PricingService:
         provider: str,
         generation_type: str,
         model: str | None,
+        video_resolution: VideoResolution | None = None,
         *,
         session: AsyncSession,
     ) -> PricingRule:
         repo = BillingRepository(session)
-        rule = await repo.get_active_price(provider, generation_type, model)
+        rule = await repo.get_active_price(provider, generation_type, model, video_resolution)
         if rule is None:
+            resolution = f"/{video_resolution.value}" if video_resolution is not None else ""
             raise PriceNotFoundError(
-                f"No active pricing rule for {provider}/{generation_type}/{model}"
+                f"No active pricing rule for {provider}/{generation_type}/{model}{resolution}"
             )
         return rule
 
@@ -58,8 +61,9 @@ class PricingService:
     ) -> int:
         """Look up token cost for a generation.
 
-        Priority: exact (provider, generation_type, model) first,
-        then wildcard (provider, generation_type, NULL) fallback.
+        Priority: exact (provider, generation_type, model) first, then wildcard
+        (provider, generation_type, NULL); see ``BillingRepository.get_active_price``
+        for the video-resolution tiers.
 
         Raises:
             PriceNotFoundError: If no active rule found.
@@ -75,16 +79,39 @@ class PricingService:
         *,
         n: int,
         source_media_count: int,
+        billed_seconds: int = 0,
+        video_resolution: VideoResolution | None = None,
         session: AsyncSession,
     ) -> int:
-        """Total token cost for a generation: (token_cost + input_token_cost * k) * n."""
+        """Total token cost: ``(token_cost + input_token_cost * k + per_second_token_cost * s) * n``.
+
+        Args:
+            n: Output count.
+            source_media_count: ``k`` — number of input assets.
+            billed_seconds: ``s`` — video seconds the provider will bill (0 for images).
+            video_resolution: Selects a resolution-specific rule for video jobs.
+
+        Raises:
+            ValueError: ``n < 1``, a negative count, or a per-second rule priced with
+                ``billed_seconds == 0`` (a caller that forgot to pass the duration).
+        """
         if n < 1:
             raise ValueError("n must be >= 1")
         if source_media_count < 0:
             raise ValueError("source_media_count must be >= 0")
+        if billed_seconds < 0:
+            raise ValueError("billed_seconds must be >= 0")
 
-        rule = await self._get_rule(provider, generation_type, model, session=session)
-        return (rule.token_cost + rule.input_token_cost * source_media_count) * n
+        rule = await self._get_rule(
+            provider, generation_type, model, video_resolution, session=session
+        )
+        if rule.per_second_token_cost > 0 and billed_seconds == 0:
+            raise ValueError("per-second rule requires billed_seconds")
+        return (
+            rule.token_cost
+            + rule.input_token_cost * source_media_count
+            + rule.per_second_token_cost * billed_seconds
+        ) * n
 
     async def list_catalog(
         self,
@@ -132,6 +159,8 @@ class PricingService:
         model: str | None,
         token_cost: int,
         input_token_cost: int = 0,
+        per_second_token_cost: int = 0,
+        video_resolution: VideoResolution | None = None,
         notes: str | None,
         admin_id: UUID,
         session: AsyncSession,
@@ -144,6 +173,8 @@ class PricingService:
             model=model,
             token_cost=token_cost,
             input_token_cost=input_token_cost,
+            per_second_token_cost=per_second_token_cost,
+            video_resolution=video_resolution,
             notes=notes,
             created_by=admin_id,
         )
@@ -168,6 +199,7 @@ class PricingService:
         *,
         token_cost: int | None = None,
         input_token_cost: int | None = None,
+        per_second_token_cost: int | None = None,
         is_active: bool | None = None,
         effective_until: OptionalUpdate[datetime] = UNSET_OPTIONAL_UPDATE,
         notes: OptionalUpdate[str] = UNSET_OPTIONAL_UPDATE,
@@ -178,6 +210,7 @@ class PricingService:
             rule_id,
             token_cost=token_cost,
             input_token_cost=input_token_cost,
+            per_second_token_cost=per_second_token_cost,
             is_active=is_active,
             effective_until=effective_until,
             notes=notes,

@@ -176,6 +176,8 @@ class BillingController(Controller):
                 model=r.model,
                 token_cost=r.token_cost,
                 input_token_cost=r.input_token_cost,
+                per_second_token_cost=r.per_second_token_cost,
+                video_resolution=r.video_resolution,
                 is_active=r.is_active,
                 effective_from=r.effective_from,
                 effective_until=r.effective_until,

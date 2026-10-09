@@ -19,6 +19,7 @@ from src.api.services.generation.source_media import (
     SourceMediaValidationError,
 )
 from src.api.services.generation.video_validation import (
+    input_video_seconds,
     unsupported_video_parameters,
     validate_video_request,
     validate_video_sources,
@@ -387,12 +388,19 @@ class GenerationService:
 
         # 7. Billing pre-flight
         account = await self._billing.resolve_account_for_user(user_id, session=session)
+        is_video = video_meta is not None
         token_cost = await self._pricing.quote(
             provider_key.value,
             request.generation_type.value,
             request.model.value,
             n=request.n,
             source_media_count=self._source_media_count(request),
+            billed_seconds=(
+                request.duration + input_video_seconds(resolved_source_media, video_meta)
+                if video_meta is not None
+                else 0
+            ),
+            video_resolution=request.resolution if is_video else None,
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)

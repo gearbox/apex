@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
@@ -10,6 +11,7 @@ import msgspec
 import pytest
 
 from src.api.schemas.unified_generation import SourceMediaReference, UnifiedGenerationRequest
+from src.api.services.generation.base import ProviderSubmitResult
 from src.api.services.generation.rate_limiter import ModelRateLimiter
 from src.api.services.generation.service import (
     GenerationService,
@@ -53,7 +55,7 @@ def _service() -> GenerationService:
     pricing = AsyncMock()
     pricing.quote = AsyncMock(return_value=50)
     return GenerationService(
-        providers={provider: MagicMock() for provider in Provider},  # type: ignore[misc]
+        providers={provider: MagicMock() for provider in Provider},
         billing_service=billing,
         pricing_service=pricing,
         rate_limiter=MagicMock(spec=ModelRateLimiter),
@@ -261,3 +263,84 @@ def test_c11_unknown_input_duration_fails_closed_for_billing() -> None:
 
     with pytest.raises(SourceMediaValidationError, match="no recorded duration"):
         input_video_seconds([_video_source(None)], wan)
+
+
+def _submitting_service() -> GenerationService:
+    """A service whose provider accepts the submit, so ``generate`` reaches the quote."""
+    service = _service()
+    job = MagicMock(id=uuid4(), status="queued", name="x", created_at=datetime.now(UTC))
+    provider = MagicMock()
+    provider.validate = MagicMock()
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+    )
+    service._providers[Provider.ALIBABA] = provider
+    return service
+
+
+_ENABLED_MODEL = patch(
+    "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+    new=AsyncMock(return_value=MagicMock(is_enabled=True)),
+)
+
+
+async def test_c11_quote_receives_duration_and_resolution_for_a_text_video() -> None:
+    service = _submitting_service()
+    request = _request(ModelType.WAN_3_VIDEO, duration=12, resolution=VideoResolution.RES_1080P)
+
+    with _ENABLED_MODEL:
+        await _generate(service, request)
+
+    kwargs = service._pricing.quote.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["billed_seconds"] == 12
+    assert kwargs["video_resolution"] is VideoResolution.RES_1080P
+
+
+async def test_c11_v2v_quote_counts_the_input_video_seconds_for_wan() -> None:
+    service = _submitting_service()
+    request = _request(
+        ModelType.WAN_3_VIDEO,
+        generation_type=GenerationType.V2V,
+        duration=10,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
+    )
+
+    with (
+        _ENABLED_MODEL,
+        patch(
+            "src.api.services.generation.service.SourceMediaResolver.resolve",
+            new=AsyncMock(return_value=[_video_source(7_200)]),
+        ),
+        patch(
+            "src.api.services.generation.service.UserImageRepository.touch_expiry_many",
+            new=AsyncMock(return_value=1),
+        ),
+        patch(
+            "src.api.services.generation.service.GenerationJobSourceRepository.create_many",
+            new=AsyncMock(),
+        ),
+    ):
+        await _generate(service, request)
+
+    kwargs = service._pricing.quote.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["billed_seconds"] == 10 + 8
+    assert kwargs["source_media_count"] == 1
+
+
+async def test_c11_image_quote_has_no_video_basis() -> None:
+    service = _service()
+    job = MagicMock(id=uuid4(), status="completed", name="x", created_at=datetime.now(UTC))
+    provider = MagicMock()
+    provider.supports_image_sizing = False
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+    )
+    service._providers[Provider.GROK] = provider
+    request = _request(ModelType.GROK_IMAGINE_IMAGE, generation_type=GenerationType.T2I, duration=9)
+
+    with _ENABLED_MODEL:
+        await _generate(service, request)
+
+    kwargs = service._pricing.quote.await_args.kwargs  # type: ignore[attr-defined]
+    assert kwargs["billed_seconds"] == 0
+    assert kwargs["video_resolution"] is None
