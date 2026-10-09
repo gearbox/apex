@@ -23,7 +23,7 @@ class _TransientError(Exception):
         super().__init__("transient")
         self.failure = ProviderFailure(
             kind=ProviderFailureKind.RATE_LIMITED,
-            provider=Provider.AISHA,
+            provider=Provider.ALIBABA,
             sanitized_message="rate limited",
         )
 
@@ -60,8 +60,8 @@ class _GrokProgressService(_GrokService):
     running_progress_pct = 50
 
 
-class _OtherService(_FakeService):
-    provider = Provider.AISHA
+class _WanService(_FakeService):
+    provider = Provider.ALIBABA
 
 
 class _SessionCtx:
@@ -97,35 +97,35 @@ def _worker(name: str, service: _FakeService) -> AsyncVideoJobWorker:
 
 async def test_c2_a_blocked_provider_does_not_delay_the_other() -> None:
     gate = asyncio.Event()
-    grok_job, other_job = _job(), _job()
-    grok_service, other_service = _GrokService(), _OtherService(gate=gate)
+    grok_job, wan_job = _job(), _job()
+    grok_service, wan_service = _GrokService(), _WanService(gate=gate)
     grok_worker = _worker("grok_video_poller", grok_service)
-    other_worker = _worker("other_video_poller", other_service)
+    wan_worker = _worker("alibaba_video_poller", wan_service)
 
     async def list_pending(*, provider: Provider) -> list[MagicMock]:
-        return [grok_job] if provider is Provider.GROK else [other_job]
+        return [grok_job] if provider is Provider.GROK else [wan_job]
 
     repo = MagicMock()
     repo.list_pending_video_jobs = AsyncMock(side_effect=list_pending)
 
     with patch("src.api.services.video_jobs.worker.JobRepository", return_value=repo):
-        other_tick = asyncio.create_task(other_worker.run_once())
+        wan_tick = asyncio.create_task(wan_worker.run_once())
         await asyncio.sleep(0)  # let the Wan poll start and block on the gate
         await asyncio.wait_for(grok_worker.run_once(), timeout=2)
 
         assert grok_service.settled == [grok_job.id]
-        assert not other_tick.done()
-        assert other_service.settled == []
+        assert not wan_tick.done()
+        assert wan_service.settled == []
 
         gate.set()
-        await asyncio.wait_for(other_tick, timeout=2)
+        await asyncio.wait_for(wan_tick, timeout=2)
 
-    assert other_service.settled == [other_job.id]
+    assert wan_service.settled == [wan_job.id]
 
 
 def test_c2_each_provider_worker_has_its_own_lease_key() -> None:
     grok = _worker("grok_video_poller", _GrokService())
-    wan = _worker("other_video_poller", _OtherService())
+    wan = _worker("alibaba_video_poller", _WanService())
 
     assert grok.name != wan.name
     assert lease_key(grok.name) != lease_key(wan.name)
@@ -135,7 +135,7 @@ def test_c2_each_provider_worker_has_its_own_lease_key() -> None:
 async def test_running_job_without_progress_value_is_neither_settled_nor_announced() -> None:
     service = _GrokService()
     event_bus = AsyncMock()
-    worker = _worker("other_video_poller", service)
+    worker = _worker("alibaba_video_poller", service)
     worker._event_bus = event_bus
     job = _job()
     job.status = JobStatus.RUNNING.value
@@ -167,11 +167,11 @@ async def test_running_job_with_legacy_progress_value_emits_it() -> None:
 
 
 async def test_transient_error_declared_by_the_service_skips_the_tick() -> None:
-    service = _OtherService()
+    service = _WanService()
     service.poll_video_job_for_worker = AsyncMock(  # type: ignore[method-assign]
         side_effect=_TransientError()
     )
-    worker = _worker("other_video_poller", service)
+    worker = _worker("alibaba_video_poller", service)
 
     await worker._poll_one(_job(), AsyncMock())
 

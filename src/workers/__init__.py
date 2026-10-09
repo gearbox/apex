@@ -22,6 +22,11 @@ In-process workers (started from the app lifespan, see
   runnable as a standalone process:
 
     python -m src.workers.grok_video
+
+- ``alibaba_video_poller`` (``src.api.services.video_jobs.worker.AsyncVideoJobWorker``) — Wan
+  video polling with its own lease and settings; standalone:
+
+    python -m src.workers.wan_video
 """
 
 from __future__ import annotations

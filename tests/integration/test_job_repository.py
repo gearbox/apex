@@ -675,3 +675,34 @@ async def test_c4_list_pending_video_jobs_includes_every_video_generation_type(
 async def test_c4_provider_is_a_required_keyword(job_repo: JobRepository) -> None:
     with pytest.raises(TypeError):
         await job_repo.list_pending_video_jobs()  # type: ignore[call-arg]
+
+
+async def test_c3_each_provider_worker_lists_only_its_own_pending_jobs(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """Grok and Wan jobs are both pending; neither provider's poll sees the other's."""
+    user = await make_user(email=f"vidpoll-c3-{uuid4().hex[:6]}@example.com")
+    grok = await make_job(
+        user=user,
+        status="running",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req",
+    )
+    wan_ids = set()
+    for gen_type in ("t2v", "i2v", "flf2v", "v2v", "r2v"):
+        wan = await make_job(
+            user=user,
+            status="queued",
+            generation_type=gen_type,
+            provider=Provider.ALIBABA.value,
+            external_request_id=f"wan-{gen_type}",
+        )
+        wan_ids.add(wan.id)
+
+    grok_ids = {j.id for j in await job_repo.list_pending_video_jobs(provider=Provider.GROK)}
+    wan_listed = {j.id for j in await job_repo.list_pending_video_jobs(provider=Provider.ALIBABA)}
+
+    assert grok.id in grok_ids
+    assert grok_ids.isdisjoint(wan_ids)
+    assert wan_listed == wan_ids

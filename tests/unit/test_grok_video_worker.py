@@ -1,4 +1,4 @@
-"""Tests for GrokVideoWorker — worker/read-through shared settlement."""
+"""Tests for the Grok-configured video worker — worker/read-through shared settlement."""
 
 from __future__ import annotations
 
@@ -26,8 +26,8 @@ def _make_settings(**overrides: object) -> MagicMock:
 
 
 def _make_worker(**overrides: object) -> AsyncVideoJobWorker:
-    settings = overrides.pop("settings", None) or _make_settings()
-    job_service = overrides.pop("job_service", None) or AsyncMock()
+    settings: Any = overrides.pop("settings", None) or _make_settings()
+    job_service: Any = overrides.pop("job_service", None) or AsyncMock()
     # An AsyncMock service has no Grok class attributes; give it the real ones.
     job_service.provider = GrokJobService.provider
     job_service.transient_poll_errors = GrokJobService.transient_poll_errors
@@ -415,8 +415,8 @@ class TestTransientPollErrors:
 
 class TestManagerRemoved:
     def test_manager_removed(self) -> None:
-        """GrokVideoWorkerManager was deleted — the worker is wired through
+        """The old worker manager was deleted — the worker is wired through
         ServiceContainer directly, like every other worker."""
         import src.api.services.video_jobs.worker as module
 
-        assert not hasattr(module, "GrokVideoWorkerManager")
+        assert not hasattr(module, "VideoWorkerManager")

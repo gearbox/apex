@@ -127,6 +127,19 @@ services:
       XAI_API_KEY: ${XAI_API_KEY:-}
       GROK_VIDEO_FINALIZATION_LEASE_SECONDS: ${GROK_VIDEO_FINALIZATION_LEASE_SECONDS:-120}
       GROK_MODERATION_BILLING_POLICY: ${GROK_MODERATION_BILLING_POLICY:-charge}
+
+      # Alibaba Model Studio (Wan)
+      MODEL_STUDIO_BASE_URL: ${MODEL_STUDIO_BASE_URL:-}
+      MODEL_STUDIO_API_KEY: ${MODEL_STUDIO_API_KEY:-}
+      MODEL_STUDIO_TIMEOUT_SECONDS: ${MODEL_STUDIO_TIMEOUT_SECONDS:-60}
+      WAN_VIDEO_POLL_INTERVAL: ${WAN_VIDEO_POLL_INTERVAL:-15}
+      WAN_VIDEO_MAX_POLL_TIME: ${WAN_VIDEO_MAX_POLL_TIME:-1800}
+      WAN_VIDEO_FINALIZATION_LEASE_SECONDS: ${WAN_VIDEO_FINALIZATION_LEASE_SECONDS:-180}
+      WAN_VIDEO_WORKER_IN_PROCESS: ${WAN_VIDEO_WORKER_IN_PROCESS:-false}
+      WAN_VIDEO_MAX_CONCURRENT_POLLS: ${WAN_VIDEO_MAX_CONCURRENT_POLLS:-8}
+      WAN_INPUT_URL_TTL_SECONDS: ${WAN_INPUT_URL_TTL_SECONDS:-3600}
+      WAN_MODERATION_BILLING_POLICY: ${WAN_MODERATION_BILLING_POLICY:-refund}
+      WAN_UNDELIVERED_OUTPUT_BILLING_POLICY: ${WAN_UNDELIVERED_OUTPUT_BILLING_POLICY:-charge}
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}
       COMFYUI_PORT: ${COMFYUI_PORT:-18188}
       REDIS_URL: ${REDIS_URL:-redis://:${REDIS_PASSWORD}@redis:6379/0}
@@ -237,6 +250,24 @@ services:
     restart: "no"
     networks:
       - apex-network
+
+  # ===========================================================================
+  # Wan video worker - standalone poller (opt-in: --profile wan-worker)
+  # ===========================================================================
+  # Proactively completes Wan (Alibaba Model Studio) videos in its own process.
+  # Poll-on-read settles videos without it, and it shares the
+  # "alibaba_video_poller" leader lease with an in-process worker, so running
+  # both is safe. Independent of Grok: separate lease, interval and semaphore.
+  wan-video-worker:
+    extends:
+      service: api
+    container_name: apex-wan-video-worker-staging
+    profiles: ["wan-worker"]
+    command: ["python", "-m", "src.workers.wan_video"]
+    ports: []
+    healthcheck:
+      disable: true
+    restart: unless-stopped
 
   # ===========================================================================
   # Cloudflare Tunnel - exposes staging to the internet via CF Zero Trust

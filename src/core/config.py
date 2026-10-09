@@ -721,6 +721,68 @@ class Settings(BaseSettings):
         description="Maximum concurrent xAI status polls per Grok video worker tick.",
     )
 
+    # Alibaba Model Studio (Wan) settings. Empty/None means not configured.
+    model_studio_base_url: str = Field(
+        default="",
+        description=(
+            "Model Studio workspace host, e.g. "
+            "https://<workspace>.ap-southeast-1.maas.aliyuncs.com (https, no path)."
+        ),
+    )
+    model_studio_api_key: SecretStr | None = Field(
+        default=None,
+        description="Model Studio API key (sk-...). Never logged.",
+    )
+    model_studio_timeout_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=300,
+        description="Timeout in seconds for each Model Studio HTTP call.",
+    )
+    wan_video_poll_interval: int = Field(
+        default=15,
+        ge=5,
+        le=60,
+        description="Seconds between Wan video status polls (upstream recommends ~15).",
+    )
+    wan_video_max_poll_time: int = Field(
+        default=1800,
+        ge=300,
+        le=7200,
+        description=(
+            "Maximum seconds to poll a Wan video; upstream task_id and video_url both "
+            "expire after 24 h."
+        ),
+    )
+    wan_video_finalization_lease_seconds: int = Field(
+        default=180,
+        ge=30,
+        le=900,
+        description=(
+            "Bounded PostgreSQL finalization lease for Wan video outputs "
+            "(1080P / 30 s files are larger than Grok's)."
+        ),
+    )
+    wan_video_worker_in_process: bool = Field(
+        default=False,
+        description=(
+            "Start the Wan video polling worker in-process. For multi-worker Granian, "
+            "use the standalone worker (python -m src.workers.wan_video)."
+        ),
+    )
+    wan_video_max_concurrent_polls: int = Field(
+        default=8,
+        ge=1,
+        le=64,
+        description="Maximum concurrent Model Studio status polls per Wan worker tick.",
+    )
+    wan_input_url_ttl_seconds: int = Field(
+        default=3600,
+        ge=300,
+        le=86400,
+        description="Lifetime of the presigned R2 URLs handed to Model Studio as inputs.",
+    )
+
     # Generation defaults — bundle.yaml overrides these per-model when present
     default_steps: int = Field(default=12, description="Default generation steps")
     max_steps: int = Field(default=20, description="Maximum generation steps")
@@ -1292,6 +1354,18 @@ class Settings(BaseSettings):
         ),
     )
 
+    wan_moderation_billing_policy: Literal["charge", "refund"] = Field(
+        default="refund",
+        description="Policy for Wan moderation rejections: Model Studio bills successful tasks only.",
+    )
+    wan_undelivered_output_billing_policy: Literal["charge", "refund"] = Field(
+        default="charge",
+        description=(
+            "Policy for Wan OUTPUT_NOT_DELIVERED failures: the task succeeded upstream "
+            "(we were billed) but our download failed."
+        ),
+    )
+
     # Stripe (legacy single-product — kept for backward compatibility)
     stripe_secret_key: str = Field(
         default="",
@@ -1765,6 +1839,10 @@ class Settings(BaseSettings):
                 "grok_video_finalization_lease_seconds",
                 self.grok_video_finalization_lease_seconds,
             ),
+            "Wan": (
+                "wan_video_finalization_lease_seconds",
+                self.wan_video_finalization_lease_seconds,
+            ),
         }
         for label, (field_name, lease) in leases.items():
             if self.media_ingest_video_deadline_seconds * 4 > lease * 3:
@@ -1772,6 +1850,26 @@ class Settings(BaseSettings):
                     f"media_ingest_video_deadline_seconds must leave {label} finalization lease "
                     f"headroom (deadline <= 75% of {field_name})"
                 )
+        return self
+
+    @model_validator(mode="after")
+    def validate_model_studio_base_url(self) -> "Settings":
+        """Reject a base URL that is not a bare https origin (no path, no trailing slash)."""
+        if not self.model_studio_base_url:
+            return self
+        parsed = urlparse(self.model_studio_base_url)
+        if (
+            parsed.scheme != "https"
+            or not parsed.netloc
+            or parsed.path
+            or parsed.params
+            or parsed.query
+            or parsed.fragment
+        ):
+            raise ValueError(
+                "model_studio_base_url must be an https origin with no path or trailing slash "
+                "(e.g. https://<workspace>.ap-southeast-1.maas.aliyuncs.com)"
+            )
         return self
 
     @model_validator(mode="after")
@@ -1917,6 +2015,12 @@ class Settings(BaseSettings):
     def grok_configured(self) -> bool:
         """Check if Grok API is configured."""
         return bool(self.xai_api_key)
+
+    @computed_field  # type: ignore[prop-decorator]
+    @property
+    def model_studio_configured(self) -> bool:
+        """Check if Alibaba Model Studio (Wan) is configured."""
+        return bool(self.model_studio_base_url and self.model_studio_api_key)
 
     @property
     def vastai_configured(self) -> bool:

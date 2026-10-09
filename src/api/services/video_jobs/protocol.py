@@ -24,7 +24,7 @@ class AsyncVideoJobService(Protocol):
     Each must carry a ``failure: ProviderFailure`` attribute for logging.
     """
     running_progress_pct: ClassVar[int | None]
-    """Legacy Grok value 50 is preserved (see arc doc §5, pitfall 15). New providers MUST use None."""
+    """A legacy fabricated percentage some providers still emit. New providers MUST use None."""
 
     async def poll_video_job_for_worker(
         self, session: AsyncSession, job_id: UUID

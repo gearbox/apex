@@ -1,7 +1,7 @@
 """Shared body of the standalone async-video worker processes.
 
-Each provider's entry point (``python -m src.workers.grok_video``,
-``python -m src.workers.wan_video``) supplies only what differs: how to build
+Each provider's entry point (``python -m src.workers.<provider>_video``)
+supplies only what differs: how to build
 its job service, its worker name/interval/concurrency and its config check.
 """
 

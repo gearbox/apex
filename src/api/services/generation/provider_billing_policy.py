@@ -72,6 +72,14 @@ class ProviderBillingPolicyRegistry:
                         settings.grok_undelivered_output_billing_policy == "charge"
                     ),
                 ),
+                Provider.ALIBABA: ProviderBillingPolicy(
+                    charge_on_moderation_rejection=(
+                        settings.wan_moderation_billing_policy == "charge"
+                    ),
+                    charge_on_undelivered_output=(
+                        settings.wan_undelivered_output_billing_policy == "charge"
+                    ),
+                ),
             }
         )
 
@@ -88,6 +96,10 @@ DEFAULT_PROVIDER_BILLING_POLICIES = ProviderBillingPolicyRegistry(
     policies={
         Provider.GROK: ProviderBillingPolicy(
             charge_on_moderation_rejection=True,
+            charge_on_undelivered_output=True,
+        ),
+        Provider.ALIBABA: ProviderBillingPolicy(
+            charge_on_moderation_rejection=False,
             charge_on_undelivered_output=True,
         ),
     }

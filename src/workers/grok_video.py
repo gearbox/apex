@@ -34,7 +34,7 @@ WORKER_NAME = "grok_video_poller"
 """Feeds the leader-lease key — must stay byte-for-byte stable across releases."""
 
 
-class GrokVideoWorkerCLI:
+class GrokVideoPollerCLI:
     """CLI runner for the Grok video polling worker."""
 
     def __init__(self, settings: Settings) -> None:
@@ -127,7 +127,7 @@ Environment variables:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Create runner
-    runner = GrokVideoWorkerCLI(settings)
+    runner = GrokVideoPollerCLI(settings)
 
     # Setup signal handlers
     loop = asyncio.new_event_loop()
