@@ -354,3 +354,50 @@ def test_the_two_standalone_workers_use_different_lease_names() -> None:
 
     assert grok_video.WORKER_NAME == "grok_video_poller"
     assert wan_video.WORKER_NAME == "alibaba_video_poller"
+
+
+async def test_wan_cli_builds_a_polling_service_from_settings(cli_settings: MagicMock) -> None:
+    from src.api.services.video_jobs.cli import VideoWorkerDeps
+
+    deps = VideoWorkerDeps(
+        settings=cli_settings,
+        storage=MagicMock(),
+        billing_service=MagicMock(),
+        event_bus=MagicMock(),
+        ops_event_bus=MagicMock(),
+        media_ingestor=MagicMock(),
+    )
+    cli_settings.wan_video_max_poll_time = 1800
+    cli_settings.wan_video_finalization_lease_seconds = 180
+    cli_settings.wan_moderation_billing_policy = "refund"
+    cli_settings.wan_undelivered_output_billing_policy = "charge"
+    cli_settings.grok_moderation_billing_policy = "charge"
+    cli_settings.grok_undelivered_output_billing_policy = "charge"
+
+    with patch("src.workers.wan_video.ModelStudioClient") as client_cls:
+        client_cls.return_value.connect = AsyncMock()
+        client_cls.return_value.close = AsyncMock()
+        built = await WanVideoPollerCLI._build_job_service(deps)
+        await built.close()
+
+    client_cls.return_value.connect.assert_awaited_once()
+    client_cls.return_value.close.assert_awaited_once()
+    assert type(built.service).__name__ == "WanJobService"
+    assert built.service.provider is Provider.ALIBABA
+
+
+async def test_wan_cli_refuses_to_build_without_an_api_key(cli_settings: MagicMock) -> None:
+    from src.api.services.video_jobs.cli import VideoWorkerDeps
+
+    cli_settings.model_studio_api_key = None
+    deps = VideoWorkerDeps(
+        settings=cli_settings,
+        storage=MagicMock(),
+        billing_service=MagicMock(),
+        event_bus=MagicMock(),
+        ops_event_bus=MagicMock(),
+        media_ingestor=MagicMock(),
+    )
+
+    with pytest.raises(RuntimeError, match="MODEL_STUDIO_API_KEY"):
+        await WanVideoPollerCLI._build_job_service(deps)

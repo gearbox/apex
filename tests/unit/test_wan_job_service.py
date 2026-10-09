@@ -524,3 +524,145 @@ async def test_provider_refresh_polls_only_in_flight_video_jobs() -> None:
     assert await provider.refresh_job(MagicMock(), running) == "polled"  # type: ignore[arg-type,comparison-overlap]
     assert await provider.refresh_job(MagicMock(), done) is None  # type: ignore[arg-type]
     wan.poll_video_job.assert_awaited_once()
+
+
+# ---- read-through polling and lifecycle ----------------------------------------------
+
+
+def _patched_repo(job: Any) -> Any:
+    return patch(
+        "src.api.services.model_studio.wan_job_service.JobRepository",
+        return_value=_FakeJobRepository(job),
+    )
+
+
+async def test_read_through_poll_returns_terminal_jobs_untouched() -> None:
+    job = _running_job(status=JobStatus.COMPLETED.value)
+    client = MagicMock()
+    client.get_task = AsyncMock()
+
+    with _patched_repo(job):
+        assert await _service(client).poll_video_job(MagicMock(), job.id) is job
+
+    client.get_task.assert_not_called()
+
+
+async def test_read_through_poll_of_a_missing_job_raises() -> None:
+    from src.api.services.model_studio.wan_job_service import WanJobNotFoundError
+
+    with _patched_repo(None), pytest.raises(WanJobNotFoundError):
+        await _service().poll_video_job(MagicMock(), uuid4())
+
+
+async def test_read_through_poll_reports_a_transient_error_as_unchanged() -> None:
+    job = _running_job()
+    client = MagicMock()
+    client.get_task = AsyncMock(
+        side_effect=ModelStudioTransientError(_classifier.classify(http_status=503))
+    )
+
+    with _patched_repo(job):
+        assert await _service(client).poll_video_job(MagicMock(), job.id) is job
+
+
+async def test_read_through_poll_settles_the_observed_outcome() -> None:
+    job = _running_job()
+    client = MagicMock()
+    client.get_task = AsyncMock(return_value=_task(ModelStudioTaskStatus.RUNNING))
+    service = _service(client)
+    settled = SimpleNamespace(status=JobStatus.RUNNING.value)
+    service.settle_video_poll_outcome = AsyncMock(return_value=settled)  # type: ignore[method-assign]
+
+    with _patched_repo(job):
+        result = await service.poll_video_job(MagicMock(), job.id)
+
+    assert result is settled
+    outcome = service.settle_video_poll_outcome.await_args_list[-1].kwargs["outcome"]
+    assert outcome.status is VideoPollStatus.STILL_RUNNING
+
+
+async def test_read_through_poll_times_out_an_overdue_job_without_calling_upstream() -> None:
+    job = _running_job(started_at=datetime.now(UTC) - timedelta(hours=3))
+    client = MagicMock()
+    client.get_task = AsyncMock()
+    service = _service(client, max_poll_time=60)
+    service.settle_video_poll_outcome = AsyncMock(return_value="settled")  # type: ignore[method-assign]
+
+    with _patched_repo(job):
+        assert await service.poll_video_job(MagicMock(), job.id) == "settled"
+
+    client.get_task.assert_not_called()
+    outcome = service.settle_video_poll_outcome.await_args_list[-1].kwargs["outcome"]
+    assert outcome.failure.kind is ProviderFailureKind.TIMEOUT
+
+
+async def test_settle_delegates_to_the_shared_settlement_with_its_own_collaborators() -> None:
+    service = _service()
+    outcome: Any = SimpleNamespace(status=VideoPollStatus.STILL_RUNNING)
+    with patch(
+        "src.api.services.model_studio.wan_job_service.settle_video_poll_outcome",
+        new=AsyncMock(return_value="settled"),
+    ) as shared:
+        result = await service.settle_video_poll_outcome(
+            MagicMock(),
+            job_id=uuid4(),
+            outcome=outcome,
+            product_id="vex",  # type: ignore[arg-type]
+        )
+
+    assert result == "settled"
+    kwargs = shared.await_args_list[-1].kwargs
+    assert kwargs["materializer"] is service._materializer
+    assert kwargs["settle_failure"] == service._settle_failed_outcome
+    assert kwargs["outcome"] is outcome
+
+
+async def test_failed_outcome_adapter_routes_back_through_settle() -> None:
+    service = _service()
+    service.settle_video_poll_outcome = AsyncMock(return_value="x")  # type: ignore[method-assign]
+    job_id = uuid4()
+    outcome: Any = SimpleNamespace()
+
+    assert await service._settle_failed_outcome(MagicMock(), job_id, outcome, "vex") == "x"  # type: ignore[arg-type]
+    assert service.settle_video_poll_outcome.await_args_list[-1].kwargs["job_id"] == job_id
+
+
+async def test_connect_and_close_manage_the_download_client_only() -> None:
+    download = MagicMock(connect=AsyncMock(), close=AsyncMock())
+    client = MagicMock()
+    service = WanJobService(client, MagicMock(), download)
+
+    await service.connect()
+    await service.close()
+
+    download.connect.assert_awaited_once()
+    download.close.assert_awaited_once()
+
+
+async def test_long_prompts_get_a_truncated_default_name() -> None:
+    client = MagicMock()
+    client.create_video_task = AsyncMock(return_value=ModelStudioTaskRef(task_id="t"))
+    repo = _FakeJobRepository()
+    session = SimpleNamespace(flush=AsyncMock(), rollback=AsyncMock())
+    service = _service(client)
+
+    with patch("src.api.services.model_studio.wan_job_service.JobRepository", return_value=repo):
+        await service.start_video_job(
+            session,  # type: ignore[arg-type]
+            user_id=uuid4(),
+            prompt="x" * 80,
+            model=ModelType.WAN_3_VIDEO,
+            generation_type=GenerationType.T2V,
+            payload={},
+            aspect_ratio=None,
+            name=None,
+            billing_service=_billing(),  # type: ignore[arg-type]
+            account_id=uuid4(),
+            token_cost=1,
+            billed_seconds=5,
+            video_resolution=VideoResolution.RES_720P,
+            product_id="vex",
+        )
+
+    assert repo.job is not None
+    assert repo.job.name == "x" * 50 + "..."
