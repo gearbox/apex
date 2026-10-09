@@ -149,7 +149,7 @@ class GenerationType(StrEnum):
 
 
 class VideoPollStatus(StrEnum):
-    """Observed outcome of one xAI video-job poll.
+    """Observed outcome of one provider video-job poll.
 
     Distinct from JobStatus: this describes what the provider reported for a
     single poll, not the GenerationJob's persisted status. The caller (worker

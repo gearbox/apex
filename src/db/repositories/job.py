@@ -8,7 +8,14 @@ from typing import TYPE_CHECKING, Any, cast
 from sqlalchemy import CursorResult, and_, exists, func, select, update
 from sqlalchemy.orm import aliased, selectinload
 
-from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider, TransactionType
+from src.core.enums import (
+    GenerationType,
+    GpuSessionStatus,
+    JobStatus,
+    MediaKind,
+    Provider,
+    TransactionType,
+)
 from src.db.models.billing import TokenTransaction
 from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob, GenerationOutput
@@ -440,22 +447,24 @@ class JobRepository(BaseRepository[GenerationJob]):
 
     async def list_pending_video_jobs(
         self,
-        provider: Provider = Provider.GROK,
+        *,
+        provider: Provider,
     ) -> Sequence[GenerationJob]:
         """List pending video generation jobs for polling.
 
-        Returns jobs that are queued or running, have a video generation
-        type (T2V, I2V, or V2V — Grok's ``grok-imagine-video`` supports all
-        three), have an ``external_request_id`` set (indicating the provider
+        Returns jobs that are queued or running, have a video-output
+        generation type (every ``GenerationType`` whose ``output_kind`` is
+        video), have an ``external_request_id`` set (indicating the provider
         accepted the request), and are not soft-deleted.
 
         Args:
-            provider: Provider enum to filter by.
+            provider: Provider enum to filter by. Required: each provider's
+                worker polls only its own jobs.
 
         Returns:
             List of GenerationJob instances needing polling.
         """
-        video_types = [GenerationType.T2V, GenerationType.I2V, GenerationType.V2V]
+        video_types = [gt for gt in GenerationType if gt.output_kind is MediaKind.VIDEO]
         pending_statuses = [JobStatus.QUEUED, JobStatus.RUNNING]
 
         result = await self._session.execute(

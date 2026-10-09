@@ -2,14 +2,14 @@
 
 from __future__ import annotations
 
-from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import Provider
+from tests.billing_policy_support import grok_policy_registry
 
 _BILLED_NOTICE = "This generation was charged because the provider processed the request."
 
 # Both charge flags on so every billable-capable kind actually comes back billable.
-_CHARGING_REGISTRY = ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+_CHARGING_REGISTRY = grok_policy_registry("charge", "charge")
 
 
 def test_every_billable_kind_discloses_the_charge() -> None:

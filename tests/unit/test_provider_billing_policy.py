@@ -12,10 +12,10 @@ import pytest
 
 from src.api.services.generation.provider_billing_policy import (
     ProviderBillingPolicy,
-    ProviderBillingPolicyRegistry,
 )
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import Provider
+from tests.billing_policy_support import grok_policy_registry
 
 
 def _failure(
@@ -32,7 +32,7 @@ def _failure(
     )
 
 
-_CHARGING_REGISTRY = ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
+_CHARGING_REGISTRY = grok_policy_registry("charge", "charge")
 
 
 def test_empty_result_set_is_not_billable() -> None:
@@ -65,7 +65,7 @@ def test_undelivered_output_is_billable_and_configurable(
     setting: Literal["charge", "refund"],
     expected_billable: bool,
 ) -> None:
-    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy("refund", setting)
+    registry = grok_policy_registry("refund", setting)
     failure = _failure(ProviderFailureKind.OUTPUT_NOT_DELIVERED)
 
     assert registry.apply(failure).billable is expected_billable
@@ -80,7 +80,7 @@ def test_unregistered_provider_is_never_billable(
     """The registry's fallback for a provider absent from ``policies`` must
     charge nothing — providers stay financially independent (D3, invariant
     13). ``Provider.AISHA`` is never registered by
-    ``with_grok_moderation_policy``."""
+    ``from_settings``."""
     failure = _failure(
         kind,
         provider=Provider.AISHA,

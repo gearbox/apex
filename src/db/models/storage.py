@@ -227,7 +227,7 @@ class GenerationJob(Base):
     # Explicitly public-safe text for user-facing REST/SSE failure payloads.
     public_error_message: Mapped[str | None] = mapped_column(Text, nullable=True)
     failure_code: Mapped[str | None] = mapped_column(String(100), nullable=True)
-    # Durable, cross-process ownership of Grok video result materialization.
+    # Durable, cross-process ownership of remote video result materialization.
     # A claim is committed before R2 writes and expires so a crashed poller can
     # be recovered without relying on Redis or process-local locks.
     finalization_claim_token: Mapped[str | None] = mapped_column(String(36), nullable=True)
@@ -596,7 +596,7 @@ class GenerationOutput(Base):
 
 
 class GenerationMaterializationAttempt(Base):
-    """Durable record of a Grok video R2 materialization attempt.
+    """Durable record of a remote video R2 materialization attempt.
 
     Planned keys are written before the first upload.  A later worker can
     therefore reconcile a crash or cancellation without an in-memory list.

@@ -27,6 +27,7 @@ class VideoProfileOrigin(StrEnum):
 
     UPLOAD = "upload"
     GROK_OUTPUT = "grok_output"
+    ALIBABA_OUTPUT = "alibaba_output"
 
 
 def log_video_profile(

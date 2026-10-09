@@ -7,7 +7,6 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.provider_failures import (
     ProviderFailure,
     ProviderFailureKind,
@@ -15,6 +14,7 @@ from src.api.services.generation.provider_failures import (
 )
 from src.api.services.grok.failure_classifier import GrokFailureClassifier
 from src.core.enums import Provider
+from tests.billing_policy_support import grok_policy_registry
 
 _CONFIRMED_MESSAGE = "Image did not respect moderation rules; URL is not available."
 
@@ -49,7 +49,7 @@ def test_structured_moderation_code_proves_request_accepted(
     classifier: GrokFailureClassifier,
 ) -> None:
     failure = classifier.classify({"code": "CONTENT_POLICY_VIOLATION"})
-    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge")
+    registry = grok_policy_registry("charge")
 
     assert failure.kind is ProviderFailureKind.MODERATION_REJECTED
     assert failure.provider_request_accepted is True
@@ -234,12 +234,8 @@ def test_output_not_returned_is_output_not_delivered_and_accepted(
 ) -> None:
     failure = classifier.classify({"message": "Image was not returned via URL."})
     # Billability tracks the undelivered-output flag, not the moderation flag.
-    charging_registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-        "refund", "charge"
-    )
-    refunding_registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-        "charge", "refund"
-    )
+    charging_registry = grok_policy_registry("refund", "charge")
+    refunding_registry = grok_policy_registry("charge", "refund")
 
     assert failure.kind is ProviderFailureKind.OUTPUT_NOT_DELIVERED
     assert failure.provider_request_accepted is True
@@ -301,7 +297,7 @@ def test_grok_moderation_billing_policy_is_injected(
     expected_billable: bool,
 ) -> None:
     failure = classifier.classify({"code": "MODERATION_REJECTED"}, provider_request_accepted=True)
-    registry = ProviderBillingPolicyRegistry.with_grok_moderation_policy(setting)
+    registry = grok_policy_registry(setting)
 
     assert registry.apply(failure).billable is expected_billable
 

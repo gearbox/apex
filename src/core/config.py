@@ -1755,19 +1755,23 @@ class Settings(BaseSettings):
 
     @model_validator(mode="after")
     def validate_media_ingest_video_budget(self) -> "Settings":
-        """Keep one video preparation budget inside Grok's owned lease.
+        """Keep one video preparation budget inside every provider's owned lease.
 
         The finalizer also needs download, thumbnails, storage and database
-        time, so preparation may consume at most three quarters of its lease.
+        time, so preparation may consume at most three quarters of each lease.
         """
-        if (
-            self.media_ingest_video_deadline_seconds * 4
-            > self.grok_video_finalization_lease_seconds * 3
-        ):
-            raise ValueError(
-                "media_ingest_video_deadline_seconds must leave Grok finalization lease "
-                "headroom (deadline <= 75% of grok_video_finalization_lease_seconds)"
-            )
+        leases = {
+            "Grok": (
+                "grok_video_finalization_lease_seconds",
+                self.grok_video_finalization_lease_seconds,
+            ),
+        }
+        for label, (field_name, lease) in leases.items():
+            if self.media_ingest_video_deadline_seconds * 4 > lease * 3:
+                raise ValueError(
+                    f"media_ingest_video_deadline_seconds must leave {label} finalization lease "
+                    f"headroom (deadline <= 75% of {field_name})"
+                )
         return self
 
     @model_validator(mode="after")

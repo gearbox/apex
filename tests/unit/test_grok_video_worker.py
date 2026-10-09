@@ -9,8 +9,9 @@ from uuid import uuid4
 
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
-from src.api.services.grok.job_service import VideoPollOutcome
-from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.grok.job_service import GrokJobService
+from src.api.services.video_jobs.outcome import VideoPollOutcome
+from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.core.enums import GenerationType, JobStatus, Provider, VideoPollStatus
 
 
@@ -24,16 +25,23 @@ def _make_settings(**overrides: object) -> MagicMock:
     return settings
 
 
-def _make_worker(**overrides: object) -> GrokVideoWorker:
+def _make_worker(**overrides: object) -> AsyncVideoJobWorker:
+    settings = overrides.pop("settings", None) or _make_settings()
+    job_service = overrides.pop("job_service", None) or AsyncMock()
+    # An AsyncMock service has no Grok class attributes; give it the real ones.
+    job_service.provider = GrokJobService.provider
+    job_service.transient_poll_errors = GrokJobService.transient_poll_errors
+    job_service.running_progress_pct = GrokJobService.running_progress_pct
     defaults: dict[str, object] = {
+        "name": "grok_video_poller",
+        "job_service": job_service,
+        "interval_seconds": settings.grok_video_poll_interval,
+        "max_concurrent_polls": settings.grok_video_max_concurrent_polls,
         "db_manager": MagicMock(),
-        "job_service": AsyncMock(),
-        "billing_service": AsyncMock(),
-        "settings": _make_settings(),
         "event_bus": None,
         "redis_client_factory": MagicMock(),
     } | overrides
-    return GrokVideoWorker(**defaults)  # type: ignore[arg-type]
+    return AsyncVideoJobWorker(**defaults)  # type: ignore[arg-type]
 
 
 def _make_job(
@@ -67,7 +75,7 @@ def _patched_transition_service() -> tuple[Any, AsyncMock]:
     """Return (patcher, mock ts instance) for JobStateTransitionService."""
     mock_ts = AsyncMock()
     patcher = patch(
-        "src.api.services.grok.video_worker.JobStateTransitionService",
+        "src.api.services.job_state_transition.JobStateTransitionService",
         return_value=mock_ts,
     )
     return patcher, mock_ts
@@ -247,7 +255,7 @@ def _patched_job_repository(jobs: list[object]) -> tuple[Any, AsyncMock]:
     mock_repo = MagicMock()
     mock_repo.list_pending_video_jobs = AsyncMock(return_value=jobs)
     patcher = patch(
-        "src.api.services.grok.video_worker.JobRepository",
+        "src.api.services.video_jobs.worker.JobRepository",
         return_value=mock_repo,
     )
     return patcher, mock_repo
@@ -409,6 +417,6 @@ class TestManagerRemoved:
     def test_manager_removed(self) -> None:
         """GrokVideoWorkerManager was deleted — the worker is wired through
         ServiceContainer directly, like every other worker."""
-        import src.api.services.grok.video_worker as module
+        import src.api.services.video_jobs.worker as module
 
         assert not hasattr(module, "GrokVideoWorkerManager")

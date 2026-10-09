@@ -12,7 +12,7 @@ point reacts differently:
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -25,13 +25,16 @@ from src.api.services.grok import (
     GrokRateLimitError,
     GrokTimeoutError,
 )
-from src.api.services.grok.job_service import GrokJobService
 from src.core.enums import JobStatus, Provider, VideoPollStatus
+from tests.grok_support import make_grok_job_service
 from tests.media_ingest_support import make_media_ingestor
+
+if TYPE_CHECKING:
+    from src.api.services.grok.job_service import GrokJobService
 
 
 def _make_service() -> GrokJobService:
-    return GrokJobService(
+    return make_grok_job_service(
         grok_client=AsyncMock(), storage=MagicMock(), media_ingestor=make_media_ingestor()
     )
 
@@ -58,7 +61,7 @@ def _patched_job_repository(job: object) -> tuple[Any, AsyncMock]:
 
 
 def test_video_job_with_missing_started_at_uses_created_at_for_ttl() -> None:
-    service = GrokJobService(
+    service = make_grok_job_service(
         grok_client=AsyncMock(),
         storage=MagicMock(),
         max_poll_time=60,

@@ -47,8 +47,8 @@ from src.api.services.gpu_session.operation_event_service import OperationEventS
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
-from src.api.services.grok.job_service import GrokJobService
-from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.grok.factory import build_grok_job_service
+from src.api.services.grok.job_service import GrokJobService  # noqa: TC001
 from src.api.services.health.checkers.workers import WorkerHeartbeatChecker
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
@@ -85,6 +85,7 @@ from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
+from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import WorkerMode
@@ -146,7 +147,7 @@ class ServiceContainer:
     payment_currency_sync_service: PaymentCurrencySyncService | None = None
     payment_currency_sync_worker: PaymentCurrencySyncWorker | None = None
     grok_job_service: GrokJobService | None = None
-    grok_video_worker: GrokVideoWorker | None = None
+    grok_video_worker: AsyncVideoJobWorker | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
@@ -999,20 +1000,17 @@ async def init_services(settings: Settings) -> JWTService:
         grok_client = GrokClient(settings)
         await grok_client.connect()
 
-        _services.grok_job_service = GrokJobService(
+        _services.grok_job_service = build_grok_job_service(
             grok_client=grok_client,
             storage=_services.r2_storage,
-            retention_days=settings.retention_days,
+            media_ingestor=_services.media_ingestor,
             billing_service=get_billing_service(),
             event_bus=_services.event_bus,
             ops_event_bus=_services.ops_event_bus,
+            billing_policy=ProviderBillingPolicyRegistry.from_settings(settings),
+            retention_days=settings.retention_days,
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
-            media_ingestor=_services.media_ingestor,
-            billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-                settings.grok_moderation_billing_policy,
-                settings.grok_undelivered_output_billing_policy,
-            ),
         )
         await _services.grok_job_service.connect()
         logger.info("grok.initialized")
@@ -1022,13 +1020,13 @@ async def init_services(settings: Settings) -> JWTService:
     # Start Grok video polling worker
     if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
         if settings.grok_video_worker_in_process:
-            _services.grok_video_worker = GrokVideoWorker(
-                db_manager=_services.db_manager,
+            _services.grok_video_worker = AsyncVideoJobWorker(
+                name="grok_video_poller",
                 job_service=_services.grok_job_service,
-                billing_service=get_billing_service(),
-                settings=settings,
+                interval_seconds=settings.grok_video_poll_interval,
+                max_concurrent_polls=settings.grok_video_max_concurrent_polls,
+                db_manager=_services.db_manager,
                 event_bus=_services.event_bus,
-                ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
                 redis_client_factory=get_operational_redis_client,
             )

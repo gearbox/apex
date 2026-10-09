@@ -3,10 +3,13 @@
 from __future__ import annotations
 
 import dataclasses
-from typing import Literal
+from typing import TYPE_CHECKING
 
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.core.enums import Provider
+
+if TYPE_CHECKING:
+    from src.core.config import Settings
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -57,17 +60,18 @@ class ProviderBillingPolicyRegistry:
     policies: dict[Provider, ProviderBillingPolicy]
 
     @classmethod
-    def with_grok_moderation_policy(
-        cls,
-        moderation_billing_policy: Literal["charge", "refund"],
-        undelivered_output_billing_policy: Literal["charge", "refund"] = "charge",
-    ) -> ProviderBillingPolicyRegistry:
+    def from_settings(cls, settings: Settings) -> ProviderBillingPolicyRegistry:
+        """Build every provider's policy from the settings the process started with."""
         return cls(
             policies={
                 Provider.GROK: ProviderBillingPolicy(
-                    charge_on_moderation_rejection=moderation_billing_policy == "charge",
-                    charge_on_undelivered_output=undelivered_output_billing_policy == "charge",
-                )
+                    charge_on_moderation_rejection=(
+                        settings.grok_moderation_billing_policy == "charge"
+                    ),
+                    charge_on_undelivered_output=(
+                        settings.grok_undelivered_output_billing_policy == "charge"
+                    ),
+                ),
             }
         )
 
@@ -80,8 +84,13 @@ class ProviderBillingPolicyRegistry:
         return dataclasses.replace(failure, billable=policy.is_failure_billable(failure))
 
 
-DEFAULT_PROVIDER_BILLING_POLICIES = ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-    "charge", "charge"
+DEFAULT_PROVIDER_BILLING_POLICIES = ProviderBillingPolicyRegistry(
+    policies={
+        Provider.GROK: ProviderBillingPolicy(
+            charge_on_moderation_rejection=True,
+            charge_on_undelivered_output=True,
+        ),
+    }
 )
 
 

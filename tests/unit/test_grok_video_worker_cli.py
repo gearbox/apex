@@ -100,9 +100,9 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
             patch(
-                "src.workers.grok_video.R2StorageService",
+                "src.api.services.video_jobs.cli.R2StorageService",
                 return_value=mock_r2_storage,
             ),
             patch(
@@ -110,14 +110,14 @@ class TestGrokVideoWorkerCLIRun:
                 return_value=mock_grok_client,
             ),
             patch(
-                "src.workers.grok_video.GrokJobService",
+                "src.workers.grok_video.build_grok_job_service",
                 return_value=mock_job_service,
             ),
             patch(
-                "src.workers.grok_video.GrokVideoWorker",
+                "src.api.services.video_jobs.cli.AsyncVideoJobWorker",
                 return_value=mock_worker,
             ),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.api.services.video_jobs.cli.BillingService"),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -146,15 +146,15 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
             patch(
-                "src.workers.grok_video.R2StorageService", return_value=mock_r2_storage
+                "src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage
             ) as mock_r2_cls,
-            patch("src.workers.grok_video.R2StorageSettings") as mock_r2_settings_cls,
+            patch("src.api.services.video_jobs.cli.R2StorageSettings") as mock_r2_settings_cls,
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
-            patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
+            patch("src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker),
+            patch("src.api.services.video_jobs.cli.BillingService"),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -183,15 +183,17 @@ class TestGrokVideoWorkerCLIRun:
         mock_billing_service = MagicMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
-            patch("src.workers.grok_video.R2StorageService", return_value=mock_r2_storage),
-            patch("src.workers.grok_video.R2StorageSettings"),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage),
+            patch("src.api.services.video_jobs.cli.R2StorageSettings"),
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
             patch(
-                "src.workers.grok_video.GrokVideoWorker", return_value=mock_worker
+                "src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker
             ) as mock_worker_cls,
-            patch("src.workers.grok_video.BillingService", return_value=mock_billing_service),
+            patch(
+                "src.api.services.video_jobs.cli.BillingService", return_value=mock_billing_service
+            ),
         ):
             runner = GrokVideoWorkerCLI(settings)
 
@@ -202,12 +204,12 @@ class TestGrokVideoWorkerCLIRun:
             await asyncio.gather(runner.run(), trigger_shutdown())
 
         mock_worker_cls.assert_called_once_with(
-            db_manager=mock_db_manager,
+            name="grok_video_poller",
             job_service=mock_job_service,
-            billing_service=mock_billing_service,
-            settings=settings,
+            interval_seconds=settings.grok_video_poll_interval,
+            max_concurrent_polls=settings.grok_video_max_concurrent_polls,
+            db_manager=mock_db_manager,
             event_bus=ANY,
-            ops_event_bus=ANY,
             redis_enabled=False,
             redis_client_factory=ANY,
         )
@@ -227,12 +229,12 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
-            patch("src.workers.grok_video.R2StorageService", return_value=mock_r2_storage),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage),
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
-            patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
+            patch("src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker),
+            patch("src.api.services.video_jobs.cli.BillingService"),
             patch("src.core.redis.init_redis_pool") as mock_init_redis_pool,
             patch("src.core.redis.init_operational_redis_pool") as mock_init_operational_pool,
             patch("src.core.redis.init_sse_redis_pool") as mock_init_sse_redis_pool,

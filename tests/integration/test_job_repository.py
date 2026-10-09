@@ -6,7 +6,9 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
+import pytest
+
+from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, MediaKind, Provider
 
 if TYPE_CHECKING:
     from src.db.repositories.job import JobRepository
@@ -224,7 +226,7 @@ async def test_list_pending_video_jobs_returns_matching(
         external_request_id=None,
     )
 
-    jobs = await job_repo.list_pending_video_jobs()
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
     job_ids = {j.id for j in jobs}
 
     assert matching_t2v.id in job_ids
@@ -260,7 +262,7 @@ async def test_list_pending_video_jobs_empty_when_no_matches(
         external_request_id=None,
     )
 
-    jobs = await job_repo.list_pending_video_jobs()
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
     assert not list(jobs)
 
 
@@ -631,3 +633,45 @@ async def test_count_in_flight_for_session_and_model_excludes_terminal_and_delet
     )
 
     assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image") == 0
+
+
+async def test_c4_list_pending_video_jobs_includes_every_video_generation_type(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """The polled set follows ``GenerationType.output_kind``, not a hand-written list."""
+    user = await make_user(email=f"vidpoll-all-{uuid4().hex[:6]}@example.com")
+    video_types = [gt for gt in GenerationType if gt.output_kind is MediaKind.VIDEO]
+    assert {
+        GenerationType.T2V,
+        GenerationType.I2V,
+        GenerationType.V2V,
+        GenerationType.FLF2V,
+    } <= set(video_types)
+    expected = set()
+    for gen_type in video_types:
+        job = await make_job(
+            user=user,
+            status="running",
+            generation_type=gen_type.value,
+            provider=Provider.GROK.value,
+            external_request_id=f"req-{gen_type.value}",
+        )
+        expected.add(job.id)
+    image_job = await make_job(
+        user=user,
+        status="running",
+        generation_type=GenerationType.T2I.value,
+        provider=Provider.GROK.value,
+        external_request_id="req-image",
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
+    job_ids = {j.id for j in jobs}
+
+    assert expected <= job_ids
+    assert image_job.id not in job_ids
+
+
+async def test_c4_provider_is_a_required_keyword(job_repo: JobRepository) -> None:
+    with pytest.raises(TypeError):
+        await job_repo.list_pending_video_jobs()  # type: ignore[call-arg]

@@ -9,7 +9,6 @@ from unittest.mock import AsyncMock
 
 import pytest
 
-from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.grok import (
     GrokAPIError,
@@ -21,6 +20,7 @@ from src.api.services.grok import (
 )
 from src.api.services.grok.enums import ResponseImageFormat
 from src.core.enums import AspectRatio, ModelType
+from tests.billing_policy_support import grok_policy_registry
 
 
 class _DeferredStatus:
@@ -147,12 +147,7 @@ class TestParseDeferredVideoResult:
 
         failure = exc_info.value.failure
         assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     def test_video_missing_url_billing_matches_product_decision(self) -> None:
         response = _DeferredResponse(
@@ -169,12 +164,7 @@ class TestParseDeferredVideoResult:
 
         failure = exc_info.value.failure
         assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     def test_done_without_url_and_failed_moderation_raises_moderation_error(self) -> None:
         response = _DeferredResponse(
@@ -482,12 +472,7 @@ class TestImageGeneration:
 
         failure = exc_info.value.failure
         assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     async def test_empty_image_results_is_a_malformed_provider_response(self) -> None:
         image = SimpleNamespace(sample_batch=AsyncMock(return_value=[]))
@@ -503,12 +488,7 @@ class TestImageGeneration:
 
         failure = exc_info.value.failure
         assert failure.kind == ProviderFailureKind.MALFORMED_RESPONSE
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     async def test_generate_image_classifies_raising_url_property(self) -> None:
         image = SimpleNamespace(sample_batch=AsyncMock(return_value=[_ModeratedImageResponse()]))
@@ -543,12 +523,7 @@ class TestImageGeneration:
         failure = exc_info.value.failure
         assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
         assert failure.billable is False
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     async def test_whitespace_wrapped_base64_still_decodes(self) -> None:
         image = SimpleNamespace(
@@ -592,12 +567,7 @@ class TestImageGeneration:
         failure = exc_info.value.failure
         assert failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
         assert failure.provider_request_accepted is True
-        assert (
-            ProviderBillingPolicyRegistry.with_grok_moderation_policy("charge", "charge")
-            .apply(failure)
-            .billable
-            is False
-        )
+        assert grok_policy_registry("charge", "charge").apply(failure).billable is False
 
     async def test_generate_image_classifies_raising_base64_property(self) -> None:
         image = SimpleNamespace(
