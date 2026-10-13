@@ -5,7 +5,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, ClassVar
 
 import pytest
 
@@ -13,11 +13,12 @@ import src.db.models as models
 from src.core.enums import (
     AspectRatio,
     GenerationType,
+    MediaFormat,
     MediaKind,
     MediaSlot,
     ModelType,
 )
-from src.core.model_registry import MODEL_METADATA, get_model_meta
+from src.core.model_registry import MODEL_METADATA, InputVideoConstraints, get_model_meta
 from src.db.models.base import Base
 
 if TYPE_CHECKING:
@@ -237,6 +238,77 @@ class TestGenerationTypeInputKinds:
         input_kinds: frozenset[MediaKind],
     ) -> None:
         assert generation_type.input_kinds == input_kinds
+
+
+class TestInputVideoConstraints:
+    """``VideoMeta.input_video`` is declared exactly where a mode takes a video source."""
+
+    _VIDEO_MODELS: ClassVar[list[ModelType]] = [
+        m for m in ModelType if MODEL_METADATA[m].video is not None
+    ]
+
+    @staticmethod
+    def _accepts_video_source(model: ModelType) -> bool:
+        return any(
+            mode.source_media is not None and MediaKind.VIDEO in mode.source_media.media_types
+            for mode in get_model_meta(model).generation_modes.values()
+        )
+
+    @pytest.mark.parametrize("model", _VIDEO_MODELS)
+    def test_declared_iff_a_mode_accepts_a_video_source(self, model: ModelType) -> None:
+        video = get_model_meta(model).video
+        assert video is not None
+        assert (video.input_video is not None) is self._accepts_video_source(model)
+
+    @pytest.mark.parametrize("model", _VIDEO_MODELS)
+    def test_formats_are_a_non_empty_set_of_video_formats(self, model: ModelType) -> None:
+        video = get_model_meta(model).video
+        assert video is not None
+        if video.input_video is None:
+            return
+        assert video.input_video.formats
+        assert all(fmt.is_video for fmt in video.input_video.formats)
+
+    def test_pinned_values(self) -> None:
+        wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+        grok = get_model_meta(ModelType.GROK_IMAGINE_VIDEO).video
+        aisha = get_model_meta(ModelType.AISHA_VIDEO).video
+        assert wan is not None
+        assert grok is not None
+        assert aisha is not None
+        assert wan.input_video == InputVideoConstraints(
+            formats=frozenset({MediaFormat.MP4, MediaFormat.MOV}),
+            min_duration_ms=1_000,
+            max_duration_ms=15_000,
+            max_bytes=100_000_000,
+        )
+        assert grok.input_video == InputVideoConstraints(
+            formats=frozenset({MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV}),
+            min_duration_ms=0,
+            max_duration_ms=None,
+            max_bytes=None,
+        )
+        assert aisha.input_video is None
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"formats": frozenset()},
+            {"formats": frozenset({MediaFormat.PNG})},
+            {"min_duration_ms": -1},
+            {"min_duration_ms": 2_000, "max_duration_ms": 1_000},
+            {"max_bytes": 0},
+        ],
+    )
+    def test_an_unsatisfiable_declaration_is_rejected(self, kwargs: dict[str, object]) -> None:
+        base: dict[str, object] = {
+            "formats": frozenset({MediaFormat.MP4}),
+            "min_duration_ms": 0,
+            "max_duration_ms": None,
+            "max_bytes": None,
+        }
+        with pytest.raises(ValueError):
+            InputVideoConstraints(**(base | kwargs))  # type: ignore[arg-type]
 
 
 def test_every_declarative_model_is_exported_from_models_registry() -> None:

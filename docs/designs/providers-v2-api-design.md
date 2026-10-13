@@ -142,7 +142,7 @@ Same structure, but `user_context` key is **omitted entirely** (not `null`).
 ## 3. `msgspec.Struct` definitions
 
 > **Update (Wan 3.0 arc):** `VideoConstraints` gained `min_duration`, `supported_parameters`,
-> `max_input_video_seconds`, `max_combined_duration` and `input_anchored_modes`
+> `input_video` (replaces an unreleased single per-clip seconds cap), `max_combined_duration` and `input_anchored_modes`
 > (additive wire fields; they mirror `VideoMeta` in `src/core/model_registry.py`). The sketch
 > below shows the current shape. See `docs/contracts/wan-video-contract.md`.
 
@@ -153,6 +153,17 @@ Same structure, but `user_context` key is **omitted entirely** (not `null`).
 from __future__ import annotations
 
 import msgspec
+
+
+class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
+    """What the model accepts as a video source (v2v)."""
+
+    formats: list[str]
+    """Sorted accepted containers, e.g. ["mov", "mp4"]."""
+
+    min_duration_ms: int
+    max_duration_ms: int | None = None
+    max_bytes: int | None = None
 
 
 class VideoConstraints(msgspec.Struct, kw_only=True):
@@ -170,8 +181,9 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     supported_parameters: list[str]
     """Sorted optional request parameters the model honours, e.g. ["audio", "prompt_extend"]."""
 
-    max_input_video_seconds: int | None = None
-    """Per-clip cap on a v2v source video. None = no model-specific cap."""
+    input_video: InputVideoConstraintsInfo | None = None
+    """v2v source limits (formats, min/max duration in ms, max bytes). None = the model
+    accepts no video source."""
 
     max_combined_duration: int | None = None
     """v2v: input seconds + requested duration must not exceed this. None = no rule."""

@@ -919,7 +919,12 @@ VideoConstraints: {
   max_duration: int,                 // maximum video duration in seconds
   resolutions: string[],             // e.g. ["480p", "720p", "1080p"]
   supported_parameters: string[],    // sorted; optional video params the model honours, e.g. ["audio", "prompt_extend"]
-  max_input_video_seconds: int | null,   // per-clip cap on a v2v source video; null = no model-specific cap
+  input_video: {                         // v2v source limits; null = the model accepts no video source
+    formats: string[],                   //   sorted accepted containers, e.g. ["mov", "mp4"] (Wan); filter the library picker by these
+    min_duration_ms: int,                //   shortest accepted clip; 0 = no minimum
+    max_duration_ms: int | null,         //   longest accepted clip; null = no model-specific cap
+    max_bytes: int | null                //   largest accepted file in bytes; null = no model-specific cap
+  } | null,
   max_combined_duration: int | null,     // v2v: input seconds + requested duration must not exceed this; null = no rule
   input_anchored_modes: string[]         // sorted generation modes whose output ratio follows the input ⇒ omit aspect_ratio there; other modes accept it (Wan: ["flf2v","i2v","v2v"]; others: [])
 }

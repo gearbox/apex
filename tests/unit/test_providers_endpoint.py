@@ -233,6 +233,55 @@ class TestModelInfoSchema:
 
         assert info.provisioning is None
 
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            (
+                ModelType.WAN_3_VIDEO,
+                {
+                    "formats": ["mov", "mp4"],
+                    "min_duration_ms": 1000,
+                    "max_duration_ms": 15000,
+                    "max_bytes": 100000000,
+                },
+            ),
+            (
+                ModelType.GROK_IMAGINE_VIDEO,
+                {
+                    "formats": ["mov", "mp4", "webm"],
+                    "min_duration_ms": 0,
+                    "max_duration_ms": None,
+                    "max_bytes": None,
+                },
+            ),
+            (ModelType.AISHA_VIDEO, None),
+        ],
+    )
+    def test_video_input_constraints_are_discoverable(
+        self, model_type: ModelType, expected: dict[str, object] | None
+    ) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=aisha_video_capabilities()
+            if model_type is ModelType.AISHA_VIDEO
+            else None,
+        )
+
+        assert info.video is not None
+        assert msgspec.to_builtins(info.video.input_video) == expected
+        # Hard cutover: the single-seconds-cap field is gone, not kept beside ``input_video``.
+        assert set(msgspec.to_builtins(info.video)) == {
+            "min_duration",
+            "max_duration",
+            "resolutions",
+            "supported_parameters",
+            "input_video",
+            "max_combined_duration",
+            "input_anchored_modes",
+        }
+
     @pytest.mark.parametrize("model_type", ModelType)
     def test_generation_modes_are_the_only_discovery_input_contract(
         self, model_type: ModelType

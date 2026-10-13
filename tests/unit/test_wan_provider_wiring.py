@@ -7,6 +7,7 @@ from types import SimpleNamespace
 from typing import Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
+import msgspec
 import pytest
 from pydantic import ValidationError
 
@@ -134,7 +135,13 @@ async def test_c19_discovery_lists_wan_with_five_modes_and_video_constraints(
     assert model.video.supported_parameters == ["audio", "prompt_extend"]
     assert (model.video.min_duration, model.video.max_duration) == (2, 30)
     assert model.video.resolutions == ["480p", "720p", "1080p"]
-    assert (model.video.max_input_video_seconds, model.video.max_combined_duration) == (15, 30)
+    assert model.video.max_combined_duration == 30
+    assert msgspec.to_builtins(model.video.input_video) == {
+        "formats": ["mov", "mp4"],
+        "min_duration_ms": 1000,
+        "max_duration_ms": 15000,
+        "max_bytes": 100000000,
+    }
     assert model.video.input_anchored_modes == ["flf2v", "i2v", "v2v"]
     r2v = model.generation_modes["r2v"].source_media
     assert r2v is not None

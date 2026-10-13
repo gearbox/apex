@@ -59,6 +59,22 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
     and the output follows the source image's aspect."""
 
 
+class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
+    """What the model accepts as a video source (v2v)."""
+
+    formats: list[str]
+    """Accepted containers (sorted), e.g. ["mov", "mp4"]. Filter the library picker by these."""
+
+    min_duration_ms: int
+    """Shortest accepted source clip in milliseconds. 0 = no minimum."""
+
+    max_duration_ms: int | None = None
+    """Longest accepted source clip in milliseconds. null = no model-specific cap."""
+
+    max_bytes: int | None = None
+    """Largest accepted source file in bytes. null = no model-specific cap."""
+
+
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
 
@@ -75,8 +91,8 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     """Optional request parameters the model honours (sorted), e.g. ["audio", "prompt_extend"].
     Sending any other optional video parameter as non-null is rejected."""
 
-    max_input_video_seconds: int | None = None
-    """Per-clip cap on a video source (v2v). null = no model-specific cap."""
+    input_video: InputVideoConstraintsInfo | None = None
+    """Video-source (v2v) limits. null = the model accepts no video source."""
 
     max_combined_duration: int | None = None
     """v2v: input seconds + requested output seconds must not exceed this. null = no rule."""

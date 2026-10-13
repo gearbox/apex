@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import dataclasses
+from contextlib import contextmanager
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -25,6 +27,7 @@ from src.api.services.generation.video_validation import (
     input_video_seconds,
     unsupported_video_parameters,
     validate_video_request,
+    validate_video_sources,
 )
 from src.api.services.model_studio.wan_payload import build_wan_video_payload
 from src.core.enums import (
@@ -39,6 +42,9 @@ from src.core.enums import (
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.model_registry import get_model_meta
 from src.core.product_registry import VEX_CONFIG
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 pytestmark = pytest.mark.unit
 
@@ -325,6 +331,119 @@ async def test_c9_wan_v2v_source_video_limits(
         await _generate(service, request)
 
     _assert_no_billing_work(service)
+
+
+def _v2v_request(model: ModelType, *, duration: int = 5) -> UnifiedGenerationRequest:
+    return _request(
+        model,
+        generation_type=GenerationType.V2V,
+        duration=duration,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
+    )
+
+
+@contextmanager
+def _resolved_v2v_source(source: ResolvedSourceMedia) -> Iterator[None]:
+    """Patch the owned-library lookups so ``generate`` sees exactly ``source``."""
+    with (
+        _ENABLED_MODEL,
+        patch(
+            "src.api.services.generation.service.SourceMediaResolver.resolve",
+            new=AsyncMock(return_value=[source]),
+        ),
+        patch(
+            "src.api.services.generation.service.UserImageRepository.touch_expiry_many",
+            new=AsyncMock(return_value=1),
+        ),
+        patch(
+            "src.api.services.generation.service.GenerationJobSourceRepository.create_many",
+            new=AsyncMock(),
+        ),
+    ):
+        yield
+
+
+@pytest.mark.parametrize(
+    ("content_type", "size_bytes", "duration_ms", "message"),
+    [
+        ("video/webm", 5 * 1024 * 1024, 6_000, "webm is not accepted; use one of mov, mp4"),
+        ("video/mp4", 150 * 1024 * 1024, 6_000, "100000000"),
+        ("video/mp4", 1_000, 500, "minimum is 1000 ms"),
+    ],
+)
+async def test_r2_wan_v2v_source_outside_the_provider_limits_fails_before_any_billing_work(
+    content_type: str, size_bytes: int, duration_ms: int, message: str
+) -> None:
+    service = _submitting_service()
+    source = dataclasses.replace(
+        _video_source(duration_ms), content_type=content_type, size_bytes=size_bytes
+    )
+
+    with (
+        _resolved_v2v_source(source),
+        pytest.raises(SourceMediaValidationError, match=message),
+    ):
+        await _generate(service, _v2v_request(ModelType.WAN_3_VIDEO))
+
+    _assert_no_billing_work(service)
+    service._providers[Provider.ALIBABA].submit.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+def test_r2_the_container_message_lists_the_accepted_formats_sorted() -> None:
+    wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert wan is not None
+    source = dataclasses.replace(_video_source(6_000), content_type="video/webm")
+
+    with pytest.raises(SourceMediaValidationError) as raised:
+        validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
+
+    assert str(raised.value) == (
+        "source_media position 0: webm is not accepted; use one of mov, mp4"
+    )
+    assert "uploads/" not in str(raised.value)  # never leaks the storage key
+
+
+def test_r2_an_unknown_container_is_named_by_its_content_type() -> None:
+    wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert wan is not None
+    source = dataclasses.replace(_video_source(6_000), content_type="video/x-matroska")
+
+    with pytest.raises(SourceMediaValidationError, match="video/x-matroska is not accepted"):
+        validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
+
+
+@pytest.mark.parametrize(
+    "source",
+    [
+        dataclasses.replace(_video_source(1_000), size_bytes=100_000_000),  # both limits, exactly
+        dataclasses.replace(_video_source(15_000), content_type="video/quicktime"),
+    ],
+)
+def test_r2_wan_accepts_a_source_exactly_at_the_provider_limits(
+    source: ResolvedSourceMedia,
+) -> None:
+    wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert wan is not None
+
+    validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO, duration=5), wan)
+
+
+async def test_r2_grok_v2v_still_accepts_a_webm_source() -> None:
+    service = _service()
+    job = MagicMock(id=uuid4(), status="queued", name="x", created_at=datetime.now(UTC))
+    provider = MagicMock()
+    provider.validate = MagicMock()
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+    )
+    service._providers[Provider.GROK] = provider
+    source = dataclasses.replace(_video_source(60_000), content_type="video/webm")
+
+    with _resolved_v2v_source(source):
+        await _generate(service, _v2v_request(ModelType.GROK_IMAGINE_VIDEO))
+
+    assert service._pricing.quote.await_count == 1  # type: ignore[attr-defined]
+    provider.submit.assert_awaited_once()
 
 
 def test_c11_input_video_seconds_counts_only_when_the_model_bills_them() -> None:

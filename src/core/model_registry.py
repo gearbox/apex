@@ -14,6 +14,7 @@ from typing import TYPE_CHECKING
 from src.core.enums import (
     AspectRatio,
     GenerationType,
+    MediaFormat,
     MediaKind,
     MediaSlot,
     ModelType,
@@ -67,6 +68,38 @@ class ImageMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class InputVideoConstraints:
+    """What a model accepts as a *video source* (V2V), checked before any billing work.
+
+    Every field is required with no default so a new model decides each one.
+    """
+
+    formats: frozenset[MediaFormat]
+    """Containers the provider decodes; a source in any other format is rejected
+    locally (e.g. a library WebM for a model that takes only mp4/mov)."""
+
+    min_duration_ms: int
+    """Shortest accepted source clip in milliseconds. 0 = no minimum."""
+
+    max_duration_ms: int | None
+    """Longest accepted source clip in milliseconds. None = no model-specific cap."""
+
+    max_bytes: int | None
+    """Largest accepted source file in bytes (decimal, never rounded up). None = no cap."""
+
+    def __post_init__(self) -> None:
+        """Reject a registry entry that could never accept any source."""
+        if not self.formats or not all(fmt.is_video for fmt in self.formats):
+            raise ValueError("input video formats must be a non-empty set of video formats")
+        if self.min_duration_ms < 0:
+            raise ValueError("min_duration_ms must be >= 0")
+        if self.max_duration_ms is not None and self.max_duration_ms < self.min_duration_ms:
+            raise ValueError("max_duration_ms must be >= min_duration_ms")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class VideoMeta:
     """Video-specific constraints.
 
@@ -94,8 +127,9 @@ class VideoMeta:
     whose references are subjects, not frames). Every entry must be one of the
     model's ``generation_modes`` with video output."""
 
-    max_input_video_seconds: int | None
-    """Per-clip cap on a video source (V2V). None = no model-specific cap."""
+    input_video: InputVideoConstraints | None
+    """Video-source (V2V) limits. None = the model accepts no video source; it must be
+    non-None exactly when one of the model's generation modes takes ``MediaKind.VIDEO``."""
 
     max_combined_duration: int | None
     """V2V: input seconds + requested output seconds must not exceed this. None = no rule."""
@@ -237,7 +271,13 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
             supported_parameters=frozenset(),
             input_anchored_modes=frozenset(),
-            max_input_video_seconds=None,
+            # Every library video format, no clip limits: preserves the pre-registry behaviour.
+            input_video=InputVideoConstraints(
+                formats=frozenset({MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV}),
+                min_duration_ms=0,
+                max_duration_ms=None,
+                max_bytes=None,
+            ),
             max_combined_duration=None,
             bills_input_video_seconds=False,
         ),
@@ -332,7 +372,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
             supported_parameters=frozenset(),
             input_anchored_modes=frozenset(),
-            max_input_video_seconds=None,
+            input_video=None,  # no mode takes a video source
             max_combined_duration=None,
             bills_input_video_seconds=False,
         ),
@@ -392,7 +432,15 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             input_anchored_modes=frozenset(
                 {GenerationType.I2V, GenerationType.FLF2V, GenerationType.V2V}
             ),
-            max_input_video_seconds=15,
+            # reference_video: mp4/mov, 1-15 s per clip, <= 100 MB (Wan 3.0 API reference).
+            # Decimal 100 MB, the conservative reading. Frame rate (>= 16 fps) and side
+            # length (240-4096 px) are not checked locally: ResolvedSourceMedia has neither.
+            input_video=InputVideoConstraints(
+                formats=frozenset({MediaFormat.MP4, MediaFormat.MOV}),
+                min_duration_ms=1_000,
+                max_duration_ms=15_000,
+                max_bytes=100_000_000,
+            ),
             max_combined_duration=30,
             bills_input_video_seconds=True,
         ),

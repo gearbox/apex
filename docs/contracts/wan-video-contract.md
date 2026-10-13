@@ -41,14 +41,19 @@ The `alibaba` provider appears with `provisioning_mode: "always_on"`. Its model:
     "max_duration": 30,
     "resolutions": ["480p", "720p", "1080p"],
     "supported_parameters": ["audio", "prompt_extend"],
-    "max_input_video_seconds": 15,
+    "input_video": {                // v2v source limits; null = the model takes no video source
+      "formats": ["mov", "mp4"],    // sorted; filter the library picker by these
+      "min_duration_ms": 1000,
+      "max_duration_ms": 15000,
+      "max_bytes": 100000000
+    },
     "max_combined_duration": 30,
     "input_anchored_modes": ["flf2v", "i2v", "v2v"]
   }
 }
 ```
 
-New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `max_input_video_seconds`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits.
+New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `input_video`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits. `input_video` replaces an earlier single per-clip seconds cap that was never released (hard cutover: there is no compatibility field); it is `null` for a model that takes no video source (Aisha video), and Grok reports all three library containers with no duration or size limit.
 
 `input_anchored_modes` (sorted generation-mode keys) lists the modes whose output ratio **follows the input**: send no `aspect_ratio` for them. Every other mode accepts one even when `source_media` is present. It replaces an earlier per-model boolean that was never released (hard cutover: there is no compatibility field).
 
@@ -109,8 +114,10 @@ All requests also need `Idempotency-Key`. `source_media` items are library refer
 ## 4. Video edit and extend (`v2v`)
 
 - Exactly **one** video in `source_media`. It must have a known duration (library videos do); a video without one is rejected with `422`.
+- The source must be a container the model accepts, listed in `video.input_video.formats` (Wan: **mp4, mov**; a library **WebM** is not accepted). Filter the V2V library picker by that list rather than letting the user submit and fail.
 - Whether the request **edits** or **extends** is decided **by the prompt wording**, so say it: *"Extend this video: …"* or *"Edit this video: change the jacket to red"*. There is no separate parameter.
-- Limits (from `video`): the source is at most **15 s** (`max_input_video_seconds`), and **source length (rounded up) + `duration` must be ≤ 30 s** (`max_combined_duration`). Violations are rejected (`422`) before anything is charged.
+- Limits (from `video.input_video`): the source is **1–15 s** (`min_duration_ms`, `max_duration_ms`) and at most **100 000 000 bytes** (`max_bytes`, decimal 100 MB — a Wan output re-used as a source can exceed it), and **source length (rounded up) + `duration` must be ≤ 30 s** (`video.max_combined_duration`). Violations are rejected (`422`) before anything is charged.
+- **Not checked locally:** the provider also requires ≥ 16 fps and 240–4096 px per side for a video source (and rejects some image inputs, e.g. PNG alpha). The library does not carry dimensions or frame rate, so such a source passes validation and fails upstream as `provider_invalid_request`, which is refunded.
 - Edits can come back close to the source length rather than `duration`; see §7.
 
 ## 5. Parameters
@@ -134,7 +141,7 @@ Standard envelope; the codes you will see for Wan:
 | Code | HTTP | Meaning |
 |---|---|---|
 | `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent in an input-anchored mode: `i2v`, `flf2v`, `v2v`). |
-| `validation_error` | 422 | `source_media` problems: wrong count/kind, a source video of unknown duration, over 15 s, or over the 30 s combined limit. |
+| `validation_error` | 422 | `source_media` problems: wrong count/kind, a source video of unknown duration, a source container not accepted (`video.input_video.formats`), a source over `max_bytes`, shorter than `min_duration_ms` (1 s) or longer than `max_duration_ms` (15 s), or over the 30 s combined limit. |
 | `unsupported_generation_parameter` | 422 | `audio` or `prompt_extend` sent to a model that does not list it in `video.supported_parameters`; the message names the parameter. |
 | `price_not_found` | 404 | No pricing rule for this model/resolution yet (§8). |
 | `provider_invalid_request` | 400 | The provider rejected the request shape. |

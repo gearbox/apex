@@ -12,14 +12,14 @@ import math
 from typing import TYPE_CHECKING
 
 from src.api.services.generation.source_media import SourceMediaValidationError
-from src.core.enums import MediaKind, VideoParameter
+from src.core.enums import MediaFormat, MediaKind, VideoParameter
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from src.api.schemas.unified_generation import UnifiedGenerationRequest
     from src.api.services.generation.source_media import ResolvedSourceMedia
-    from src.core.model_registry import ModelMeta, VideoMeta
+    from src.core.model_registry import InputVideoConstraints, ModelMeta, VideoMeta
 
 
 def unsupported_video_parameters(
@@ -73,8 +73,10 @@ def validate_video_request(request: UnifiedGenerationRequest, meta: ModelMeta) -
 
 
 def _needs_input_durations(video: VideoMeta) -> bool:
+    """Whether a video source must carry a known duration (limits or billing depend on it)."""
+    clip = video.input_video
     return (
-        video.max_input_video_seconds is not None
+        (clip is not None and (clip.min_duration_ms > 0 or clip.max_duration_ms is not None))
         or video.max_combined_duration is not None
         or video.bills_input_video_seconds
     )
@@ -96,18 +98,64 @@ def _video_source_seconds(sources: Sequence[ResolvedSourceMedia], video: VideoMe
     return seconds
 
 
+def _validate_clip(source: ResolvedSourceMedia, clip: InputVideoConstraints) -> None:
+    """Check one video source's container, size and duration, in that order.
+
+    Every message names the limit and the position only; none carries a storage key or URL.
+    """
+    position = source.position
+    try:
+        container: MediaFormat | None = MediaFormat.from_content_type(source.content_type)
+    except ValueError:
+        container = None
+    if container is None or container not in clip.formats:
+        shown = container.value if container is not None else source.content_type
+        allowed = ", ".join(sorted(fmt.value for fmt in clip.formats))
+        raise SourceMediaValidationError(
+            f"source_media position {position}: {shown} is not accepted; use one of {allowed}"
+        )
+    if clip.max_bytes is not None and source.size_bytes > clip.max_bytes:
+        raise SourceMediaValidationError(
+            f"source_media position {position}: source video is {source.size_bytes} bytes; "
+            f"the maximum is {clip.max_bytes} bytes"
+        )
+    if clip.min_duration_ms == 0 and clip.max_duration_ms is None:
+        return
+    if source.duration_ms is None:
+        raise SourceMediaValidationError(
+            f"source_media position {position}: source video has no recorded duration"
+        )
+    if source.duration_ms < clip.min_duration_ms:
+        raise SourceMediaValidationError(
+            f"source_media position {position}: source video is {source.duration_ms} ms; "
+            f"the minimum is {clip.min_duration_ms} ms"
+        )
+    if clip.max_duration_ms is not None and source.duration_ms > clip.max_duration_ms:
+        raise SourceMediaValidationError(
+            f"source_media position {position}: source video is "
+            f"{math.ceil(source.duration_ms / 1000)}s; "
+            f"the maximum is {clip.max_duration_ms / 1000:g}s"
+        )
+
+
 def validate_video_sources(
     sources: Sequence[ResolvedSourceMedia],
     request: UnifiedGenerationRequest,
     video: VideoMeta,
 ) -> None:
-    """Enforce per-clip and combined-duration limits on resolved video inputs."""
+    """Enforce container, size, per-clip and combined-duration limits on video inputs."""
+    clips = [source for source in sources if source.media_kind is MediaKind.VIDEO]
+    if not clips:
+        return
+    if video.input_video is None:
+        # Source cardinality/kind validation rejects this earlier; fail closed on a
+        # registry that lets a video through to a model that takes none.
+        raise SourceMediaValidationError(
+            f"Model '{request.model.value}' does not accept a video source"
+        )
+    for source in clips:
+        _validate_clip(source, video.input_video)
     input_seconds = _video_source_seconds(sources, video)
-    for seconds in input_seconds:
-        if video.max_input_video_seconds is not None and seconds > video.max_input_video_seconds:
-            raise SourceMediaValidationError(
-                f"source video is {seconds}s; the maximum is {video.max_input_video_seconds}s"
-            )
     if (
         video.max_combined_duration is not None
         and input_seconds
