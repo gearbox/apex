@@ -258,15 +258,39 @@ async def test_poll_timeout_is_transient() -> None:
     await client.close()
 
 
-async def test_poll_auth_failure_is_terminal_not_transient() -> None:
+@pytest.mark.parametrize(
+    ("status", "code"),
+    [(401, "InvalidApiKey"), (403, "AccessDenied"), (403, "Workspace.AccessDenied")],
+)
+async def test_poll_auth_failure_is_transient_and_logged_at_error(status: int, code: str) -> None:
+    client = _client(lambda _: _json(status, {"code": code, "message": f"secret {_KEY}"}))
+    await client.connect()
+
+    with capture_logs() as logs, pytest.raises(ModelStudioTransientError) as raised:
+        await client.get_task("t-1")
+
+    assert raised.value.failure.kind is ProviderFailureKind.AUTHENTICATION_FAILED
+    assert raised.value.failure.provider_request_accepted is True
+    (event,) = [e for e in logs if e["event"] == "alibaba.poll_auth_failed"]
+    assert event["log_level"] == "error"
+    assert event["provider_status"] == status
+    assert event["provider_error_code"] == code
+    assert event["provider_job_id"] == "t-1"
+    _assert_clean(repr(logs))
+    await client.close()
+
+
+async def test_create_auth_failure_stays_terminal_and_non_billable() -> None:
+    """R4 is query-only: nothing was accepted on create, so it must still fail the request."""
     client = _client(lambda _: _json(401, {"code": "InvalidApiKey"}))
     await client.connect()
 
     with pytest.raises(ModelStudioAPIError) as raised:
-        await client.get_task("t-1")
+        await client.create_video_task({"model": "wan3.0-video", "input": {"prompt": "x"}})
 
     assert not isinstance(raised.value, ModelStudioTransientError)
     assert raised.value.failure.kind is ProviderFailureKind.AUTHENTICATION_FAILED
+    assert raised.value.failure.billable is False
     await client.close()
 
 

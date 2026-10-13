@@ -43,6 +43,8 @@ _TRANSIENT_KINDS = frozenset(
         ProviderFailureKind.PROVIDER_UNAVAILABLE,
     }
 )
+_QUERY_ONLY_TRANSIENT_KINDS = frozenset({ProviderFailureKind.AUTHENTICATION_FAILED})
+"""Transient for a task *query* only: on create, auth failures stay terminal and non-billable."""
 
 
 class ModelStudioClient:
@@ -152,9 +154,13 @@ class ModelStudioClient:
         """Fetch one task.
 
         Raises:
-            ModelStudioTransientError: Rate limits, timeouts and upstream 5xx; the
-                caller retries on the next tick without failing the job.
-            ModelStudioAPIError: Any other query failure (auth, malformed).
+            ModelStudioTransientError: Rate limits, timeouts, upstream 5xx and
+                authentication failures; the caller retries on the next tick without
+                failing the job. An auth failure on a *query* is the operator's problem
+                (rotated key, workspace permission), not the task's: the task keeps
+                running and billing upstream, so failing and refunding it would lose
+                the video. The job's own overdue check bounds the retries.
+            ModelStudioAPIError: Any other query failure (malformed, rejected task).
         """
         try:
             response = await self._http().get(
@@ -182,7 +188,10 @@ class ModelStudioClient:
                 provider_request_accepted=True,
                 provider_request_id=task_id,
             )
-            self._log_failure("alibaba.poll_failed", failure)
+            if failure.kind is ProviderFailureKind.AUTHENTICATION_FAILED:
+                self._log_poll_auth_failed(failure)
+            else:
+                self._log_failure("alibaba.poll_failed", failure)
             raise self._query_error(failure)
 
         try:
@@ -227,9 +236,21 @@ class ModelStudioClient:
 
     @staticmethod
     def _query_error(failure: ProviderFailure) -> ModelStudioAPIError:
-        if failure.kind in _TRANSIENT_KINDS:
+        """Map a *query* failure; ``create_video_task`` never goes through here."""
+        if failure.kind in _TRANSIENT_KINDS or failure.kind in _QUERY_ONLY_TRANSIENT_KINDS:
             return ModelStudioTransientError(failure)
         return ModelStudioAPIError(failure)
+
+    @staticmethod
+    def _log_poll_auth_failed(failure: ProviderFailure) -> None:
+        """Operator-actionable: every in-flight job is stuck until the key/permission is fixed."""
+        logger.error(
+            "alibaba.poll_auth_failed",
+            provider=failure.provider.value,
+            provider_status=failure.provider_status_code,
+            provider_error_code=failure.provider_error_code,
+            provider_job_id=failure.provider_request_id,
+        )
 
     def _raise_ambiguous_malformed(
         self,

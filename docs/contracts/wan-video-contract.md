@@ -146,6 +146,8 @@ Standard envelope; the codes you will see for Wan:
 
 Failures that happen after the job is accepted arrive as the job's terminal `failed` state with the same `failure_code` and a public message.
 
+An authentication or permission failure while *checking* an accepted job (rotated or revoked key, workspace permission) is **not** a job failure: the task keeps running and billing upstream, so the job stays `running` and is retried every poll (operators see `alibaba.poll_auth_failed` at `error` level). If the key is never fixed the job ends as `provider_timeout` after `WAN_VIDEO_MAX_POLL_TIME` and is refunded. A rejected key on *submission* still fails the request immediately with `provider_authentication_failed` (nothing was accepted, nothing is charged).
+
 ## 7. Cost
 
 `tokens = (token_cost + input_token_cost × k + per_second_token_cost × s) × n`. For Wan, `n` is `1`, and `s` is `duration` — plus, for `v2v`, the source video's length rounded up to whole seconds (Wan bills the input as well). Prices are per resolution. `GET /v1/billing/pricing` lists the rules (`per_second_token_cost`, `video_resolution`).

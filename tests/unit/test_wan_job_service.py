@@ -340,14 +340,87 @@ async def test_poll_transient_errors_propagate_for_the_worker_to_skip_the_tick()
 async def test_poll_non_transient_api_error_fails_the_job() -> None:
     client = MagicMock()
     client.get_task = AsyncMock(
-        side_effect=ModelStudioAPIError(_classifier.classify(http_status=401, code="InvalidApiKey"))
+        side_effect=ModelStudioAPIError(_classifier.malformed(provider_request_accepted=True))
     )
 
     outcome = await _poll(_service(client), _running_job())
 
     assert outcome.status is VideoPollStatus.FAILED
     assert outcome.failure is not None
-    assert outcome.failure.kind is ProviderFailureKind.AUTHENTICATION_FAILED
+    assert outcome.failure.kind is ProviderFailureKind.MALFORMED_RESPONSE
+
+
+def _auth_failing_service(**kwargs: Any) -> WanJobService:
+    """A real ``ModelStudioClient`` whose every task query is answered with a 401."""
+    import httpx
+    from pydantic import SecretStr
+
+    from src.api.services.model_studio import ModelStudioClient
+
+    client = ModelStudioClient(
+        base_url="https://ws.maas.aliyuncs.com",
+        api_key=SecretStr("sk-test"),
+        timeout_seconds=5,
+        transport=httpx.MockTransport(
+            lambda _: httpx.Response(401, json={"code": "InvalidApiKey", "message": "bad key"})
+        ),
+    )
+    return _service(client, **kwargs)
+
+
+async def test_worker_poll_of_a_401_is_transient_no_transition_no_refund() -> None:
+    """R4: a rotated/revoked key must not fail and refund every in-flight job."""
+    from src.api.services.video_jobs.worker import AsyncVideoJobWorker
+
+    service = _auth_failing_service()
+    await service._client.connect()
+    service.settle_video_poll_outcome = AsyncMock()  # type: ignore[method-assign]
+    job = _running_job()
+    worker = AsyncVideoJobWorker(
+        name="alibaba_video_poller",
+        job_service=service,
+        interval_seconds=15,
+        max_concurrent_polls=1,
+        db_manager=MagicMock(),
+        redis_client_factory=MagicMock(),
+    )
+
+    with (
+        patch(
+            "src.api.services.model_studio.wan_job_service.JobRepository",
+            return_value=_FakeJobRepository(job),
+        ),
+        capture_logs() as logs,
+    ):
+        await worker._poll_one(job, MagicMock())  # type: ignore[arg-type]
+
+    service.settle_video_poll_outcome.assert_not_awaited()
+    assert job.status == JobStatus.RUNNING.value
+    assert [e["log_level"] for e in logs if e["event"] == "alibaba.poll_auth_failed"] == ["error"]
+    assert [e for e in logs if e["event"] == "video_job.poll_transient"]
+    await service._client.close()
+
+
+async def test_overdue_job_with_a_persisting_401_still_times_out_before_polling() -> None:
+    """R4 relies on the overdue check running *before* the poll: retries are bounded."""
+    service = _auth_failing_service(max_poll_time=60)
+    await service._client.connect()
+    job = _running_job(started_at=datetime.now(UTC) - timedelta(seconds=120))
+
+    with (
+        patch(
+            "src.api.services.model_studio.wan_job_service.JobRepository",
+            return_value=_FakeJobRepository(job),
+        ),
+        capture_logs() as logs,
+    ):
+        outcome = await service.poll_video_job_for_worker(MagicMock(), job.id)
+
+    assert outcome.status is VideoPollStatus.FAILED
+    assert outcome.failure is not None
+    assert outcome.failure.kind is ProviderFailureKind.TIMEOUT
+    assert not [e for e in logs if e["event"] == "alibaba.poll_auth_failed"]  # never queried
+    await service._client.close()
 
 
 async def test_poll_without_a_task_id_is_a_programming_error() -> None:
