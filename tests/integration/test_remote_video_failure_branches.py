@@ -324,7 +324,7 @@ async def test_reconcile_deletes_only_the_keys_no_output_row_references(
             # The competing transition: job completed, original attached.
             job = await session.get(GenerationJob, seed.job_id)
             assert job is not None
-            job.status = JobStatus.COMPLETED.value
+            job.status = JobStatus.COMPLETED
             session.add(
                 GenerationOutput(
                     id=original_id,

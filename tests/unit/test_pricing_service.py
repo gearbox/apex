@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -583,7 +584,7 @@ class TestRuleInvariants:
         ],
     )
     async def test_invalid_patch_never_mutates_the_rule(
-        self, rule_fields: dict[str, object], patch: dict[str, int]
+        self, rule_fields: dict[str, object], patch: dict[str, Any]
     ) -> None:
         from src.api.services.billing_errors import InvalidPricingRuleError
 

@@ -528,11 +528,9 @@ async def test_fractional_v2v_input_does_not_log_a_billing_basis_mismatch() -> N
     session = AsyncMock()
     session.get = AsyncMock(return_value=SimpleNamespace(metadata_={"billed_seconds": reserved}))
 
+    job: Any = _running_job(debit_transaction_id=uuid4())
     with capture_logs() as logs:
-        outcome = await _service(client)._poll_video_result(
-            session,  # type: ignore[arg-type]
-            _running_job(debit_transaction_id=uuid4()),
-        )
+        outcome = await _service(client)._poll_video_result(session, job)  # type: ignore[arg-type]
 
     assert outcome.status is VideoPollStatus.COMPLETED
     assert not [e for e in logs if e["event"].startswith("alibaba.billing_basis")]

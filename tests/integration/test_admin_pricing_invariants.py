@@ -39,6 +39,8 @@ from src.db.models.billing import PricingRule
 from tests.legal_support import make_legal_registry
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping, Sequence
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.models.user import User
@@ -119,7 +121,7 @@ async def _insert_rule(session: AsyncSession, admin: User, **fields: Any) -> Pri
     return rule
 
 
-def _no_error_level_events(logs: list[dict[str, Any]]) -> bool:
+def _no_error_level_events(logs: Sequence[Mapping[str, Any]]) -> bool:
     return not [e for e in logs if e.get("log_level") in {"error", "critical"}]
 
 

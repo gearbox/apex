@@ -194,6 +194,7 @@ async def test_over_budget_output_is_settled_before_any_upload_or_attempt(
             )
 
         settle_failure.assert_awaited_once()
+        assert settle_failure.await_args is not None
         outcome: Any = settle_failure.await_args.args[2]
         assert outcome.failure.kind is ProviderFailureKind.OUTPUT_NOT_DELIVERED
         ingestor.prepare_video.assert_not_awaited()
