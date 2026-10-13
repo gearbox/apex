@@ -80,10 +80,15 @@ class RemoteVideoMaterializer:
         http_client_provider: Callable[[], httpx.AsyncClient],
         retention_days: int,
         finalization_lease_seconds: int,
+        max_output_bytes: int,
         billing_policy: ProviderBillingPolicyRegistry,
         transition_service_factory: Callable[[AsyncSession], JobStateTransitionService],
     ) -> None:
-        """Bind the provider-specific collaborators; no settings lookups happen later."""
+        """Bind the provider-specific collaborators; no settings lookups happen later.
+
+        ``max_output_bytes`` caps the download while it streams; it must match the
+        byte budget of ``media_ingestor`` (the provider-output ingest service).
+        """
         self._provider = provider
         self._profile_origin = profile_origin
         self._storage = storage
@@ -91,6 +96,7 @@ class RemoteVideoMaterializer:
         self._http_client_provider = http_client_provider
         self._retention_days = retention_days
         self._finalization_lease_seconds = finalization_lease_seconds
+        self._max_output_bytes = max_output_bytes
         self._billing_policy = billing_policy
         self._transition_service_factory = transition_service_factory
 
@@ -336,9 +342,7 @@ class RemoteVideoMaterializer:
         because a process can die after R2 accepts ``put_raw`` but before the
         following database acknowledgement reaches this process.
         """
-        response = await self._http_client_provider().get(result.url)
-        response.raise_for_status()
-        video_data = response.content
+        video_data = await self._download_video(result.url, job_id)
         prepared = await self._media_ingestor.prepare_video(video_data)
         expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
         output_id = new_id()
@@ -473,6 +477,41 @@ class RemoteVideoMaterializer:
             else:
                 await self._cleanup_materialized_objects(uploaded_keys)
             raise
+
+    async def _download_video(self, url: str, job_id: UUID) -> bytes:
+        """Stream the provider video, aborting as soon as it passes the byte budget.
+
+        Raises:
+            InvalidMediaError: The body is larger than ``max_output_bytes``. Raised
+                before anything is buffered past the cap, and before the durable
+                materialization attempt exists.
+        """
+        limit = self._max_output_bytes
+        async with self._http_client_provider().stream("GET", url) as response:
+            response.raise_for_status()
+            declared = response.headers.get("content-length")
+            if declared is not None and declared.isdigit() and int(declared) > limit:
+                self._log_output_too_large(job_id, content_length=int(declared))
+                raise InvalidMediaError("provider video exceeds the configured output byte limit")
+            buffer = bytearray()
+            async for chunk in response.aiter_bytes():
+                buffer.extend(chunk)
+                if len(buffer) > limit:
+                    self._log_output_too_large(job_id, content_length=None)
+                    raise InvalidMediaError(
+                        "provider video exceeds the configured output byte limit"
+                    )
+        return bytes(buffer)
+
+    def _log_output_too_large(self, job_id: UUID, *, content_length: int | None) -> None:
+        """Log an over-budget output. Never includes the (presigned) URL."""
+        logger.warning(
+            "video_job.output_too_large",
+            provider=self._provider.value,
+            job_id=str(job_id),
+            content_length=content_length,
+            max_output_bytes=self._max_output_bytes,
+        )
 
     async def _put_output_object(self, key: str, data: bytes, content_type: str) -> None:
         """Store a generated artifact through R2's public service boundary."""

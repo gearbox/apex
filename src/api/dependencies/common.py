@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -59,7 +60,10 @@ from src.api.services.legal.registry import LegalDocumentRegistry
 from src.api.services.library import LibraryService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
-from src.api.services.media_ingest.factory import build_media_ingest_service
+from src.api.services.media_ingest.factory import (
+    build_media_ingest_service,
+    build_provider_video_ingest_service,
+)
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin
 from src.api.services.model_studio.client import ModelStudioClient
 from src.api.services.model_studio.wan_job_service import WanJobService
@@ -163,6 +167,7 @@ class ServiceContainer:
     token_cleanup_worker: TokenCleanupWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
     media_ingestor: MediaIngestService | None = None
+    provider_video_ingestor: MediaIngestService | None = None
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
@@ -1010,9 +1015,18 @@ async def init_services(settings: Settings) -> JWTService:
             batch_size=settings.content_cleanup_batch_size,
         )
 
-    # Build exactly one bounded media ingest service per process. All original
-    # writers share its admission/concurrency limits.
-    _services.media_ingestor = build_media_ingest_service(settings)
+    # User uploads and provider-generated videos have different byte budgets
+    # (MAX_UPLOAD_SIZE_MB vs MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB), so they are two
+    # services — but they share one pair of semaphores, keeping a single
+    # process-wide admission/concurrency budget for all original writers.
+    video_slots = asyncio.Semaphore(settings.media_ingest_video_concurrency)
+    image_slots = asyncio.Semaphore(settings.media_ingest_image_concurrency)
+    _services.media_ingestor = build_media_ingest_service(
+        settings, video_slots=video_slots, image_slots=image_slots
+    )
+    _services.provider_video_ingestor = build_provider_video_ingest_service(
+        settings, video_slots=video_slots, image_slots=image_slots
+    )
 
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
@@ -1023,6 +1037,8 @@ async def init_services(settings: Settings) -> JWTService:
             grok_client=grok_client,
             storage=_services.r2_storage,
             media_ingestor=_services.media_ingestor,
+            provider_video_ingestor=_services.provider_video_ingestor,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
             billing_service=get_billing_service(),
             event_bus=_services.event_bus,
             ops_event_bus=_services.ops_event_bus,
@@ -1080,10 +1096,11 @@ async def init_services(settings: Settings) -> JWTService:
             provider=Provider.ALIBABA,
             profile_origin=VideoProfileOrigin.ALIBABA_OUTPUT,
             storage=_services.r2_storage,
-            media_ingestor=_services.media_ingestor,
+            media_ingestor=_services.provider_video_ingestor,
             http_client_provider=lambda: wan_download.client,
             retention_days=settings.retention_days,
             finalization_lease_seconds=settings.wan_video_finalization_lease_seconds,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
             billing_policy=wan_billing_policy,
             transition_service_factory=make_transition_service_factory(
                 billing_service=get_billing_service(),

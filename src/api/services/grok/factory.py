@@ -27,6 +27,8 @@ def build_grok_job_service(
     grok_client: GrokClient,
     storage: R2StorageService,
     media_ingestor: MediaIngestor,
+    provider_video_ingestor: MediaIngestor,
+    max_output_bytes: int,
     billing_service: BillingService | None,
     event_bus: EventBus | None,
     ops_event_bus: OpsEventBus | None,
@@ -35,7 +37,12 @@ def build_grok_job_service(
     max_poll_time: int,
     finalization_lease_seconds: int,
 ) -> GrokJobService:
-    """Build the Grok job service and the materializer that finishes its videos."""
+    """Build the Grok job service and the materializer that finishes its videos.
+
+    ``media_ingestor`` prepares user-facing image inputs/outputs; the materializer
+    uses ``provider_video_ingestor`` (provider-output byte budget) for generated
+    videos, with ``max_output_bytes`` capping the download to the same budget.
+    """
     holder: list[GrokJobService] = []
 
     def http_client() -> httpx.AsyncClient:
@@ -45,10 +52,11 @@ def build_grok_job_service(
         provider=Provider.GROK,
         profile_origin=VideoProfileOrigin.GROK_OUTPUT,
         storage=storage,
-        media_ingestor=media_ingestor,
+        media_ingestor=provider_video_ingestor,
         http_client_provider=http_client,
         retention_days=retention_days,
         finalization_lease_seconds=finalization_lease_seconds,
+        max_output_bytes=max_output_bytes,
         billing_policy=billing_policy,
         transition_service_factory=make_transition_service_factory(
             billing_service=billing_service,

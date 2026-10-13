@@ -7,6 +7,7 @@ its job service, its worker name/interval/concurrency and its config check.
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import sys
 from typing import TYPE_CHECKING
@@ -15,7 +16,10 @@ import structlog
 
 from src.api.services.billing import BillingService
 from src.api.services.event_bus import EventBus
-from src.api.services.media_ingest.factory import build_media_ingest_service
+from src.api.services.media_ingest.factory import (
+    build_media_ingest_service,
+    build_provider_video_ingest_service,
+)
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
@@ -23,7 +27,6 @@ from src.core.redis import get_operational_redis_client
 from src.db import init_db
 
 if TYPE_CHECKING:
-    import asyncio
     from collections.abc import Awaitable, Callable
 
     from src.api.services.media_ingest import MediaIngestor
@@ -43,6 +46,8 @@ class VideoWorkerDeps:
     event_bus: EventBus
     ops_event_bus: OpsEventBus
     media_ingestor: MediaIngestor
+    provider_video_ingestor: MediaIngestor
+    """Prepares provider-generated videos under ``MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB``."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -133,6 +138,10 @@ async def run_video_worker(
     event_bus = EventBus(enabled=settings.redis_url is not None)
     ops_event_bus = OpsEventBus(enabled=settings.redis_url is not None)
 
+    # One admission budget for the process: both ingest services share the semaphores.
+    video_slots = asyncio.Semaphore(settings.media_ingest_video_concurrency)
+    image_slots = asyncio.Semaphore(settings.media_ingest_image_concurrency)
+
     built = await build_job_service(
         VideoWorkerDeps(
             settings=settings,
@@ -140,7 +149,12 @@ async def run_video_worker(
             billing_service=billing_service,
             event_bus=event_bus,
             ops_event_bus=ops_event_bus,
-            media_ingestor=build_media_ingest_service(settings),
+            media_ingestor=build_media_ingest_service(
+                settings, video_slots=video_slots, image_slots=image_slots
+            ),
+            provider_video_ingestor=build_provider_video_ingest_service(
+                settings, video_slots=video_slots, image_slots=image_slots
+            ),
         )
     )
     logger.info("video_worker.job_service_initialized", worker=worker_name)

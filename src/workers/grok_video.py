@@ -70,6 +70,8 @@ class GrokVideoPollerCLI:
             grok_client=grok_client,
             storage=deps.storage,
             media_ingestor=deps.media_ingestor,
+            provider_video_ingestor=deps.provider_video_ingestor,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
             billing_service=deps.billing_service,
             event_bus=deps.event_bus,
             ops_event_bus=deps.ops_event_bus,

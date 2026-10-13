@@ -84,10 +84,11 @@ class WanVideoPollerCLI:
             provider=Provider.ALIBABA,
             profile_origin=VideoProfileOrigin.ALIBABA_OUTPUT,
             storage=deps.storage,
-            media_ingestor=deps.media_ingestor,
+            media_ingestor=deps.provider_video_ingestor,
             http_client_provider=lambda: download.client,
             retention_days=settings.retention_days,
             finalization_lease_seconds=settings.wan_video_finalization_lease_seconds,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
             billing_policy=policy,
             transition_service_factory=make_transition_service_factory(
                 billing_service=deps.billing_service,

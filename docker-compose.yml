@@ -133,6 +133,7 @@ services:
       # Content Settings
       RETENTION_DAYS: ${RETENTION_DAYS:-7}
       MAX_UPLOAD_SIZE_MB: ${MAX_UPLOAD_SIZE_MB:-20}
+      MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB: ${MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB:-200}
       
       # Generation Defaults
       DEFAULT_STEPS: ${DEFAULT_STEPS:-12}

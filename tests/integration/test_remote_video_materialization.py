@@ -215,6 +215,7 @@ def _materializer(
     ingestor: Any,
     http: httpx.AsyncClient,
     policy: ProviderBillingPolicyRegistry | None = None,
+    max_output_bytes: int = 200 * 1024 * 1024,
 ) -> RemoteVideoMaterializer:
     policy = policy or ProviderBillingPolicyRegistry.from_settings(Settings.model_construct())
     return RemoteVideoMaterializer(
@@ -225,6 +226,7 @@ def _materializer(
         http_client_provider=lambda: http,
         retention_days=7,
         finalization_lease_seconds=120,
+        max_output_bytes=max_output_bytes,
         billing_policy=policy,
         transition_service_factory=make_transition_service_factory(
             billing_service=BillingService(), event_bus=None, ops_event_bus=None

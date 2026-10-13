@@ -284,6 +284,9 @@ def cli_settings() -> MagicMock:
     s.wan_video_poll_interval = 15
     s.wan_video_max_concurrent_polls = 8
     s.redis_url = None
+    s.media_ingest_video_concurrency = 2
+    s.media_ingest_image_concurrency = 4
+    s.media_ingest_provider_video_max_bytes = 200 * 1024 * 1024
     return s
 
 
@@ -320,6 +323,7 @@ async def test_c22_starts_the_alibaba_poller_and_cleans_up_on_shutdown(
         patch("src.api.services.video_jobs.cli.R2StorageSettings"),
         patch("src.api.services.video_jobs.cli.BillingService"),
         patch("src.api.services.video_jobs.cli.build_media_ingest_service"),
+        patch("src.api.services.video_jobs.cli.build_provider_video_ingest_service"),
         patch(
             "src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=worker
         ) as worker_cls,
@@ -366,6 +370,7 @@ async def test_wan_cli_builds_a_polling_service_from_settings(cli_settings: Magi
         event_bus=MagicMock(),
         ops_event_bus=MagicMock(),
         media_ingestor=MagicMock(),
+        provider_video_ingestor=MagicMock(),
     )
     cli_settings.wan_video_max_poll_time = 1800
     cli_settings.wan_video_finalization_lease_seconds = 180
@@ -397,7 +402,81 @@ async def test_wan_cli_refuses_to_build_without_an_api_key(cli_settings: MagicMo
         event_bus=MagicMock(),
         ops_event_bus=MagicMock(),
         media_ingestor=MagicMock(),
+        provider_video_ingestor=MagicMock(),
     )
 
     with pytest.raises(RuntimeError, match="MODEL_STUDIO_API_KEY"):
         await WanVideoPollerCLI._build_job_service(deps)
+
+
+async def test_wan_materializer_uses_the_provider_video_ingestor_and_cap(
+    cli_settings: MagicMock,
+) -> None:
+    """R1: a Wan output must never be prepared under the user-upload byte budget."""
+    from src.api.services.video_jobs.cli import VideoWorkerDeps
+
+    upload_ingestor = MagicMock(name="upload")
+    provider_ingestor = MagicMock(name="provider")
+    deps = VideoWorkerDeps(
+        settings=cli_settings,
+        storage=MagicMock(),
+        billing_service=MagicMock(),
+        event_bus=MagicMock(),
+        ops_event_bus=MagicMock(),
+        media_ingestor=upload_ingestor,
+        provider_video_ingestor=provider_ingestor,
+    )
+    cli_settings.wan_video_max_poll_time = 1800
+    cli_settings.wan_video_finalization_lease_seconds = 180
+    cli_settings.wan_moderation_billing_policy = "refund"
+    cli_settings.wan_undelivered_output_billing_policy = "charge"
+    cli_settings.grok_moderation_billing_policy = "charge"
+    cli_settings.grok_undelivered_output_billing_policy = "charge"
+
+    with patch("src.workers.wan_video.ModelStudioClient") as client_cls:
+        client_cls.return_value.connect = AsyncMock()
+        client_cls.return_value.close = AsyncMock()
+        built = await WanVideoPollerCLI._build_job_service(deps)
+        await built.close()
+
+    materializer = built.service._materializer  # type: ignore[attr-defined]
+    assert materializer._media_ingestor is provider_ingestor
+    assert materializer._max_output_bytes == cli_settings.media_ingest_provider_video_max_bytes
+
+
+async def test_grok_materializer_uses_the_provider_video_ingestor_and_cap() -> None:
+    from src.api.services.video_jobs.cli import VideoWorkerDeps
+    from src.workers.grok_video import GrokVideoPollerCLI
+
+    settings = MagicMock()
+    settings.media_ingest_provider_video_max_bytes = 200 * 1024 * 1024
+    settings.retention_days = 7
+    settings.grok_video_max_poll_time = 600
+    settings.grok_video_finalization_lease_seconds = 120
+    settings.wan_moderation_billing_policy = "refund"
+    settings.wan_undelivered_output_billing_policy = "charge"
+    settings.grok_moderation_billing_policy = "charge"
+    settings.grok_undelivered_output_billing_policy = "charge"
+    upload_ingestor = MagicMock(name="upload")
+    provider_ingestor = MagicMock(name="provider")
+    deps = VideoWorkerDeps(
+        settings=settings,
+        storage=MagicMock(),
+        billing_service=MagicMock(),
+        event_bus=MagicMock(),
+        ops_event_bus=MagicMock(),
+        media_ingestor=upload_ingestor,
+        provider_video_ingestor=provider_ingestor,
+    )
+
+    with patch("src.workers.grok_video.GrokClient") as client_cls:
+        client_cls.return_value.connect = AsyncMock()
+        client_cls.return_value.close = AsyncMock()
+        built = await GrokVideoPollerCLI._build_job_service(deps)
+        await built.close()
+
+    materializer = built.service._materializer  # type: ignore[attr-defined]
+    assert materializer._media_ingestor is provider_ingestor
+    assert materializer._max_output_bytes == 200 * 1024 * 1024
+    # Images (Grok image outputs, i2v inputs) keep the user-facing ingestor.
+    assert built.service._media_ingestor is upload_ingestor  # type: ignore[attr-defined]
