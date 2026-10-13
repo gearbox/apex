@@ -102,6 +102,13 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     ``aspect_ratio`` must be omitted for them. Other modes accept it."""
 
 
+class SeedRangeInfo(msgspec.Struct, kw_only=True):
+    """Inclusive ``seed`` bounds a model accepts."""
+
+    min: int
+    max: int
+
+
 class ModelRuntimeResponse(msgspec.Struct, kw_only=True):
     """Authenticated runtime for an on-demand model.
 
@@ -164,6 +171,10 @@ class ModelInfo(msgspec.Struct, kw_only=True):
 
     video: VideoConstraints | None = None
     """Video constraints. None for image-only models."""
+
+    seed_range: SeedRangeInfo | None = None
+    """Accepted ``seed`` bounds. null = no model-specific bound. Omit ``seed`` for a random one;
+    a value outside the range is rejected."""
 
     runtime: ModelRuntimeResponse | None = None
     """Per-user state, populated only for authenticated on-demand models."""

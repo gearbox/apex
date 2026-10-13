@@ -283,6 +283,17 @@ class TestModelInfoSchema:
         }
 
     @pytest.mark.parametrize("model_type", ModelType)
+    def test_seed_range_is_discoverable_only_where_declared(self, model_type: ModelType) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+        )
+
+        expected = {"min": 0, "max": 2147483647} if model_type is ModelType.WAN_3_VIDEO else None
+        assert msgspec.to_builtins(info.seed_range) == expected
+
+    @pytest.mark.parametrize("model_type", ModelType)
     def test_generation_modes_are_the_only_discovery_input_contract(
         self, model_type: ModelType
     ) -> None:

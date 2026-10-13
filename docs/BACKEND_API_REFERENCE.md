@@ -734,7 +734,7 @@ Request: {
   height?: int (256–4096),        // explicit height; MUST be paired with width
 
   // --- Aisha sampler overrides (image models only). Omit ⇒ per-model bundle default. ---
-  seed?: int,                     // reproducibility seed; Aisha (auto-generated if omitted) and Wan; ignored by Grok
+  seed?: int,                     // reproducibility seed; Aisha (auto-generated if omitted) and Wan; ignored by Grok. Wan: 0-2147483647 (`ModelInfo.seed_range`), -1 rejected; omit for random
   steps?: int (1–150),            // inference steps; bundle clamps per-model max
   cfg?: float (0.0–30.0),         // CFG scale
   sampler?: Sampler,              // ComfyUI sampler name (see §17 Sampler)
@@ -888,6 +888,7 @@ ModelInfo: {
                                      //   confirmation before starting a (billable) GPU session.
   image: ImageConstraints | null,    // null for video-only models
   video: VideoConstraints | null,    // null for image-only models
+  seed_range: { min: int, max: int } | null,   // accepted `seed` bounds; null = no model-specific bound (only Wan declares one)
   session_state: string | null       // per-user readiness; only populated for authenticated requests
                                      //   on on_demand provider models. Values: ModelSessionState.
                                      //   null when unauthenticated or for always_on providers.

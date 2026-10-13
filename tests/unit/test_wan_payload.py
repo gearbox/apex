@@ -112,6 +112,12 @@ def test_optional_parameters_are_forwarded_when_set_including_false_and_zero() -
     assert parameters["seed"] == 0
 
 
+def test_a_seed_at_the_top_of_the_accepted_range_is_forwarded_verbatim() -> None:
+    parameters = _build(GenerationType.T2V, [], seed=2_147_483_647)["parameters"]
+
+    assert parameters["seed"] == 2_147_483_647
+
+
 def test_watermark_is_always_false_and_unsupported_inputs_are_never_emitted() -> None:
     body = _build(GenerationType.R2V, [(_IMG, "https://r2/a")], audio=True, seed=7)
     wire = repr(body)

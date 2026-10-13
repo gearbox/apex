@@ -193,6 +193,13 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     aspect_ratio must be omitted for them. Other modes accept it."""
 
 
+class SeedRangeInfo(msgspec.Struct, kw_only=True):
+    """Inclusive ``seed`` bounds a model accepts (``ModelInfo.seed_range``; None = no bound)."""
+
+    min: int
+    max: int
+
+
 class ModelInfo(msgspec.Struct, kw_only=True):
     """A single model's capabilities and constraints."""
 

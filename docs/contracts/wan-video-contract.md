@@ -49,9 +49,12 @@ The `alibaba` provider appears with `provisioning_mode: "always_on"`. Its model:
     },
     "max_combined_duration": 30,
     "input_anchored_modes": ["flf2v", "i2v", "v2v"]
-  }
+  },
+  "seed_range": { "min": 0, "max": 2147483647 }   // null = no model-specific bound
 }
 ```
+
+`seed_range` (`{min, max}` or `null`) is a new field on the model itself, additive for every model: only Wan declares one today.
 
 New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `input_video`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits. `input_video` replaces an earlier single per-clip seconds cap that was never released (hard cutover: there is no compatibility field); it is `null` for a model that takes no video source (Aisha video), and Grok reports all three library containers with no duration or size limit.
 
@@ -129,7 +132,7 @@ All requests also need `Idempotency-Key`. `source_media` items are library refer
 | `aspect_ratio` | One of the model's five ratios. **Omit it in the modes listed in `video.input_anchored_modes`** (`i2v`, `flf2v`, `v2v`) — the output follows the input frame(s) or video, and sending a value is a `400 validation_error`. `t2v` and `r2v` accept it: omitted, `t2v` renders `16:9` and `r2v` renders `adaptive`. |
 | `audio` | `true`/`false` to force; **`null` or omitted = the model's default**. |
 | `prompt_extend` | `true`/`false`; `null` or omitted = the model's default (the provider rewrites your prompt with an LLM). Send `false` for precise directing. |
-| `seed` | Forwarded when set; omitted = random. |
+| `seed` | **0–2147483647**; omit it (or send `null`) for a random one. `-1` is rejected — there is one spelling of "random". The bounds are `seed_range` on `GET /v1/providers`. |
 | `negative_prompt` | Not supported — do not send. |
 
 Sending `audio` or `prompt_extend` to a model that does not list it in `video.supported_parameters` (any non-Wan model, or an image model) is a `422 unsupported_generation_parameter` that names the parameter. `null` is always accepted. The output is never watermarked.
@@ -140,7 +143,7 @@ Standard envelope; the codes you will see for Wan:
 
 | Code | HTTP | Meaning |
 |---|---|---|
-| `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent in an input-anchored mode: `i2v`, `flf2v`, `v2v`). |
+| `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent in an input-anchored mode: `i2v`, `flf2v`, `v2v`), or a `seed` outside `seed_range` (including `-1`). |
 | `validation_error` | 422 | `source_media` problems: wrong count/kind, a source video of unknown duration, a source container not accepted (`video.input_video.formats`), a source over `max_bytes`, shorter than `min_duration_ms` (1 s) or longer than `max_duration_ms` (15 s), or over the 30 s combined limit. |
 | `unsupported_generation_parameter` | 422 | `audio` or `prompt_extend` sent to a model that does not list it in `video.supported_parameters`; the message names the parameter. |
 | `price_not_found` | 404 | No pricing rule for this model/resolution yet (§8). |

@@ -100,6 +100,19 @@ class InputVideoConstraints:
 
 
 @dataclass(frozen=True, slots=True)
+class SeedRange:
+    """Inclusive bounds a model accepts for ``seed``."""
+
+    min: int
+    max: int
+
+    def __post_init__(self) -> None:
+        """Reject an empty range."""
+        if self.min > self.max:
+            raise ValueError("seed range min must be <= max")
+
+
+@dataclass(frozen=True, slots=True)
 class VideoMeta:
     """Video-specific constraints.
 
@@ -184,6 +197,10 @@ class ModelMeta:
 
     video: VideoMeta | None = None
     """Video constraints. None for image-only models."""
+
+    seed_range: SeedRange | None = None
+    """Accepted ``seed`` bounds. None = no model-specific bound. ``null`` / omitted on the
+    wire always means "random"; a value outside the range is rejected before any billing."""
 
     audio: AudioMeta | None = None
     """Audio constraints. Reserved until an audio generation type exists."""
@@ -444,6 +461,8 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             max_combined_duration=30,
             bills_input_video_seconds=True,
         ),
+        # Upstream: "-1 or [0, 2147483647]". -1 means random, which we spell null/omitted.
+        seed_range=SeedRange(0, 2_147_483_647),
         rate_limit=None,  # upstream quotas unknown; Throttling maps to RATE_LIMITED
         requires_age_verification=False,
     ),

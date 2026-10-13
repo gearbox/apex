@@ -25,6 +25,7 @@ from src.api.schemas.providers import (
     ModelRuntimeResponse,
     ProviderInfo,
     ProvidersResponse,
+    SeedRangeInfo,
     SourceMediaModeConstraints,
     UserContext,
     VideoConstraints,
@@ -185,6 +186,11 @@ def _build_model_info(
                 input_anchored_modes=sorted(m.value for m in meta.video.input_anchored_modes),
             )
             if meta.video is not None
+            else None
+        ),
+        seed_range=(
+            SeedRangeInfo(min=meta.seed_range.min, max=meta.seed_range.max)
+            if meta.seed_range is not None
             else None
         ),
         runtime=runtime,

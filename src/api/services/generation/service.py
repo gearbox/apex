@@ -13,6 +13,7 @@ from src.api.services.billing_errors import BillingError
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.generation.request_validation import validate_seed
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
@@ -312,6 +313,9 @@ class GenerationService:
                     f"'{request.aspect_ratio.value}' for t2i; supported: "
                     f"{[a.value for a in meta.aspect_ratios]}"
                 )
+
+        # 1.75 Seed range (registry-driven, every model), before any billing work.
+        validate_seed(request, get_model_meta(request.model))
 
         # 1.8 Video parameter validation (registry-driven), before any billing work.
         # Image outputs never accept the video-only optional parameters.
