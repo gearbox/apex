@@ -206,7 +206,7 @@ class JobStateTransitionService:
         product_id: str,
         materialization_attempt_id: UUID | None = None,
     ) -> tuple[GenerationJob, bool]:
-        """Complete a Grok video only while holding its durable DB lease.
+        """Complete a remote-provider video only while holding its durable DB lease.
 
         ``claim_token`` is acquired and committed before any R2 side effect.
         The CAS below prevents an expired/replaced claimant from attaching its

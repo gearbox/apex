@@ -68,6 +68,7 @@ from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
     InsufficientBalanceError,
+    InvalidPricingRuleError,
     ModerationError,
     OrganizationBalanceError,
     OrganizationPermissionError,
@@ -196,6 +197,14 @@ def price_not_found_handler(
 ) -> Response[Any]:
     _log_handler_event("billing.price_not_found", request, HTTP_404_NOT_FOUND)
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
+
+
+def invalid_pricing_rule_handler(
+    request: Request[Any, Any, Any],
+    exc: InvalidPricingRuleError,
+) -> Response[Any]:
+    _log_handler_event("billing.invalid_pricing_rule", request, HTTP_422_UNPROCESSABLE_ENTITY)
+    return _error("invalid_pricing_rule", str(exc), HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 def moderation_error_handler(
@@ -574,6 +583,7 @@ def create_app() -> Litestar:
             AccountInactiveError: account_inactive_handler,
             RefundNotEligibleError: refund_not_eligible_handler,
             PriceNotFoundError: price_not_found_handler,
+            InvalidPricingRuleError: invalid_pricing_rule_handler,
             ModerationError: moderation_error_handler,
             PaymentVerificationError: payment_verification_handler,
             PaymentProviderDisabledError: payment_provider_disabled_handler,

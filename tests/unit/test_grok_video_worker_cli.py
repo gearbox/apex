@@ -7,7 +7,7 @@ from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
-from src.workers.grok_video import GrokVideoWorkerCLI
+from src.workers.grok_video import GrokVideoPollerCLI
 
 
 @pytest.fixture
@@ -37,6 +37,8 @@ def settings() -> MagicMock:
     s.redis_operational_socket_timeout_seconds = 0.75
     s.redis_operational_max_connections = 20
     s.max_upload_size_mb = 20
+    s.max_upload_size_bytes = 20 * 1024 * 1024
+    s.media_ingest_provider_video_max_bytes = 200 * 1024 * 1024
     s.image_max_input_megapixels = 100.0
     s.media_ingest_image_concurrency = 4
     s.media_ingest_video_concurrency = 2
@@ -49,12 +51,12 @@ def settings() -> MagicMock:
     return s
 
 
-class TestGrokVideoWorkerCLIHandleSignal:
+class TestGrokVideoPollerCLIHandleSignal:
     """Tests for handle_signal."""
 
     def test_handle_signal_sets_shutdown_event(self, settings: MagicMock) -> None:
         """Calling handle_signal should set the internal shutdown event."""
-        runner = GrokVideoWorkerCLI(settings)
+        runner = GrokVideoPollerCLI(settings)
         # The event is not set yet
         assert not runner._shutdown_event.is_set()
         runner.handle_signal()
@@ -62,19 +64,19 @@ class TestGrokVideoWorkerCLIHandleSignal:
 
     def test_handle_signal_idempotent(self, settings: MagicMock) -> None:
         """Calling handle_signal twice should not raise."""
-        runner = GrokVideoWorkerCLI(settings)
+        runner = GrokVideoPollerCLI(settings)
         runner.handle_signal()
         runner.handle_signal()  # second call must not raise
         assert runner._shutdown_event.is_set()
 
 
-class TestGrokVideoWorkerCLIRun:
+class TestGrokVideoPollerCLIRun:
     """Tests for the run() lifecycle method."""
 
     async def test_exits_when_grok_not_configured(self, settings: MagicMock) -> None:
         """run() should call sys.exit(1) when Grok API key is absent."""
         settings.grok_configured = False
-        runner = GrokVideoWorkerCLI(settings)
+        runner = GrokVideoPollerCLI(settings)
 
         with pytest.raises(SystemExit) as exc_info:
             await runner.run()
@@ -84,7 +86,7 @@ class TestGrokVideoWorkerCLIRun:
     async def test_exits_when_r2_not_configured(self, settings: MagicMock) -> None:
         """run() should call sys.exit(1) when R2 is not configured."""
         settings.r2_configured = False
-        runner = GrokVideoWorkerCLI(settings)
+        runner = GrokVideoPollerCLI(settings)
 
         with pytest.raises(SystemExit) as exc_info:
             await runner.run()
@@ -100,9 +102,9 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
             patch(
-                "src.workers.grok_video.R2StorageService",
+                "src.api.services.video_jobs.cli.R2StorageService",
                 return_value=mock_r2_storage,
             ),
             patch(
@@ -110,16 +112,16 @@ class TestGrokVideoWorkerCLIRun:
                 return_value=mock_grok_client,
             ),
             patch(
-                "src.workers.grok_video.GrokJobService",
+                "src.workers.grok_video.build_grok_job_service",
                 return_value=mock_job_service,
             ),
             patch(
-                "src.workers.grok_video.GrokVideoWorker",
+                "src.api.services.video_jobs.cli.AsyncVideoJobWorker",
                 return_value=mock_worker,
             ),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.api.services.video_jobs.cli.BillingService"),
         ):
-            runner = GrokVideoWorkerCLI(settings)
+            runner = GrokVideoPollerCLI(settings)
 
             # Trigger shutdown immediately after the worker starts
             async def trigger_shutdown() -> None:
@@ -146,17 +148,17 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
             patch(
-                "src.workers.grok_video.R2StorageService", return_value=mock_r2_storage
+                "src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage
             ) as mock_r2_cls,
-            patch("src.workers.grok_video.R2StorageSettings") as mock_r2_settings_cls,
+            patch("src.api.services.video_jobs.cli.R2StorageSettings") as mock_r2_settings_cls,
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
-            patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
+            patch("src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker),
+            patch("src.api.services.video_jobs.cli.BillingService"),
         ):
-            runner = GrokVideoWorkerCLI(settings)
+            runner = GrokVideoPollerCLI(settings)
 
             async def trigger_shutdown() -> None:
                 await asyncio.sleep(0)
@@ -174,7 +176,7 @@ class TestGrokVideoWorkerCLIRun:
         mock_r2_cls.assert_called_once_with(mock_r2_settings_cls.return_value)
 
     async def test_worker_receives_correct_settings(self, settings: MagicMock) -> None:
-        """GrokVideoWorker should receive the db_manager, job_service, and settings."""
+        """The shared video worker should receive the db_manager, job_service, and settings."""
         mock_db_manager = AsyncMock()
         mock_r2_storage = AsyncMock()
         mock_grok_client = AsyncMock()
@@ -183,17 +185,19 @@ class TestGrokVideoWorkerCLIRun:
         mock_billing_service = MagicMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
-            patch("src.workers.grok_video.R2StorageService", return_value=mock_r2_storage),
-            patch("src.workers.grok_video.R2StorageSettings"),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage),
+            patch("src.api.services.video_jobs.cli.R2StorageSettings"),
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
             patch(
-                "src.workers.grok_video.GrokVideoWorker", return_value=mock_worker
+                "src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker
             ) as mock_worker_cls,
-            patch("src.workers.grok_video.BillingService", return_value=mock_billing_service),
+            patch(
+                "src.api.services.video_jobs.cli.BillingService", return_value=mock_billing_service
+            ),
         ):
-            runner = GrokVideoWorkerCLI(settings)
+            runner = GrokVideoPollerCLI(settings)
 
             async def trigger_shutdown() -> None:
                 await asyncio.sleep(0)
@@ -202,12 +206,12 @@ class TestGrokVideoWorkerCLIRun:
             await asyncio.gather(runner.run(), trigger_shutdown())
 
         mock_worker_cls.assert_called_once_with(
-            db_manager=mock_db_manager,
+            name="grok_video_poller",
             job_service=mock_job_service,
-            billing_service=mock_billing_service,
-            settings=settings,
+            interval_seconds=settings.grok_video_poll_interval,
+            max_concurrent_polls=settings.grok_video_max_concurrent_polls,
+            db_manager=mock_db_manager,
             event_bus=ANY,
-            ops_event_bus=ANY,
             redis_enabled=False,
             redis_client_factory=ANY,
         )
@@ -227,18 +231,18 @@ class TestGrokVideoWorkerCLIRun:
         mock_worker = AsyncMock()
 
         with (
-            patch("src.workers.grok_video.init_db", return_value=mock_db_manager),
-            patch("src.workers.grok_video.R2StorageService", return_value=mock_r2_storage),
+            patch("src.api.services.video_jobs.cli.init_db", return_value=mock_db_manager),
+            patch("src.api.services.video_jobs.cli.R2StorageService", return_value=mock_r2_storage),
             patch("src.workers.grok_video.GrokClient", return_value=mock_grok_client),
-            patch("src.workers.grok_video.GrokJobService", return_value=mock_job_service),
-            patch("src.workers.grok_video.GrokVideoWorker", return_value=mock_worker),
-            patch("src.workers.grok_video.BillingService"),
+            patch("src.workers.grok_video.build_grok_job_service", return_value=mock_job_service),
+            patch("src.api.services.video_jobs.cli.AsyncVideoJobWorker", return_value=mock_worker),
+            patch("src.api.services.video_jobs.cli.BillingService"),
             patch("src.core.redis.init_redis_pool") as mock_init_redis_pool,
             patch("src.core.redis.init_operational_redis_pool") as mock_init_operational_pool,
             patch("src.core.redis.init_sse_redis_pool") as mock_init_sse_redis_pool,
             patch("src.core.redis.close_redis_pool", new_callable=AsyncMock),
         ):
-            runner = GrokVideoWorkerCLI(settings)
+            runner = GrokVideoPollerCLI(settings)
 
             async def trigger_shutdown() -> None:
                 await asyncio.sleep(0)

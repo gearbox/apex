@@ -19,11 +19,13 @@ from src.api.dependencies.auth import get_optional_user_id
 from src.api.schemas.providers import (
     GenerationModeInfo,
     ImageConstraints,
+    InputVideoConstraintsInfo,
     ModelInfo,
     ModelProvisioningHintResponse,
     ModelRuntimeResponse,
     ProviderInfo,
     ProvidersResponse,
+    SeedRangeInfo,
     SourceMediaModeConstraints,
     UserContext,
     VideoConstraints,
@@ -64,6 +66,7 @@ logger = structlog.get_logger(__name__)
 PROVIDER_DISPLAY_NAMES: dict[Provider, str] = {
     Provider.AISHA: "Aisha",
     Provider.GROK: "xAI Grok",
+    Provider.ALIBABA: "Alibaba Wan",
 }
 
 
@@ -165,10 +168,29 @@ def _build_model_info(
         ),
         video=(
             VideoConstraints(
+                min_duration=meta.video.min_duration,
                 max_duration=meta.video.max_duration,
                 resolutions=[r.value for r in meta.video.resolutions],
+                supported_parameters=sorted(p.value for p in meta.video.supported_parameters),
+                input_video=(
+                    InputVideoConstraintsInfo(
+                        formats=sorted(f.value for f in meta.video.input_video.formats),
+                        min_duration_ms=meta.video.input_video.min_duration_ms,
+                        max_duration_ms=meta.video.input_video.max_duration_ms,
+                        max_bytes=meta.video.input_video.max_bytes,
+                    )
+                    if meta.video.input_video is not None
+                    else None
+                ),
+                max_combined_duration=meta.video.max_combined_duration,
+                input_anchored_modes=sorted(m.value for m in meta.video.input_anchored_modes),
             )
             if meta.video is not None
+            else None
+        ),
+        seed_range=(
+            SeedRangeInfo(min=meta.seed_range.min, max=meta.seed_range.max)
+            if meta.seed_range is not None
             else None
         ),
         runtime=runtime,

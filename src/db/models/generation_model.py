@@ -19,7 +19,7 @@ class GenerationModel(Base):
     """Persisted enable/disable flag for each generation model.
 
     model_key matches the string value of ModelType enum.
-    provider is "grok" or "aisha".
+    provider is "grok", "aisha" or "alibaba".
     """
 
     __tablename__ = "generation_models"

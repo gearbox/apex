@@ -114,6 +114,7 @@ SYNTHARA_CONFIG = ProductConfig(
         {
             ModelType.GROK_IMAGINE_IMAGE,
             ModelType.GROK_IMAGINE_VIDEO,
+            ModelType.WAN_3_VIDEO,
             # Explicitly no NSFW models. Video models can be added when ready.
         }
     ),

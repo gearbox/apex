@@ -1,10 +1,13 @@
-"""Background worker for polling Grok video generation jobs.
+"""Background worker for polling one provider's async video generation jobs.
 
 Session-per-job + semaphore fan-out (mirrors AishaJobPoller): one short
 session lists candidate jobs, then each job is polled in its own session.
-All state transitions go through JobStateTransitionService — this worker
-never mutates job.status directly and never calls BillingService itself;
-refunds are settled inside the transition.
+All state transitions go through the provider's ``settle_video_poll_outcome``
+— this worker never mutates job.status directly and never calls
+BillingService itself; refunds are settled inside the transition.
+
+One instance exists per provider, each with its own lease name, interval and
+semaphore, so providers poll and finalize independently and concurrently.
 """
 
 from __future__ import annotations
@@ -15,12 +18,7 @@ from typing import TYPE_CHECKING
 import structlog
 
 from src.api.schemas.events import EventType, JobProgressPayload
-from src.api.services.grok import GrokRateLimitError, GrokTimeoutError
-
-# Retained as a module symbol for downstream test/extension imports. Terminal
-# transitions themselves are now owned by GrokJobService.
-from src.api.services.job_state_transition import JobStateTransitionService  # noqa: F401
-from src.core.enums import JobStatus, Provider, VideoPollStatus
+from src.core.enums import JobStatus, VideoPollStatus
 from src.db.repositories.job import JobRepository
 from src.workers.base import PeriodicWorker
 
@@ -30,60 +28,53 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.services.billing import BillingService
     from src.api.services.event_bus import EventBus
-    from src.api.services.grok.job_service import GrokJobService
-    from src.api.services.ops_event_bus import OpsEventBus
-    from src.core.config import Settings
+    from src.api.services.video_jobs.protocol import AsyncVideoJobService
     from src.db import DatabaseManager
     from src.db.models import GenerationJob
 
 logger = structlog.get_logger(__name__)
 
 
-class GrokVideoWorker(PeriodicWorker):
-    """Polls xAI for in-progress Grok video jobs and drives transitions.
-
-    Periodically checks for jobs in QUEUED or RUNNING status with video
-    generation types and polls the xAI API for results.
-    """
+class AsyncVideoJobWorker(PeriodicWorker):
+    """Polls one provider for in-progress video jobs and drives transitions."""
 
     def __init__(
         self,
-        db_manager: DatabaseManager,
-        job_service: GrokJobService,
-        billing_service: BillingService,
-        settings: Settings,
-        event_bus: EventBus | None = None,
-        ops_event_bus: OpsEventBus | None = None,
         *,
+        name: str | None = None,
+        job_service: AsyncVideoJobService,
+        interval_seconds: int,
+        max_concurrent_polls: int,
+        db_manager: DatabaseManager,
+        event_bus: EventBus | None = None,
         redis_enabled: bool = False,
         redis_client_factory: Callable[[], Redis],
     ) -> None:
         """Initialize the video worker.
 
         Args:
+            name: Worker name; feeds the leader-lease key, so it must be stable
+                across releases (and unique per provider). Defaults to the job
+                service's ``VIDEO_POLLER_NAME`` — the one definition per provider.
+            job_service: The provider's polling/settlement service.
+            interval_seconds: Seconds between ticks.
+            max_concurrent_polls: Semaphore bound on concurrent job polls.
             db_manager: Database manager for sessions.
-            job_service: Grok job service for polling.
-            billing_service: Billing service, needed by JobStateTransitionService
-                for timeout/failure refunds.
-            settings: Application settings.
-            event_bus: Optional event bus for publishing job events.
-            ops_event_bus: Optional ops event bus for admin notifications.
+            event_bus: Optional event bus for publishing job progress events.
             redis_enabled: Whether Redis is configured (enables the leader lease).
+            redis_client_factory: Factory for the operational Redis client.
         """
         super().__init__(
-            name="grok_video_poller",
-            interval_seconds=settings.grok_video_poll_interval,
+            name=name if name is not None else job_service.VIDEO_POLLER_NAME,
+            interval_seconds=interval_seconds,
             redis_enabled=redis_enabled,
             redis_client_factory=redis_client_factory,
         )
         self._db_manager = db_manager
         self._job_service = job_service
-        self._billing = billing_service
         self._event_bus = event_bus
-        self._ops_event_bus = ops_event_bus
-        self._max_concurrent_polls = settings.grok_video_max_concurrent_polls
+        self._max_concurrent_polls = max_concurrent_polls
 
     async def _emit_progress(self, job: GenerationJob, progress_pct: int) -> None:
         if not self._event_bus:
@@ -100,15 +91,14 @@ class GrokVideoWorker(PeriodicWorker):
 
     async def run_once(self) -> None:
         """Fetch candidate jobs in one session, then poll each in its own session."""
+        provider = self._job_service.provider
         async with self._db_manager.session() as session:
-            jobs = list(
-                await JobRepository(session).list_pending_video_jobs(provider=Provider.GROK)
-            )
+            jobs = list(await JobRepository(session).list_pending_video_jobs(provider=provider))
 
         if not jobs:
             return
 
-        logger.debug("grok.video_jobs_found", count=len(jobs))
+        logger.debug("video_job.jobs_found", provider=provider.value, count=len(jobs))
         sem = asyncio.Semaphore(self._max_concurrent_polls)
 
         async def guarded(job: GenerationJob) -> None:
@@ -117,20 +107,25 @@ class GrokVideoWorker(PeriodicWorker):
                     async with self._db_manager.session() as job_session:
                         await self._poll_one(job, job_session)
                 except Exception:
-                    logger.exception("grok.video_worker.poll_one_failed", job_id=str(job.id))
+                    logger.exception(
+                        "video_job.worker.poll_one_failed",
+                        provider=provider.value,
+                        job_id=str(job.id),
+                    )
 
         await asyncio.gather(*(guarded(j) for j in jobs))
 
     async def _poll_one(self, job: GenerationJob, session: AsyncSession) -> None:
-        """Poll one job; GrokJobService owns every terminal settlement."""
+        """Poll one job; the provider service owns every terminal settlement."""
         product_id = str(job.product_id)
 
         try:
             outcome = await self._job_service.poll_video_job_for_worker(session, job.id)
-        except (GrokRateLimitError, GrokTimeoutError) as exc:
-            failure = exc.failure
+        except self._job_service.transient_poll_errors as exc:
+            failure = exc.failure  # type: ignore[attr-defined]
             logger.warning(
-                "grok.video_poll_transient",
+                "video_job.poll_transient",
+                provider=self._job_service.provider.value,
                 job_id=str(job.id),
                 user_id=str(job.user_id),
                 product_id=product_id,
@@ -141,31 +136,18 @@ class GrokVideoWorker(PeriodicWorker):
             )
             return  # no transition, no progress emit; retried next tick (D2)
 
-        if outcome.status == VideoPollStatus.STILL_RUNNING:
-            if job.status == JobStatus.RUNNING:
-                # xAI does not expose granular progress.
-                await self._emit_progress(job, progress_pct=50)
-            else:
-                await self._job_service.settle_video_poll_outcome(
-                    session,
-                    job_id=job.id,
-                    outcome=outcome,
-                    product_id=product_id,
-                )
+        if outcome.status == VideoPollStatus.STILL_RUNNING and job.status == JobStatus.RUNNING:
+            # Nothing to settle for an already-running job. Only a provider that
+            # declares a progress value emits an event (no fabricated percentages).
+            progress_pct = self._job_service.running_progress_pct
+            if progress_pct is not None:
+                await self._emit_progress(job, progress_pct=progress_pct)
             return
 
-        if outcome.status == VideoPollStatus.COMPLETED:
-            await self._job_service.settle_video_poll_outcome(
-                session,
-                job_id=job.id,
-                outcome=outcome,
-                product_id=product_id,
-            )
-            return
-
-        # FAILED is settled by the same GrokJobService entry point used by
-        # poll-on-read. It owns the normalized public failure, billing policy,
-        # conditional terminal state update, commit, and post-commit events.
+        # QUEUED -> RUNNING, COMPLETED and FAILED all settle through the same
+        # provider entry point used by poll-on-read. It owns the normalized
+        # public failure, billing policy, conditional terminal state update,
+        # commit, and post-commit events.
         await self._job_service.settle_video_poll_outcome(
             session,
             job_id=job.id,

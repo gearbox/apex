@@ -218,10 +218,18 @@ class TestImageResolutionFields:
         )
         assert req.resolution == VideoResolution.RES_720P
 
-    def test_video_resolution_1080p_rejected(self) -> None:
+    def test_video_resolution_1080p_is_a_schema_value_narrowed_per_model(self) -> None:
+        """The schema knows 1080p; per-model support is enforced from the registry."""
+        req = msgspec.json.decode(
+            b'{"prompt":"x","generation_type":"t2v","model":"wan3.0-video","resolution":"1080p"}',
+            type=UnifiedGenerationRequest,
+        )
+        assert req.resolution == VideoResolution.RES_1080P
+
+    def test_video_resolution_unknown_value_rejected(self) -> None:
         with pytest.raises(msgspec.ValidationError):
             msgspec.json.decode(
-                b'{"prompt":"x","generation_type":"t2v","model":"grok-imagine-video","resolution":"1080p"}',
+                b'{"prompt":"x","generation_type":"t2v","model":"wan3.0-video","resolution":"4k"}',
                 type=UnifiedGenerationRequest,
             )
 

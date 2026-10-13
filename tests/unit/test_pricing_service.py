@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
@@ -22,6 +23,8 @@ def _make_rule(**kwargs: object) -> MagicMock:
     rule.model = kwargs.get("model")
     rule.token_cost = kwargs.get("token_cost", 100)
     rule.input_token_cost = kwargs.get("input_token_cost", 0)
+    rule.per_second_token_cost = kwargs.get("per_second_token_cost", 0)
+    rule.video_resolution = kwargs.get("video_resolution")
     rule.is_active = kwargs.get("is_active", True)
     rule.notes = kwargs.get("notes")
     return rule
@@ -171,7 +174,10 @@ class TestQuote:
         repo = _make_repo(price_rule=wildcard)
 
         async def get_active_price(
-            _provider: str, _generation_type: str, model: str | None
+            _provider: str,
+            _generation_type: str,
+            model: str | None,
+            _video_resolution: object = None,
         ) -> MagicMock:
             return exact if model == exact.model else wildcard
 
@@ -191,7 +197,75 @@ class TestQuote:
             )
 
         assert cost == 48
-        repo.get_active_price.assert_awaited_once_with("grok", "i2i", "grok-imagine-image")
+        repo.get_active_price.assert_awaited_once_with("grok", "i2i", "grok-imagine-image", None)
+
+
+class TestQuotePerSecond:
+    """C11: flat-only rules are unchanged; per-second rules scale with billed seconds."""
+
+    @staticmethod
+    async def _quote(rule: MagicMock | None, **kwargs: object) -> int:
+        repo = _make_repo(price_rule=rule)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            return await PricingService().quote(
+                "alibaba",
+                "t2v",
+                "wan3.0-video",
+                n=int(kwargs.pop("n", 1)),  # type: ignore[call-overload]
+                source_media_count=int(kwargs.pop("source_media_count", 0)),  # type: ignore[call-overload]
+                session=AsyncMock(),
+                **kwargs,  # type: ignore[arg-type]
+            )
+
+    async def test_flat_only_rule_ignores_billed_seconds(self) -> None:
+        rule = _make_rule(token_cost=40)
+
+        assert await self._quote(rule) == 40
+        assert await self._quote(rule, billed_seconds=15) == 40
+
+    async def test_per_second_rule_scales_with_seconds_and_outputs(self) -> None:
+        rule = _make_rule(token_cost=0, per_second_token_cost=3)
+
+        assert await self._quote(rule, billed_seconds=5) == 15
+        assert await self._quote(rule, billed_seconds=5, n=2) == 30
+
+    async def test_all_three_components_combine_before_the_output_multiplier(self) -> None:
+        rule = _make_rule(token_cost=10, input_token_cost=2, per_second_token_cost=3)
+
+        cost = await self._quote(rule, billed_seconds=4, source_media_count=2, n=2)
+
+        assert cost == (10 + 2 * 2 + 3 * 4) * 2
+
+    async def test_per_second_rule_without_billed_seconds_is_fail_loud(self) -> None:
+        rule = _make_rule(token_cost=0, per_second_token_cost=3)
+
+        with pytest.raises(ValueError, match="requires billed_seconds"):
+            await self._quote(rule)
+
+    async def test_negative_billed_seconds_is_rejected(self) -> None:
+        with pytest.raises(ValueError, match="billed_seconds"):
+            await self._quote(_make_rule(), billed_seconds=-1)
+
+    async def test_video_resolution_is_forwarded_to_the_lookup(self) -> None:
+        from src.core.enums import VideoResolution
+
+        repo = _make_repo(price_rule=_make_rule(token_cost=5))
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            await PricingService().quote(
+                "alibaba",
+                "t2v",
+                "wan3.0-video",
+                n=1,
+                source_media_count=0,
+                video_resolution=VideoResolution.RES_1080P,
+                session=AsyncMock(),
+            )
+
+        repo.get_active_price.assert_awaited_once_with(
+            "alibaba", "t2v", "wan3.0-video", VideoResolution.RES_1080P
+        )
 
 
 class TestListCatalog:
@@ -439,3 +513,99 @@ class TestUpdateRule:
             await svc.update_rule(rule.id, effective_until=None, session=session)
 
         assert rule.effective_until is None
+
+
+class TestRuleInvariants:
+    """R3: invariants of the *resulting* rule are enforced in the service (422), not the DB."""
+
+    async def _create(self, **overrides: object) -> None:
+        from src.api.services.pricing import PricingService as Service
+
+        repo = _make_repo()
+        fields: dict[str, object] = {
+            "provider": "alibaba",
+            "generation_type": "t2v",
+            "model": "m",
+            "token_cost": 0,
+            "per_second_token_cost": 5,
+            "notes": None,
+            "admin_id": uuid4(),
+            "session": AsyncMock(),
+        } | overrides
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            await Service().create_rule(**fields)  # type: ignore[arg-type]
+        repo.create_pricing_rule.assert_awaited_once()
+
+    async def test_valid_video_per_second_rule_is_created(self) -> None:
+        await self._create()
+
+    @pytest.mark.parametrize(
+        "overrides",
+        [
+            {"generation_type": "t2i", "token_cost": 1, "per_second_token_cost": 3},
+            {"generation_type": "i2i", "token_cost": 1, "video_resolution": "1080p"},
+            {"generation_type": "nope", "token_cost": 1, "per_second_token_cost": 0},
+            {"token_cost": 0, "per_second_token_cost": 0},
+        ],
+    )
+    async def test_invalid_create_never_reaches_the_repository(
+        self, overrides: dict[str, object]
+    ) -> None:
+        from src.api.services.billing_errors import InvalidPricingRuleError
+
+        repo = _make_repo()
+        fields: dict[str, object] = {
+            "provider": "alibaba",
+            "generation_type": "t2v",
+            "model": "m",
+            "token_cost": 0,
+            "per_second_token_cost": 5,
+            "notes": None,
+            "admin_id": uuid4(),
+            "session": AsyncMock(),
+        } | overrides
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            with pytest.raises(InvalidPricingRuleError):
+                await PricingService().create_rule(**fields)  # type: ignore[arg-type]
+
+        repo.create_pricing_rule.assert_not_awaited()
+
+    @pytest.mark.parametrize(
+        ("rule_fields", "patch"),
+        [
+            ({"token_cost": 0, "per_second_token_cost": 5}, {"per_second_token_cost": 0}),
+            ({"token_cost": 7, "per_second_token_cost": 0}, {"token_cost": 0}),
+            (
+                {"generation_type": "t2i", "token_cost": 7, "per_second_token_cost": 0},
+                {"per_second_token_cost": 2},
+            ),
+        ],
+    )
+    async def test_invalid_patch_never_mutates_the_rule(
+        self, rule_fields: dict[str, object], patch: dict[str, Any]
+    ) -> None:
+        from src.api.services.billing_errors import InvalidPricingRuleError
+
+        rule = _make_rule(**{"generation_type": "t2v"} | rule_fields)
+        repo = _make_repo(rule=rule)
+        before = (rule.token_cost, rule.per_second_token_cost)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            with pytest.raises(InvalidPricingRuleError):
+                await PricingService().update_rule(rule.id, session=AsyncMock(), **patch)
+
+        repo.update_pricing_rule.assert_not_awaited()
+        assert (rule.token_cost, rule.per_second_token_cost) == before
+
+    async def test_deactivation_is_never_blocked_by_a_broken_rule(self) -> None:
+        rule = _make_rule(generation_type="t2i", token_cost=1, per_second_token_cost=3)
+        repo = _make_repo(rule=rule)
+        with pytest.MonkeyPatch.context() as mp:
+            mp.setattr("src.api.services.pricing.BillingRepository", lambda _: repo)
+            updated = await PricingService().update_rule(
+                rule.id, is_active=False, session=AsyncMock()
+            )
+
+        assert updated.is_active is False

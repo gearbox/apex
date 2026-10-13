@@ -306,6 +306,8 @@ class PricingRule(Base):
     provider: Mapped[str] = mapped_column(String(50), nullable=False)
     generation_type: Mapped[str] = mapped_column(String(20), nullable=False)
     model: Mapped[str | None] = mapped_column(String(100), nullable=True)
+    video_resolution: Mapped[str | None] = mapped_column(String(10), nullable=True)
+    """Video output resolution this rule applies to. NULL = any resolution (and every image job)."""
     token_cost: Mapped[int] = mapped_column(Integer, nullable=False)
     input_token_cost: Mapped[int] = mapped_column(
         Integer,
@@ -314,6 +316,13 @@ class PricingRule(Base):
         server_default=text("0"),
     )
     """Token cost per input image, charged per output sample (total: (token_cost + input_token_cost*k)*n)."""
+    per_second_token_cost: Mapped[int] = mapped_column(
+        Integer,
+        nullable=False,
+        default=0,
+        server_default=text("0"),
+    )
+    """Token cost per billed video second. Quote: (token_cost + input_token_cost*k + per_second_token_cost*s)*n."""
     is_active: Mapped[bool] = mapped_column(
         Boolean,
         nullable=False,
@@ -342,7 +351,15 @@ class PricingRule(Base):
     )
 
     __table_args__ = (
-        CheckConstraint("token_cost > 0", name="chk_token_cost_positive"),
+        CheckConstraint(
+            "token_cost >= 0 AND per_second_token_cost >= 0 AND input_token_cost >= 0 "
+            "AND (token_cost > 0 OR per_second_token_cost > 0)",
+            name="chk_pricing_costs_valid",
+        ),
+        CheckConstraint(
+            "video_resolution IS NULL OR video_resolution IN ('480p', '720p', '1080p')",
+            name="chk_pricing_video_resolution",
+        ),
         CheckConstraint(
             "effective_until IS NULL OR effective_until > effective_from",
             name="chk_effective_range",
@@ -351,6 +368,7 @@ class PricingRule(Base):
             "provider",
             "generation_type",
             "model",
+            "video_resolution",
             "effective_from",
             name="uq_pricing_rule",
         ),

@@ -18,10 +18,15 @@ In-process workers (started from the app lifespan, see
 - ``gpu_orphan_cleanup`` (``src.api.services.gpu_session.cleanup_worker.OrphanedTunnelCleanupWorker``)
 - ``billing_reconciler`` (``src.api.services.gpu_session.billing_reconciler_worker.BillingReconcilerWorker``)
 - ``health_snapshot`` / ``health_snapshot_cleanup`` (``src.api.services.health.worker``)
-- ``grok_video_poller`` (``src.api.services.grok.video_worker.GrokVideoWorker``) — also
+- ``grok_video_poller`` (``src.api.services.video_jobs.worker.AsyncVideoJobWorker``) — also
   runnable as a standalone process:
 
     python -m src.workers.grok_video
+
+- ``alibaba_video_poller`` (``src.api.services.video_jobs.worker.AsyncVideoJobWorker``) — Wan
+  video polling with its own lease and settings; standalone:
+
+    python -m src.workers.wan_video
 """
 
 from __future__ import annotations

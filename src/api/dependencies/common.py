@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 from collections.abc import AsyncGenerator  # noqa: TC003
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -47,8 +48,8 @@ from src.api.services.gpu_session.operation_event_service import OperationEventS
 from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWorker
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
-from src.api.services.grok.job_service import GrokJobService
-from src.api.services.grok.video_worker import GrokVideoWorker
+from src.api.services.grok.factory import build_grok_job_service
+from src.api.services.grok.job_service import GrokJobService  # noqa: TC001
 from src.api.services.health.checkers.workers import WorkerHeartbeatChecker
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
@@ -59,7 +60,13 @@ from src.api.services.legal.registry import LegalDocumentRegistry
 from src.api.services.library import LibraryService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
-from src.api.services.media_ingest.factory import build_media_ingest_service
+from src.api.services.media_ingest.factory import (
+    build_media_ingest_service,
+    build_provider_video_ingest_service,
+)
+from src.api.services.media_ingest.profile_log import VideoProfileOrigin
+from src.api.services.model_studio.client import ModelStudioClient
+from src.api.services.model_studio.wan_job_service import WanJobService
 from src.api.services.oauth import OAuthProviderRegistry, OAuthService, RedisOAuthFlowStore
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.organization import OrganizationService
@@ -85,9 +92,13 @@ from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.unified_jobs import UnifiedJobService
 from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
+from src.api.services.video_jobs.download import VideoDownloadClient
+from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
+from src.api.services.video_jobs.transition import make_transition_service_factory
+from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
-from src.core.enums import WorkerMode
+from src.core.enums import Provider, WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
 from src.core.product_registry import PRODUCT_REGISTRY, get_product_config_by_slug
 from src.core.redis import get_redis_client
@@ -146,13 +157,17 @@ class ServiceContainer:
     payment_currency_sync_service: PaymentCurrencySyncService | None = None
     payment_currency_sync_worker: PaymentCurrencySyncWorker | None = None
     grok_job_service: GrokJobService | None = None
-    grok_video_worker: GrokVideoWorker | None = None
+    grok_video_worker: AsyncVideoJobWorker | None = None
+    model_studio_client: ModelStudioClient | None = None
+    wan_job_service: WanJobService | None = None
+    wan_video_worker: AsyncVideoJobWorker | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
     media_ingestor: MediaIngestService | None = None
+    provider_video_ingestor: MediaIngestService | None = None
     generation_service: GenerationService | None = None
     event_bus: EventBus | None = None
     sse_ticket_service: SSETicketService | None = None
@@ -472,6 +487,16 @@ def get_email_verification_service() -> EmailVerificationService:
 def get_grok_job_service() -> GrokJobService | None:
     """Provide Grok job service (None if not configured)."""
     return _services.grok_job_service
+
+
+def get_model_studio_client() -> ModelStudioClient | None:
+    """Provide the Model Studio client (None if not configured)."""
+    return _services.model_studio_client
+
+
+def get_wan_job_service() -> WanJobService | None:
+    """Provide the Wan job service (None if not configured)."""
+    return _services.wan_job_service
 
 
 # -----------------------------------------------------------------------------
@@ -990,29 +1015,37 @@ async def init_services(settings: Settings) -> JWTService:
             batch_size=settings.content_cleanup_batch_size,
         )
 
-    # Build exactly one bounded media ingest service per process. All original
-    # writers share its admission/concurrency limits.
-    _services.media_ingestor = build_media_ingest_service(settings)
+    # User uploads and provider-generated videos have different byte budgets
+    # (MAX_UPLOAD_SIZE_MB vs MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB), so they are two
+    # services — but they share one pair of semaphores, keeping a single
+    # process-wide admission/concurrency budget for all original writers.
+    video_slots = asyncio.Semaphore(settings.media_ingest_video_concurrency)
+    image_slots = asyncio.Semaphore(settings.media_ingest_image_concurrency)
+    _services.media_ingestor = build_media_ingest_service(
+        settings, video_slots=video_slots, image_slots=image_slots
+    )
+    _services.provider_video_ingestor = build_provider_video_ingest_service(
+        settings, video_slots=video_slots, image_slots=image_slots
+    )
 
     # Initialize Grok provider (if configured)
     if settings.grok_configured and _services.r2_storage is not None:
         grok_client = GrokClient(settings)
         await grok_client.connect()
 
-        _services.grok_job_service = GrokJobService(
+        _services.grok_job_service = build_grok_job_service(
             grok_client=grok_client,
             storage=_services.r2_storage,
-            retention_days=settings.retention_days,
+            media_ingestor=_services.media_ingestor,
+            provider_video_ingestor=_services.provider_video_ingestor,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
             billing_service=get_billing_service(),
             event_bus=_services.event_bus,
             ops_event_bus=_services.ops_event_bus,
+            billing_policy=ProviderBillingPolicyRegistry.from_settings(settings),
+            retention_days=settings.retention_days,
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
-            media_ingestor=_services.media_ingestor,
-            billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-                settings.grok_moderation_billing_policy,
-                settings.grok_undelivered_output_billing_policy,
-            ),
         )
         await _services.grok_job_service.connect()
         logger.info("grok.initialized")
@@ -1022,24 +1055,93 @@ async def init_services(settings: Settings) -> JWTService:
     # Start Grok video polling worker
     if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
         if settings.grok_video_worker_in_process:
-            _services.grok_video_worker = GrokVideoWorker(
-                db_manager=_services.db_manager,
+            _services.grok_video_worker = AsyncVideoJobWorker(
                 job_service=_services.grok_job_service,
-                billing_service=get_billing_service(),
-                settings=settings,
+                interval_seconds=settings.grok_video_poll_interval,
+                max_concurrent_polls=settings.grok_video_max_concurrent_polls,
+                db_manager=_services.db_manager,
                 event_bus=_services.event_bus,
-                ops_event_bus=_services.ops_event_bus,
                 redis_enabled=redis_enabled,
                 redis_client_factory=get_operational_redis_client,
             )
             await _services.grok_video_worker.start()
-            logger.info("grok.video_worker_in_process_started")
+            logger.info("grok.video_poller_in_process_started")
         else:
             logger.info(
-                "grok.video_worker_external_recommended",
+                "grok.video_poller_external_recommended",
                 hint=(
                     "Poll-on-read settles videos safely without a worker; run "
                     "'python -m src.workers.grok_video' for proactive completion"
+                ),
+            )
+
+    # Initialize Alibaba Model Studio (Wan) provider (if configured)
+    if (
+        settings.model_studio_configured
+        and settings.model_studio_api_key is not None
+        and _services.r2_storage is not None
+    ):
+        model_studio_client = ModelStudioClient(
+            base_url=settings.model_studio_base_url,
+            api_key=settings.model_studio_api_key,
+            timeout_seconds=settings.model_studio_timeout_seconds,
+        )
+        await model_studio_client.connect()
+        _services.model_studio_client = model_studio_client
+
+        wan_billing_policy = ProviderBillingPolicyRegistry.from_settings(settings)
+        wan_download = VideoDownloadClient()
+        wan_materializer = RemoteVideoMaterializer(
+            provider=Provider.ALIBABA,
+            profile_origin=VideoProfileOrigin.ALIBABA_OUTPUT,
+            storage=_services.r2_storage,
+            media_ingestor=_services.provider_video_ingestor,
+            http_client_provider=lambda: wan_download.client,
+            retention_days=settings.retention_days,
+            finalization_lease_seconds=settings.wan_video_finalization_lease_seconds,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
+            billing_policy=wan_billing_policy,
+            transition_service_factory=make_transition_service_factory(
+                billing_service=get_billing_service(),
+                event_bus=_services.event_bus,
+                ops_event_bus=_services.ops_event_bus,
+            ),
+        )
+        _services.wan_job_service = WanJobService(
+            model_studio_client,
+            wan_materializer,
+            wan_download,
+            billing_service=get_billing_service(),
+            event_bus=_services.event_bus,
+            ops_event_bus=_services.ops_event_bus,
+            max_poll_time=settings.wan_video_max_poll_time,
+            billing_policy=wan_billing_policy,
+        )
+        await _services.wan_job_service.connect()
+        logger.info("alibaba.initialized")
+    else:
+        logger.warning("alibaba.not_configured")
+
+    # Start Wan video polling worker — its own instance, lease and semaphore
+    if workers_enabled and _services.wan_job_service is not None:
+        if settings.wan_video_worker_in_process:
+            _services.wan_video_worker = AsyncVideoJobWorker(
+                job_service=_services.wan_job_service,
+                interval_seconds=settings.wan_video_poll_interval,
+                max_concurrent_polls=settings.wan_video_max_concurrent_polls,
+                db_manager=_services.db_manager,
+                event_bus=_services.event_bus,
+                redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
+            )
+            await _services.wan_video_worker.start()
+            logger.info("alibaba.video_worker_in_process_started")
+        else:
+            logger.info(
+                "alibaba.video_worker_external_recommended",
+                hint=(
+                    "Poll-on-read settles videos safely without a worker; run "
+                    "'python -m src.workers.wan_video' for proactive completion"
                 ),
             )
 
@@ -1284,7 +1386,6 @@ async def init_services(settings: Settings) -> JWTService:
     # Initialize unified generation service
     from src.api.services.generation.aisha_provider import AishaGenerationProvider
     from src.api.services.generation.grok_provider import GrokGenerationProvider
-    from src.core.enums import Provider
 
     generation_providers: dict[Provider, GenerationProvider] = {}
     if _services.bundle_index is None:
@@ -1309,6 +1410,15 @@ async def init_services(settings: Settings) -> JWTService:
         generation_providers[Provider.GROK] = GrokGenerationProvider(
             grok_job_service=_services.grok_job_service,
             r2_storage=_services.r2_storage,
+        )
+
+    if _services.wan_job_service is not None and _services.r2_storage is not None:
+        from src.api.services.generation.wan_provider import WanGenerationProvider
+
+        generation_providers[Provider.ALIBABA] = WanGenerationProvider(
+            wan_job_service=_services.wan_job_service,
+            r2_storage=_services.r2_storage,
+            input_url_ttl_seconds=settings.wan_input_url_ttl_seconds,
         )
 
     # Unified job service shares the same provider registry as GenerationService
@@ -1417,7 +1527,7 @@ async def init_services(settings: Settings) -> JWTService:
     logger.info("admin_notification_service.initialized")
 
     # Initialize health check registry and service
-    from src.api.services.health.checkers.cloud_provider import GrokChecker
+    from src.api.services.health.checkers.cloud_provider import GrokChecker, ModelStudioChecker
     from src.api.services.health.checkers.gpu_session import GpuSessionReconciler
     from src.api.services.health.checkers.infrastructure import (
         PostgresChecker,
@@ -1457,6 +1567,17 @@ async def init_services(settings: Settings) -> JWTService:
                     http_client=health_http_client,
                     api_base_url=settings.xai_api_base_url,
                     api_key=settings.xai_api_key,
+                    product_id=product_slug,
+                )
+            )
+
+    if settings.model_studio_configured and settings.model_studio_api_key is not None:
+        for product_slug in ["vex", "synthara"]:
+            health_registry.register(
+                ModelStudioChecker(
+                    http_client=health_http_client,
+                    base_url=settings.model_studio_base_url,
+                    api_key=settings.model_studio_api_key.get_secret_value(),
                     product_id=product_slug,
                 )
             )
@@ -1537,6 +1658,7 @@ async def init_services(settings: Settings) -> JWTService:
             _services.health_snapshot_worker,
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
+            _services.wan_video_worker,
             _services.payment_currency_sync_worker,
             _services.telegram_link_poller,
         )
@@ -1617,6 +1739,9 @@ async def shutdown_services() -> None:
     if _services.grok_video_worker is not None:
         await _services.grok_video_worker.stop()
 
+    if _services.wan_video_worker is not None:
+        await _services.wan_video_worker.stop()
+
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
@@ -1632,6 +1757,12 @@ async def shutdown_services() -> None:
     if _services.grok_job_service is not None:
         await _services.grok_job_service.close()
         logger.info("grok.closed")
+
+    if _services.wan_job_service is not None:
+        await _services.wan_job_service.close()
+    if _services.model_studio_client is not None:
+        await _services.model_studio_client.close()
+        logger.info("alibaba.closed")
 
     if _services.health_http_client is not None:
         await _services.health_http_client.aclose()
@@ -1663,6 +1794,8 @@ dependencies = {
     "user_content": Provide(get_user_content, sync_to_thread=False),
     # Grok services
     "grok_job_service": Provide(get_grok_job_service, sync_to_thread=False),
+    # Alibaba Model Studio (Wan) services
+    "wan_job_service": Provide(get_wan_job_service, sync_to_thread=False),
     # Billing services
     "billing_service": Provide(get_billing_service, sync_to_thread=False),
     "pricing_service": Provide(get_pricing_service, sync_to_thread=False),

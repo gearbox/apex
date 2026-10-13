@@ -59,14 +59,54 @@ class ImageConstraints(msgspec.Struct, kw_only=True):
     and the output follows the source image's aspect."""
 
 
+class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
+    """What the model accepts as a video source (v2v)."""
+
+    formats: list[str]
+    """Accepted containers (sorted), e.g. ["mov", "mp4"]. Filter the library picker by these."""
+
+    min_duration_ms: int
+    """Shortest accepted source clip in milliseconds. 0 = no minimum."""
+
+    max_duration_ms: int | None = None
+    """Longest accepted source clip in milliseconds. null = no model-specific cap."""
+
+    max_bytes: int | None = None
+    """Largest accepted source file in bytes. null = no model-specific cap."""
+
+
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
+
+    min_duration: int
+    """Minimum video duration in seconds."""
 
     max_duration: int
     """Maximum video duration in seconds."""
 
     resolutions: list[str]
     """Supported video resolutions, e.g. ["480p", "720p"]."""
+
+    supported_parameters: list[str]
+    """Optional request parameters the model honours (sorted), e.g. ["audio", "prompt_extend"].
+    Sending any other optional video parameter as non-null is rejected."""
+
+    input_video: InputVideoConstraintsInfo | None = None
+    """Video-source (v2v) limits. null = the model accepts no video source."""
+
+    max_combined_duration: int | None = None
+    """v2v: input seconds + requested output seconds must not exceed this. null = no rule."""
+
+    input_anchored_modes: list[str] = msgspec.field(default_factory=list)
+    """Generation modes (sorted) whose output ratio follows the input media:
+    ``aspect_ratio`` must be omitted for them. Other modes accept it."""
+
+
+class SeedRangeInfo(msgspec.Struct, kw_only=True):
+    """Inclusive ``seed`` bounds a model accepts."""
+
+    min: int
+    max: int
 
 
 class ModelRuntimeResponse(msgspec.Struct, kw_only=True):
@@ -131,6 +171,10 @@ class ModelInfo(msgspec.Struct, kw_only=True):
 
     video: VideoConstraints | None = None
     """Video constraints. None for image-only models."""
+
+    seed_range: SeedRangeInfo | None = None
+    """Accepted ``seed`` bounds. null = no model-specific bound. Omit ``seed`` for a random one;
+    a value outside the range is rejected."""
 
     runtime: ModelRuntimeResponse | None = None
     """Per-user state, populated only for authenticated on-demand models."""

@@ -13,10 +13,17 @@ from src.api.services.billing_errors import BillingError
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.generation.request_validation import validate_seed
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
     SourceMediaResolver,
     SourceMediaValidationError,
+)
+from src.api.services.generation.video_validation import (
+    input_video_seconds,
+    unsupported_video_parameters,
+    validate_video_request,
+    validate_video_sources,
 )
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
@@ -57,6 +64,7 @@ if TYPE_CHECKING:
     from src.core.bundle_config import BundleMapping
     from src.core.generation_config import BundleGenerationConfig
     from src.core.generation_mode import GenerationModes, SourceMediaConstraints
+    from src.core.model_registry import VideoMeta
     from src.core.product import ProductConfig
     from src.db.models.storage import GenerationJob
 
@@ -306,6 +314,21 @@ class GenerationService:
                     f"{[a.value for a in meta.aspect_ratios]}"
                 )
 
+        # 1.75 Seed range (registry-driven, every model), before any billing work.
+        validate_seed(request, get_model_meta(request.model))
+
+        # 1.8 Video parameter validation (registry-driven), before any billing work.
+        # Image outputs never accept the video-only optional parameters.
+        video_meta: VideoMeta | None = None
+        if request.generation_type.output_kind is MediaKind.VIDEO:
+            model_meta = get_model_meta(request.model)
+            video_meta = validate_video_request(request, model_meta)
+            unsupported = unsupported_video_parameters(request, video_meta.supported_parameters)
+        else:
+            unsupported = unsupported_video_parameters(request, frozenset())
+        if unsupported:
+            raise UnsupportedGenerationParameterError(unsupported)
+
         # 2. Reject impossible source counts before resolving any asset. This
         # keeps count errors deterministic and avoids needless DB queries.
         self._validate_source_cardinality(request, contract)
@@ -322,6 +345,8 @@ class GenerationService:
 
         # 2.2 Per-item validation requires the ownership-checked rows.
         self._validate_resolved_sources(resolved_source_media, contract)
+        if video_meta is not None:
+            validate_video_sources(resolved_source_media, request, video_meta)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs
@@ -367,12 +392,19 @@ class GenerationService:
 
         # 7. Billing pre-flight
         account = await self._billing.resolve_account_for_user(user_id, session=session)
+        is_video = video_meta is not None
         token_cost = await self._pricing.quote(
             provider_key.value,
             request.generation_type.value,
             request.model.value,
             n=request.n,
             source_media_count=self._source_media_count(request),
+            billed_seconds=(
+                request.duration + input_video_seconds(resolved_source_media, video_meta)
+                if video_meta is not None
+                else 0
+            ),
+            video_resolution=request.resolution if is_video else None,
             session=session,
         )
         await self._billing.assert_sufficient_balance(account.id, token_cost, session=session)

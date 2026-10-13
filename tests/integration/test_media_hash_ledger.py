@@ -21,7 +21,6 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.services.billing import BillingService
 from src.api.services.grok import GrokImageResult
-from src.api.services.grok.job_service import GrokJobService
 from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.user_content import UserContentService
 from src.core.media_hash import HashSample, HashSet, PdqHash
@@ -31,6 +30,7 @@ from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.output import OutputRepository
 from src.db.types import PdqBit256
 from src.workers.aisha_job_poller import AishaJobPoller
+from tests.grok_support import make_grok_job_service
 
 if TYPE_CHECKING:
     from pathlib import Path
@@ -294,7 +294,7 @@ async def test_grok_image_stores_sanitized_bytes_and_stages_ledger_with_output(
     storage = MagicMock()
     storage.build_storage_key.return_value = f"test/grok/output.{image_format.lower()}"
     storage.put_raw = AsyncMock()
-    service = GrokJobService(MagicMock(), storage, media_ingestor=media_ingestor)
+    service = make_grok_job_service(MagicMock(), storage, media_ingestor=media_ingestor)
     service._http_client = MagicMock(get=AsyncMock(return_value=response))
     with patch.object(service, "_store_output_thumbnails", new=AsyncMock()):
         await service._store_image_result(

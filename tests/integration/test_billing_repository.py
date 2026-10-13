@@ -9,10 +9,14 @@ from uuid import uuid4
 import pytest
 from sqlalchemy.exc import IntegrityError
 
+from src.api.services.billing_errors import PriceNotFoundError
 from src.api.services.pricing import PricingService
-from src.core.enums import AccountType, TransactionType
+from src.core.enums import AccountType, TransactionType, VideoResolution
+from src.db.models.billing import PricingRule
 
 if TYPE_CHECKING:
+    from uuid import UUID
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.repositories.billing import BillingRepository
@@ -897,3 +901,163 @@ class TestListOrganizations:
         org_row = next((r for r in rows if r[0].id == org.id), None)
         assert org_row is not None
         assert org_row[2] == 0  # token_balance
+
+
+# ---------------------------------------------------------------------------
+# Video-resolution pricing tiers (C10)
+# ---------------------------------------------------------------------------
+
+
+async def _make_tiered_rules(
+    billing_repo: BillingRepository, admin_id: UUID
+) -> tuple[str, str, dict[str, UUID]]:
+    """Create one rule per tier for a unique provider/model; return ids by tier name."""
+    provider = f"tier-provider-{uuid4().hex[:8]}"
+    model = f"tier-model-{uuid4().hex[:8]}"
+    rules: dict[str, UUID] = {}
+    for name, rule_model, resolution, cost in (
+        ("model_and_res", model, VideoResolution.RES_720P, 1),
+        ("model_only", model, None, 2),
+        ("res_only", None, VideoResolution.RES_720P, 3),
+        ("wildcard", None, None, 4),
+    ):
+        rule = await billing_repo.create_pricing_rule(
+            id=uuid4(),
+            provider=provider,
+            generation_type="t2v",
+            model=rule_model,
+            video_resolution=resolution,
+            token_cost=cost,
+            notes=name,
+            created_by=admin_id,
+        )
+        rules[name] = rule.id
+    return provider, model, rules
+
+
+async def test_c10_most_specific_tier_wins_and_falls_back_in_order(
+    billing_repo: BillingRepository, make_user
+) -> None:
+    admin = await make_user(email=f"tiers-{uuid4().hex[:6]}@example.com")
+    provider, model, rules = await _make_tiered_rules(billing_repo, admin.id)
+
+    async def costing(resolution: VideoResolution | None, rule_model: str | None) -> int:
+        rule = await billing_repo.get_active_price(provider, "t2v", rule_model, resolution)
+        assert rule is not None
+        return rule.token_cost
+
+    # Tier 1: model + resolution
+    assert await costing(VideoResolution.RES_720P, model) == 1
+    # Tier 2: model, no rule for this resolution
+    assert await costing(VideoResolution.RES_1080P, model) == 2
+    # Tier 3: other model, resolution matches
+    assert await costing(VideoResolution.RES_720P, f"other-{uuid4().hex[:6]}") == 3
+    # Tier 4: nothing but the wildcard matches
+    assert await costing(VideoResolution.RES_480P, f"other-{uuid4().hex[:6]}") == 4
+    assert await costing(VideoResolution.RES_720P, None) == 3
+    assert set(rules) == {"model_and_res", "model_only", "res_only", "wildcard"}
+
+
+async def test_c10_image_jobs_never_match_a_resolution_specific_rule(
+    billing_repo: BillingRepository, make_user
+) -> None:
+    admin = await make_user(email=f"tiers-img-{uuid4().hex[:6]}@example.com")
+    provider = f"tier-provider-{uuid4().hex[:8]}"
+    await billing_repo.create_pricing_rule(
+        id=uuid4(),
+        provider=provider,
+        generation_type="t2i",
+        model=None,
+        video_resolution=VideoResolution.RES_720P,
+        token_cost=9,
+        notes=None,
+        created_by=admin.id,
+    )
+
+    assert await billing_repo.get_active_price(provider, "t2i", None, None) is None
+
+
+async def test_c10_image_job_still_prices_from_a_resolution_less_rule(
+    db_session: AsyncSession, billing_repo: BillingRepository, make_user
+) -> None:
+    admin = await make_user(email=f"tiers-img2-{uuid4().hex[:6]}@example.com")
+    provider = f"tier-provider-{uuid4().hex[:8]}"
+    await billing_repo.create_pricing_rule(
+        id=uuid4(),
+        provider=provider,
+        generation_type="t2i",
+        model=None,
+        video_resolution=VideoResolution.RES_720P,
+        token_cost=9,
+        notes=None,
+        created_by=admin.id,
+    )
+
+    with pytest.raises(PriceNotFoundError):
+        await PricingService().quote(
+            provider, "t2i", None, n=1, source_media_count=0, session=db_session
+        )
+
+
+async def test_per_second_rule_round_trips_and_prices_a_video(
+    db_session: AsyncSession, billing_repo: BillingRepository, make_user
+) -> None:
+    admin = await make_user(email=f"persec-{uuid4().hex[:6]}@example.com")
+    provider = f"tier-provider-{uuid4().hex[:8]}"
+    await billing_repo.create_pricing_rule(
+        id=uuid4(),
+        provider=provider,
+        generation_type="v2v",
+        model="m",
+        video_resolution=VideoResolution.RES_1080P,
+        token_cost=0,
+        per_second_token_cost=7,
+        notes=None,
+        created_by=admin.id,
+    )
+
+    cost = await PricingService().quote(
+        provider,
+        "v2v",
+        "m",
+        n=1,
+        source_media_count=1,
+        billed_seconds=12,
+        video_resolution=VideoResolution.RES_1080P,
+        session=db_session,
+    )
+
+    assert cost == 84
+
+
+@pytest.mark.parametrize(
+    ("token_cost", "per_second_token_cost", "video_resolution"),
+    [
+        (0, 0, None),  # must cost something
+        (-1, 5, None),
+        (5, -1, None),
+        (5, 0, "4k"),  # unknown resolution
+    ],
+)
+async def test_pricing_check_constraints_reject_invalid_rules(
+    db_session: AsyncSession,
+    make_user,
+    token_cost: int,
+    per_second_token_cost: int,
+    video_resolution: str | None,
+) -> None:
+    admin = await make_user(email=f"chk-{uuid4().hex[:6]}@example.com")
+    rule = PricingRule(
+        id=uuid4(),
+        provider=f"chk-{uuid4().hex[:8]}",
+        generation_type="t2v",
+        model=None,
+        video_resolution=video_resolution,
+        token_cost=token_cost,
+        per_second_token_cost=per_second_token_cost,
+        created_by=admin.id,
+    )
+    db_session.add(rule)
+
+    with pytest.raises(IntegrityError):
+        await db_session.flush()
