@@ -24,7 +24,9 @@ from src.api.services.generation.source_media import (
 from src.api.services.generation.video_validation import (
     input_video_seconds,
     unsupported_video_parameters,
+    validate_video_request,
 )
+from src.api.services.model_studio.wan_payload import build_wan_video_payload
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -190,11 +192,17 @@ def test_c7_declared_parameters_are_accepted() -> None:
     assert supported == {VideoParameter.AUDIO, VideoParameter.PROMPT_EXTEND}
 
 
-async def test_c8_wan_rejects_aspect_ratio_when_source_media_is_present() -> None:
+_WAN_ANCHORED = [GenerationType.I2V, GenerationType.FLF2V, GenerationType.V2V]
+
+
+@pytest.mark.parametrize("generation_type", _WAN_ANCHORED)
+async def test_c8_wan_rejects_aspect_ratio_in_input_anchored_modes(
+    generation_type: GenerationType,
+) -> None:
     service = _service()
     request = _request(
         ModelType.WAN_3_VIDEO,
-        generation_type=GenerationType.I2V,
+        generation_type=generation_type,
         aspect_ratio=AspectRatio.RATIO_16_9,
         source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
     )
@@ -205,11 +213,85 @@ async def test_c8_wan_rejects_aspect_ratio_when_source_media_is_present() -> Non
     _assert_no_billing_work(service)
 
 
+def test_c8_wan_r2v_accepts_an_explicit_aspect_ratio_and_sends_it() -> None:
+    """R2V references are subjects, not frames: the album's 16:9 master must be requestable."""
+    meta = get_model_meta(ModelType.WAN_3_VIDEO)
+    request = _request(
+        ModelType.WAN_3_VIDEO,
+        generation_type=GenerationType.R2V,
+        aspect_ratio=AspectRatio.RATIO_16_9,
+        source_media=[
+            SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+            SourceMediaReference(asset_ref=f"upload:{uuid4()}"),
+        ],
+    )
+
+    assert validate_video_request(request, meta) is meta.video
+
+    body = build_wan_video_payload(
+        model=request.model,
+        prompt=request.prompt,
+        contract=meta.generation_modes[GenerationType.R2V].source_media,
+        media=[(MediaKind.IMAGE, "https://x/1.png"), (MediaKind.IMAGE, "https://x/2.png")],
+        duration=request.duration,
+        resolution=request.resolution,
+        aspect_ratio=request.aspect_ratio,
+        audio=None,
+        prompt_extend=None,
+        seed=None,
+    )
+    assert body["parameters"]["ratio"] == "16:9"  # type: ignore[index]
+
+
+def test_c8_wan_r2v_without_aspect_ratio_is_still_adaptive() -> None:
+    meta = get_model_meta(ModelType.WAN_3_VIDEO)
+
+    body = build_wan_video_payload(
+        model=ModelType.WAN_3_VIDEO,
+        prompt="Image 1 walks",
+        contract=meta.generation_modes[GenerationType.R2V].source_media,
+        media=[(MediaKind.IMAGE, "https://x/1.png")],
+        duration=5,
+        resolution=VideoResolution.RES_720P,
+        aspect_ratio=None,
+        audio=None,
+        prompt_extend=None,
+        seed=None,
+    )
+
+    assert body["parameters"]["ratio"] == "adaptive"  # type: ignore[index]
+
+
+def test_c8_wan_t2v_accepts_aspect_ratio() -> None:
+    meta = get_model_meta(ModelType.WAN_3_VIDEO)
+    request = _request(ModelType.WAN_3_VIDEO, aspect_ratio=AspectRatio.RATIO_9_16)
+
+    assert validate_video_request(request, meta) is meta.video
+
+
+def test_c8_wan_declares_exactly_the_frame_anchored_modes() -> None:
+    video = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert video is not None
+    assert video.input_anchored_modes == frozenset(_WAN_ANCHORED)
+
+
 @pytest.mark.parametrize("model", [ModelType.GROK_IMAGINE_VIDEO, ModelType.AISHA_VIDEO])
 def test_c8_other_models_keep_accepting_aspect_ratio_with_media(model: ModelType) -> None:
     video = get_model_meta(model).video
     assert video is not None
-    assert video.aspect_ratio_with_input_media is True
+    assert video.input_anchored_modes == frozenset()
+
+
+@pytest.mark.parametrize(
+    "model",
+    [ModelType.GROK_IMAGINE_VIDEO, ModelType.AISHA_VIDEO, ModelType.WAN_3_VIDEO],
+)
+def test_c8_anchored_modes_are_declared_modes_with_video_output(model: ModelType) -> None:
+    meta = get_model_meta(model)
+    assert meta.video is not None
+    for mode in meta.video.input_anchored_modes:
+        assert mode in meta.generation_modes
+        assert mode.output_kind is MediaKind.VIDEO
 
 
 @pytest.mark.parametrize(

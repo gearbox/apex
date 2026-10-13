@@ -172,7 +172,7 @@ def _build_model_info(
                 supported_parameters=sorted(p.value for p in meta.video.supported_parameters),
                 max_input_video_seconds=meta.video.max_input_video_seconds,
                 max_combined_duration=meta.video.max_combined_duration,
-                aspect_ratio_with_input_media=meta.video.aspect_ratio_with_input_media,
+                input_anchored_modes=sorted(m.value for m in meta.video.input_anchored_modes),
             )
             if meta.video is not None
             else None

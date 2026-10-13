@@ -58,10 +58,10 @@ def validate_video_request(request: UnifiedGenerationRequest, meta: ModelMeta) -
             f"'{request.resolution.value}'; supported: {[r.value for r in video.resolutions]}"
         )
     if request.aspect_ratio is not None:
-        if request.source_media and not video.aspect_ratio_with_input_media:
+        if request.generation_type in video.input_anchored_modes:
             raise ValueError(
                 f"Model '{request.model.value}' derives the output aspect ratio from its input "
-                f"media; omit aspect_ratio when source_media is supplied"
+                f"media in '{request.generation_type.value}' mode; omit aspect_ratio"
             )
         if request.aspect_ratio not in meta.aspect_ratios:
             raise ValueError(

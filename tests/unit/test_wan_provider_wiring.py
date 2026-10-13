@@ -135,7 +135,7 @@ async def test_c19_discovery_lists_wan_with_five_modes_and_video_constraints(
     assert (model.video.min_duration, model.video.max_duration) == (2, 30)
     assert model.video.resolutions == ["480p", "720p", "1080p"]
     assert (model.video.max_input_video_seconds, model.video.max_combined_duration) == (15, 30)
-    assert model.video.aspect_ratio_with_input_media is False
+    assert model.video.input_anchored_modes == ["flf2v", "i2v", "v2v"]
     r2v = model.generation_modes["r2v"].source_media
     assert r2v is not None
     assert (r2v.min, r2v.max) == (1, 8)

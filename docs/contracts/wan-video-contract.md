@@ -43,12 +43,14 @@ The `alibaba` provider appears with `provisioning_mode: "always_on"`. Its model:
     "supported_parameters": ["audio", "prompt_extend"],
     "max_input_video_seconds": 15,
     "max_combined_duration": 30,
-    "aspect_ratio_with_input_media": false
+    "input_anchored_modes": ["flf2v", "i2v", "v2v"]
   }
 }
 ```
 
-New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `max_input_video_seconds`, `max_combined_duration`, `aspect_ratio_with_input_media`. Other video models report `supported_parameters: []`, `aspect_ratio_with_input_media: true` and `null` limits.
+New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `max_input_video_seconds`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits.
+
+`input_anchored_modes` (sorted generation-mode keys) lists the modes whose output ratio **follows the input**: send no `aspect_ratio` for them. Every other mode accepts one even when `source_media` is present. It replaces an earlier per-model boolean that was never released (hard cutover: there is no compatibility field).
 
 `generation_type` gains **`r2v`**. `duration` is now `1–30` at the schema level; the model's real bounds are `video.min_duration`–`video.max_duration` (Grok 1–15, Aisha 1–10, Wan 2–30). `resolution` gains `"1080p"` (Wan only).
 
@@ -102,6 +104,7 @@ All requests also need `Idempotency-Key`. `source_media` items are library refer
 - Send **1–8** images in `source_media`; order is significant.
 - In the prompt, refer to them as **"Image 1" … "Image N"** in `source_media` order (1-based). The model resolves those names; there is no other way to address a reference.
 - Reference video and reference audio are **not** supported in `r2v` yet.
+- `aspect_ratio` is **optional** in `r2v` (references are characters and objects, not frames, so square or portrait sheets are normal). Omitted ⇒ `adaptive`; set it to pick the output ratio, e.g. `"16:9"`.
 
 ## 4. Video edit and extend (`v2v`)
 
@@ -116,7 +119,7 @@ All requests also need `Idempotency-Key`. `source_media` items are library refer
 |---|---|
 | `duration` | 2–30 s. |
 | `resolution` | `480p`, `720p` (default), `1080p`. |
-| `aspect_ratio` | One of the model's five ratios. **Omit it whenever `source_media` is present** (`aspect_ratio_with_input_media: false`) — the output follows the input, and sending a value is a `400 validation_error`. When omitted, text-to-video renders `16:9`. |
+| `aspect_ratio` | One of the model's five ratios. **Omit it in the modes listed in `video.input_anchored_modes`** (`i2v`, `flf2v`, `v2v`) — the output follows the input frame(s) or video, and sending a value is a `400 validation_error`. `t2v` and `r2v` accept it: omitted, `t2v` renders `16:9` and `r2v` renders `adaptive`. |
 | `audio` | `true`/`false` to force; **`null` or omitted = the model's default**. |
 | `prompt_extend` | `true`/`false`; `null` or omitted = the model's default (the provider rewrites your prompt with an LLM). Send `false` for precise directing. |
 | `seed` | Forwarded when set; omitted = random. |
@@ -130,7 +133,7 @@ Standard envelope; the codes you will see for Wan:
 
 | Code | HTTP | Meaning |
 |---|---|---|
-| `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent with `source_media`). |
+| `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent in an input-anchored mode: `i2v`, `flf2v`, `v2v`). |
 | `validation_error` | 422 | `source_media` problems: wrong count/kind, a source video of unknown duration, over 15 s, or over the 30 s combined limit. |
 | `unsupported_generation_parameter` | 422 | `audio` or `prompt_extend` sent to a model that does not list it in `video.supported_parameters`; the message names the parameter. |
 | `price_not_found` | 404 | No pricing rule for this model/resolution yet (§8). |

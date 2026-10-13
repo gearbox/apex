@@ -81,8 +81,9 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     max_combined_duration: int | None = None
     """v2v: input seconds + requested output seconds must not exceed this. null = no rule."""
 
-    aspect_ratio_with_input_media: bool = True
-    """False: aspect_ratio must be omitted when source media is supplied."""
+    input_anchored_modes: list[str] = msgspec.field(default_factory=list)
+    """Generation modes (sorted) whose output ratio follows the input media:
+    ``aspect_ratio`` must be omitted for them. Other modes accept it."""
 
 
 class ModelRuntimeResponse(msgspec.Struct, kw_only=True):

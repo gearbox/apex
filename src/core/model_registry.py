@@ -87,8 +87,12 @@ class VideoMeta:
     """Optional request parameters this model honours; sending any other as
     non-``None`` raises ``UnsupportedGenerationParameterError``."""
 
-    aspect_ratio_with_input_media: bool
-    """False: aspect_ratio must be omitted when source media is supplied (output follows the input)."""
+    input_anchored_modes: frozenset[GenerationType]
+    """Modes whose output ratio follows the input media: ``aspect_ratio`` must be
+    omitted for them (sending one is a validation error). Modes not listed accept
+    ``aspect_ratio`` even when source media is supplied (e.g. reference-to-video,
+    whose references are subjects, not frames). Every entry must be one of the
+    model's ``generation_modes`` with video output."""
 
     max_input_video_seconds: int | None
     """Per-clip cap on a video source (V2V). None = no model-specific cap."""
@@ -232,7 +236,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
             supported_parameters=frozenset(),
-            aspect_ratio_with_input_media=True,
+            input_anchored_modes=frozenset(),
             max_input_video_seconds=None,
             max_combined_duration=None,
             bills_input_video_seconds=False,
@@ -327,7 +331,7 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
             supported_parameters=frozenset(),
-            aspect_ratio_with_input_media=True,
+            input_anchored_modes=frozenset(),
             max_input_video_seconds=None,
             max_combined_duration=None,
             bills_input_video_seconds=False,
@@ -385,7 +389,9 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                 VideoResolution.RES_1080P,
             ),
             supported_parameters=frozenset({VideoParameter.AUDIO, VideoParameter.PROMPT_EXTEND}),
-            aspect_ratio_with_input_media=False,
+            input_anchored_modes=frozenset(
+                {GenerationType.I2V, GenerationType.FLF2V, GenerationType.V2V}
+            ),
             max_input_video_seconds=15,
             max_combined_duration=30,
             bills_input_video_seconds=True,

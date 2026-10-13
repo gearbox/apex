@@ -142,7 +142,7 @@ Same structure, but `user_context` key is **omitted entirely** (not `null`).
 ## 3. `msgspec.Struct` definitions
 
 > **Update (Wan 3.0 arc):** `VideoConstraints` gained `min_duration`, `supported_parameters`,
-> `max_input_video_seconds`, `max_combined_duration` and `aspect_ratio_with_input_media`
+> `max_input_video_seconds`, `max_combined_duration` and `input_anchored_modes`
 > (additive wire fields; they mirror `VideoMeta` in `src/core/model_registry.py`). The sketch
 > below shows the current shape. See `docs/contracts/wan-video-contract.md`.
 
@@ -176,8 +176,9 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     max_combined_duration: int | None = None
     """v2v: input seconds + requested duration must not exceed this. None = no rule."""
 
-    aspect_ratio_with_input_media: bool = True
-    """False: aspect_ratio must be omitted when source_media is supplied."""
+    input_anchored_modes: list[str] = msgspec.field(default_factory=list)
+    """Sorted generation modes whose output ratio follows the input media:
+    aspect_ratio must be omitted for them. Other modes accept it."""
 
 
 class ModelInfo(msgspec.Struct, kw_only=True):

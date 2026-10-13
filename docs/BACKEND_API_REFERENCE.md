@@ -921,7 +921,7 @@ VideoConstraints: {
   supported_parameters: string[],    // sorted; optional video params the model honours, e.g. ["audio", "prompt_extend"]
   max_input_video_seconds: int | null,   // per-clip cap on a v2v source video; null = no model-specific cap
   max_combined_duration: int | null,     // v2v: input seconds + requested duration must not exceed this; null = no rule
-  aspect_ratio_with_input_media: bool    // false ⇒ omit aspect_ratio when source_media is supplied
+  input_anchored_modes: string[]         // sorted generation modes whose output ratio follows the input ⇒ omit aspect_ratio there; other modes accept it (Wan: ["flf2v","i2v","v2v"]; others: [])
 }
 
 UserContext: {
