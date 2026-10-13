@@ -18,6 +18,10 @@ class AsyncVideoJobService(Protocol):
     """One provider's polling and settlement entry points."""
 
     provider: ClassVar[Provider]
+    VIDEO_POLLER_NAME: ClassVar[str]
+    """Worker (and leader-lease) name. The single definition per provider: the in-process
+    worker and the standalone process must agree on it to share one lease, and it must stay
+    byte-for-byte stable across releases."""
     transient_poll_errors: ClassVar[tuple[type[Exception], ...]]
     """Poll errors that mean "try again next tick" rather than "the job failed".
 

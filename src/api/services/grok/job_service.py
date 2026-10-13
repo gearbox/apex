@@ -108,6 +108,7 @@ class GrokJobService:
     """
 
     provider: ClassVar[Provider] = Provider.GROK
+    VIDEO_POLLER_NAME: ClassVar[str] = "grok_video_poller"
     transient_poll_errors: ClassVar[tuple[type[Exception], ...]] = (
         GrokRateLimitError,
         GrokTimeoutError,

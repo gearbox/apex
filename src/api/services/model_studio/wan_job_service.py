@@ -9,6 +9,7 @@ progress and failures.
 
 from __future__ import annotations
 
+import math
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, ClassVar, NoReturn
 
@@ -73,6 +74,7 @@ class WanJobService:
     """Starts, polls and settles Wan video jobs."""
 
     provider: ClassVar[Provider] = Provider.ALIBABA
+    VIDEO_POLLER_NAME: ClassVar[str] = "alibaba_video_poller"
     transient_poll_errors: ClassVar[tuple[type[Exception], ...]] = (ModelStudioTransientError,)
     # Model Studio reports no progress; we do not invent a percentage.
     running_progress_pct: ClassVar[int | None] = None
@@ -153,8 +155,9 @@ class WanJobService:
 
         Args:
             payload: The prebuilt request body (see ``build_wan_video_payload``).
-            aspect_ratio: The ratio the client asked for; ``None`` is stored as
-                such rather than fabricating one for ``adaptive``.
+            aspect_ratio: The ratio actually sent upstream (see
+                ``effective_aspect_ratio``); ``None`` means ``adaptive`` and is stored
+                as such rather than fabricating one.
             billed_seconds: The duration basis the reservation was priced on.
         """
         job_repo = JobRepository(session)
@@ -450,13 +453,18 @@ class WanJobService:
         try:
             debit = await session.get(TokenTransaction, job.debit_transaction_id)
             reserved = debit.metadata_.get("billed_seconds") if debit is not None else None
-            if isinstance(reserved, int) and round(task.usage.duration) != reserved:
+            # The reservation prices ``duration + ceil(input video seconds)``, so a
+            # fractional upstream total (7.3 s input + 5 s = 12.3 s) is compared
+            # rounded *up* — rounding to nearest flags every fractional V2V.
+            upstream_seconds = math.ceil(task.usage.duration)
+            if isinstance(reserved, int) and upstream_seconds != reserved:
                 logger.warning(
                     "alibaba.billing_basis_mismatch",
                     job_id=str(job.id),
                     task_id=task.task_id,
                     reserved_seconds=reserved,
-                    upstream_seconds=round(task.usage.duration),
+                    upstream_seconds=upstream_seconds,
+                    upstream_seconds_exact=task.usage.duration,
                 )
         except Exception:
             logger.warning("alibaba.billing_basis_check_failed", job_id=str(job.id))

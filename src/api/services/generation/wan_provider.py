@@ -6,7 +6,10 @@ from typing import TYPE_CHECKING, ClassVar
 
 from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.video_validation import input_video_seconds
-from src.api.services.model_studio.wan_payload import build_wan_video_payload
+from src.api.services.model_studio.wan_payload import (
+    build_wan_video_payload,
+    effective_aspect_ratio,
+)
 from src.core.enums import GenerationType, JobStatus, MediaKind
 from src.core.model_registry import get_model_meta
 
@@ -112,7 +115,8 @@ class WanGenerationProvider:
             model=request.model,
             generation_type=request.generation_type,
             payload=payload,
-            aspect_ratio=request.aspect_ratio,
+            # Persist what was actually sent (t2v defaults to 16:9); ``adaptive`` stays None.
+            aspect_ratio=effective_aspect_ratio(request.aspect_ratio, has_media=bool(media)),
             name=request.name,
             billing_service=billing_service,
             account_id=account_id,

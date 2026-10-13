@@ -36,8 +36,8 @@ from src.core.logging import configure_logging
 
 logger = structlog.get_logger(__name__)
 
-WORKER_NAME = "alibaba_video_poller"
-"""Feeds the leader-lease key; shared with the in-process worker."""
+WORKER_NAME = WanJobService.VIDEO_POLLER_NAME
+"""Feeds the leader-lease key; defined once on the job service (shared with the in-process worker)."""
 
 
 class WanVideoPollerCLI:

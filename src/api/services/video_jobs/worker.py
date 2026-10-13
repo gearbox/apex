@@ -42,7 +42,7 @@ class AsyncVideoJobWorker(PeriodicWorker):
     def __init__(
         self,
         *,
-        name: str,
+        name: str | None = None,
         job_service: AsyncVideoJobService,
         interval_seconds: int,
         max_concurrent_polls: int,
@@ -55,7 +55,8 @@ class AsyncVideoJobWorker(PeriodicWorker):
 
         Args:
             name: Worker name; feeds the leader-lease key, so it must be stable
-                across releases (and unique per provider).
+                across releases (and unique per provider). Defaults to the job
+                service's ``VIDEO_POLLER_NAME`` — the one definition per provider.
             job_service: The provider's polling/settlement service.
             interval_seconds: Seconds between ticks.
             max_concurrent_polls: Semaphore bound on concurrent job polls.
@@ -65,7 +66,7 @@ class AsyncVideoJobWorker(PeriodicWorker):
             redis_client_factory: Factory for the operational Redis client.
         """
         super().__init__(
-            name=name,
+            name=name if name is not None else job_service.VIDEO_POLLER_NAME,
             interval_seconds=interval_seconds,
             redis_enabled=redis_enabled,
             redis_client_factory=redis_client_factory,

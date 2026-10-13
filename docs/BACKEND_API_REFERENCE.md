@@ -2338,11 +2338,13 @@ generation type; and `per_second_token_cost > 0` or a `video_resolution` is only
 that model would fail at quote time. Violations never reach the database; negative values in a
 body are a `400 validation_error`.
 
-**Enabling `wan3.0-video`:** the model row is seeded disabled and with no prices. Create one rule
-per resolution (`provider: "alibaba"`, `generation_type`, `model: "wan3.0-video"`,
-`video_resolution`, `per_second_token_cost`) from the Model Studio console prices, **then** enable
-the model via `PATCH /v1/admin/models/wan3.0-video`. Enabling first makes every request fail with
-`PriceNotFoundError` (fail-loud).
+**Enabling `wan3.0-video`:** the model row is seeded disabled and with no prices. There is no
+`generation_type` wildcard, so create one rule for **each of the 15 combinations** — 5 modes
+(`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) × 3 resolutions (`480p`, `720p`, `1080p`) — with
+`provider: "alibaba"`, `model: "wan3.0-video"`, `video_resolution` and `per_second_token_cost`
+taken from the Model Studio console prices, **then** enable the model via
+`PATCH /v1/admin/models/wan3.0-video`. Enabling first (or leaving a combination out) makes the
+affected requests fail with `price_not_found` (fail-loud).
 
 #### `PATCH /v1/admin/pricing/{rule_id}`
 

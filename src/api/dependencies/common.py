@@ -1056,7 +1056,6 @@ async def init_services(settings: Settings) -> JWTService:
     if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
         if settings.grok_video_worker_in_process:
             _services.grok_video_worker = AsyncVideoJobWorker(
-                name="grok_video_poller",
                 job_service=_services.grok_job_service,
                 interval_seconds=settings.grok_video_poll_interval,
                 max_concurrent_polls=settings.grok_video_max_concurrent_polls,
@@ -1127,7 +1126,6 @@ async def init_services(settings: Settings) -> JWTService:
     if workers_enabled and _services.wan_job_service is not None:
         if settings.wan_video_worker_in_process:
             _services.wan_video_worker = AsyncVideoJobWorker(
-                name="alibaba_video_poller",
                 job_service=_services.wan_job_service,
                 interval_seconds=settings.wan_video_poll_interval,
                 max_concurrent_polls=settings.wan_video_max_concurrent_polls,

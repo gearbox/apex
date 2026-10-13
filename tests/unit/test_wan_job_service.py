@@ -482,6 +482,7 @@ async def test_billing_basis_mismatch_is_logged_and_nothing_else() -> None:
     assert outcome.status is VideoPollStatus.COMPLETED
     (event,) = [e for e in logs if e["event"] == "alibaba.billing_basis_mismatch"]
     assert (event["reserved_seconds"], event["upstream_seconds"]) == (15, 12)
+    assert event["upstream_seconds_exact"] == 12.0
     assert event["job_id"] == str(job.id)
 
 
@@ -502,6 +503,39 @@ async def test_matching_billing_basis_logs_nothing() -> None:
         await _service(client)._poll_video_result(session, job)
 
     assert not [e for e in logs if e["event"] == "alibaba.billing_basis_mismatch"]
+
+
+async def test_fractional_v2v_input_does_not_log_a_billing_basis_mismatch() -> None:
+    """P3-1: 7.3 s input + 5 s = 12.3 s upstream vs 5 + ceil(7.3) = 13 reserved is not a mismatch."""
+    from src.api.services.generation.video_validation import input_video_seconds
+    from src.core.model_registry import get_model_meta
+
+    video = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert video is not None
+    source = SimpleNamespace(media_kind=MediaKind.VIDEO, duration_ms=7300, position=0)
+    reserved = 5 + input_video_seconds([source], video)  # type: ignore[list-item]
+    assert reserved == 13
+    client = MagicMock()
+    client.get_task = AsyncMock(
+        return_value=_task(
+            ModelStudioTaskStatus.SUCCEEDED,
+            video_url="https://oss/x.mp4",
+            usage=ModelStudioVideoUsage(
+                duration=12.3, input_video_duration=7.3, output_video_duration=5.0
+            ),
+        )
+    )
+    session = AsyncMock()
+    session.get = AsyncMock(return_value=SimpleNamespace(metadata_={"billed_seconds": reserved}))
+
+    with capture_logs() as logs:
+        outcome = await _service(client)._poll_video_result(
+            session,  # type: ignore[arg-type]
+            _running_job(debit_transaction_id=uuid4()),
+        )
+
+    assert outcome.status is VideoPollStatus.COMPLETED
+    assert not [e for e in logs if e["event"].startswith("alibaba.billing_basis")]
 
 
 # ---- provider adapter --------------------------------------------------------------
@@ -567,6 +601,38 @@ async def test_provider_presigns_inputs_with_the_configured_ttl_and_builds_the_p
     assert kwargs["payload"]["parameters"]["audio"] is False
     assert kwargs["payload"]["parameters"]["seed"] == 3
     assert kwargs["billed_seconds"] == 6
+    assert kwargs["aspect_ratio"] is None
+
+
+@pytest.mark.parametrize(
+    ("requested", "expected"),
+    [(None, AspectRatio.RATIO_16_9), (AspectRatio.RATIO_9_16, AspectRatio.RATIO_9_16)],
+)
+async def test_provider_persists_the_ratio_it_actually_sent_for_t2v(
+    requested: AspectRatio | None, expected: AspectRatio
+) -> None:
+    request = UnifiedGenerationRequest(
+        prompt="a fox", generation_type=GenerationType.T2V, model=ModelType.WAN_3_VIDEO,
+        aspect_ratio=requested,
+    )  # fmt: skip
+
+    kwargs = await _submit(request, [])
+
+    assert kwargs["payload"]["parameters"]["ratio"] == expected.value
+    assert kwargs["aspect_ratio"] is expected
+
+
+async def test_provider_leaves_adaptive_ratio_unset_when_media_decides() -> None:
+    request = UnifiedGenerationRequest(
+        prompt="animate",
+        generation_type=GenerationType.I2V,
+        model=ModelType.WAN_3_VIDEO,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}")],
+    )
+
+    kwargs = await _submit(request, [_resolved(MediaKind.IMAGE, "k/a.png")])
+
+    assert kwargs["payload"]["parameters"]["ratio"] == "adaptive"
     assert kwargs["aspect_ratio"] is None
 
 

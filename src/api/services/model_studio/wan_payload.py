@@ -31,6 +31,20 @@ _RESOLUTION_TO_WAN: Final[Mapping[VideoResolution, str]] = {
 _ADAPTIVE_RATIO: Final = "adaptive"
 
 
+def effective_aspect_ratio(
+    aspect_ratio: AspectRatio | None, *, has_media: bool
+) -> AspectRatio | None:
+    """The ratio a request actually asks upstream for.
+
+    Returns:
+        The explicit ratio when given; ``16:9`` for text-to-video without one;
+        ``None`` when upstream decides (``adaptive``: inputs present, no ratio).
+    """
+    if aspect_ratio is not None:
+        return aspect_ratio
+    return None if has_media else AspectRatio.RATIO_16_9
+
+
 def build_wan_video_payload(
     *,
     model: ModelType,
@@ -75,12 +89,8 @@ def build_wan_video_payload(
         wire_type = _SLOT_TO_WAN_TYPE[roles[index]] if roles else _KIND_TO_WAN_REFERENCE[kind]
         wire_media.append({"type": wire_type, "url": url})
 
-    if aspect_ratio is not None:
-        ratio = aspect_ratio.value
-    elif media:
-        ratio = _ADAPTIVE_RATIO
-    else:
-        ratio = AspectRatio.RATIO_16_9.value
+    effective = effective_aspect_ratio(aspect_ratio, has_media=bool(media))
+    ratio = effective.value if effective is not None else _ADAPTIVE_RATIO
 
     parameters: dict[str, object] = {
         "resolution": _RESOLUTION_TO_WAN[resolution],

@@ -156,7 +156,7 @@ The quote assumes the requested `duration`. An edit can finish near the source l
 
 ## 8. Rollout order (admins)
 
-1. Create pricing rules per resolution: `POST /v1/admin/pricing` with `provider: "alibaba"`, `model: "wan3.0-video"`, the `generation_type`, `video_resolution` and `per_second_token_cost` taken from the Model Studio console.
+1. Create the pricing rules: `POST /v1/admin/pricing` with `provider: "alibaba"`, `model: "wan3.0-video"`, the `generation_type`, `video_resolution` and `per_second_token_cost` taken from the Model Studio console. Pricing has **no `generation_type` wildcard**, so a rule is needed for every combination: **5 modes (`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) × 3 resolutions (`480p`, `720p`, `1080p`) = 15 rules**. A missing combination fails only that mode/resolution with `price_not_found`. Each rule must be a video-output type with `per_second_token_cost > 0` (`422 invalid_pricing_rule` otherwise).
 2. Only then enable the model: `PATCH /v1/admin/models/wan3.0-video`.
 
 Enabling first makes every request fail with a missing-price error (deliberately fail-loud).

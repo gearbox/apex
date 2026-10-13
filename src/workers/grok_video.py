@@ -14,24 +14,22 @@ import asyncio
 import logging
 import signal
 import sys
-from typing import TYPE_CHECKING, NoReturn
+from typing import NoReturn
 
 import structlog
 
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.grok import GrokClient
 from src.api.services.grok.factory import build_grok_job_service
+from src.api.services.grok.job_service import GrokJobService
 from src.api.services.video_jobs.cli import BuiltVideoService, VideoWorkerDeps, run_video_worker
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 
-if TYPE_CHECKING:
-    from src.api.services.grok.job_service import GrokJobService
-
 logger = structlog.get_logger(__name__)
 
-WORKER_NAME = "grok_video_poller"
-"""Feeds the leader-lease key — must stay byte-for-byte stable across releases."""
+WORKER_NAME = GrokJobService.VIDEO_POLLER_NAME
+"""Feeds the leader-lease key; defined once on the job service (shared with the in-process worker)."""
 
 
 class GrokVideoPollerCLI:

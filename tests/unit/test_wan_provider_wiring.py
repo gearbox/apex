@@ -480,3 +480,35 @@ async def test_grok_materializer_uses_the_provider_video_ingestor_and_cap() -> N
     assert materializer._max_output_bytes == 200 * 1024 * 1024
     # Images (Grok image outputs, i2v inputs) keep the user-facing ingestor.
     assert built.service._media_ingestor is upload_ingestor  # type: ignore[attr-defined]
+
+
+@pytest.mark.parametrize(
+    ("service_path", "expected"),
+    [
+        ("src.api.services.grok.job_service.GrokJobService", "grok_video_poller"),
+        ("src.api.services.model_studio.wan_job_service.WanJobService", "alibaba_video_poller"),
+    ],
+)
+def test_worker_name_comes_from_the_single_job_service_constant(
+    service_path: str, expected: str
+) -> None:
+    """In-process and standalone workers share one lease only if they share one literal."""
+    import importlib
+
+    from src.api.services.video_jobs.worker import AsyncVideoJobWorker
+
+    module_name, class_name = service_path.rsplit(".", 1)
+    service_cls = getattr(importlib.import_module(module_name), class_name)
+    service = MagicMock()
+    service.VIDEO_POLLER_NAME = service_cls.VIDEO_POLLER_NAME
+
+    worker = AsyncVideoJobWorker(
+        job_service=service,
+        interval_seconds=5,
+        max_concurrent_polls=1,
+        db_manager=MagicMock(),
+        redis_client_factory=MagicMock(),
+    )
+
+    assert expected == service_cls.VIDEO_POLLER_NAME
+    assert worker.name == expected

@@ -71,16 +71,6 @@ class _SessionCtx:
         return False
 
 
-def _patched_transition_service() -> tuple[Any, AsyncMock]:
-    """Return (patcher, mock ts instance) for JobStateTransitionService."""
-    mock_ts = AsyncMock()
-    patcher = patch(
-        "src.api.services.job_state_transition.JobStateTransitionService",
-        return_value=mock_ts,
-    )
-    return patcher, mock_ts
-
-
 class TestTimeoutRefund:
     async def test_timeout_marks_failed_with_refund(self) -> None:
         job = _make_job(started_at=datetime.now(UTC) - timedelta(seconds=1000))
@@ -117,12 +107,9 @@ class TestTimeoutRefund:
         worker = _make_worker(
             job_service=job_service, settings=_make_settings(grok_video_max_poll_time=600)
         )
-        patcher, mock_ts = _patched_transition_service()
+        await worker._poll_one(job, AsyncMock())
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_not_awaited()
 
 
 class TestCompletedTransition:
@@ -241,12 +228,9 @@ class TestQueuedToRunningTransition:
         )
         event_bus = AsyncMock()
         worker = _make_worker(job_service=job_service, event_bus=event_bus)
-        patcher, mock_ts = _patched_transition_service()
+        await worker._poll_one(job, AsyncMock())
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_running.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_not_awaited()
         event_bus.publish.assert_awaited_once()
 
 
@@ -330,41 +314,28 @@ class TestTransientPollErrors:
         job_service = AsyncMock()
         job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        await worker._poll_one(job, AsyncMock())
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_not_awaited()
-        mock_ts.transition_to_running.assert_not_awaited()
-        mock_ts.transition_to_completed.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_not_awaited()
 
     async def test_timeout_error_skips_job_without_transition(self) -> None:
         job = _make_job(status=JobStatus.RUNNING.value)
         job_service = AsyncMock()
         job_service.poll_video_job_for_worker.side_effect = GrokTimeoutError("deadline exceeded")
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        await worker._poll_one(job, AsyncMock())
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        mock_ts.transition_to_failed.assert_not_awaited()
-        mock_ts.transition_to_running.assert_not_awaited()
-        mock_ts.transition_to_completed.assert_not_awaited()
+        job_service.settle_video_poll_outcome.assert_not_awaited()
 
     async def test_transient_error_does_not_refund(self) -> None:
         job = _make_job(status=JobStatus.RUNNING.value)
         job_service = AsyncMock()
         job_service.poll_video_job_for_worker.side_effect = GrokRateLimitError("rate limited")
         worker = _make_worker(job_service=job_service)
-        patcher, mock_ts = _patched_transition_service()
+        await worker._poll_one(job, AsyncMock())
 
-        with patcher:
-            await worker._poll_one(job, AsyncMock())
-
-        for call in mock_ts.transition_to_failed.await_args_list:
-            assert call.kwargs.get("refund") is not True
+        # Settlement is the only path that refunds; a transient error never reaches it.
+        job_service.settle_video_poll_outcome.assert_not_awaited()
 
     async def test_terminal_api_error_still_fails_with_refund(self) -> None:
         """Non-transient GrokAPIError surfaces as a FAILED outcome from the job
@@ -411,12 +382,3 @@ class TestTransientPollErrors:
             outcome=job_service.poll_video_job_for_worker.return_value,
             product_id="vex",
         )
-
-
-class TestManagerRemoved:
-    def test_manager_removed(self) -> None:
-        """The old worker manager was deleted — the worker is wired through
-        ServiceContainer directly, like every other worker."""
-        import src.api.services.video_jobs.worker as module
-
-        assert not hasattr(module, "VideoWorkerManager")
