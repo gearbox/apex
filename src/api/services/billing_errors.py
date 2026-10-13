@@ -59,6 +59,14 @@ class PriceNotFoundError(BillingError):
     """No active pricing rule for this provider/type/model. → HTTP 500"""
 
 
+class InvalidPricingRuleError(BillingError):
+    """A pricing rule would violate a catalog invariant. → HTTP 422
+
+    Raised by ``PricingService`` before anything reaches the database, so the
+    admin sees the rule that was wrong instead of a ``chk_pricing_*`` 500.
+    """
+
+
 class ModerationError(Exception):
     """Generation was moderated by the provider. → HTTP 422"""
 

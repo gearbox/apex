@@ -6,8 +6,8 @@ from typing import TYPE_CHECKING
 
 import structlog
 
-from src.api.services.billing_errors import PriceNotFoundError
-from src.core.enums import ModelType
+from src.api.services.billing_errors import InvalidPricingRuleError, PriceNotFoundError
+from src.core.enums import GenerationType, MediaKind, ModelType
 from src.core.uid import new_id
 from src.db.repositories.billing import (
     UNSET_OPTIONAL_UPDATE,
@@ -28,6 +28,45 @@ if TYPE_CHECKING:
     from src.db.models.billing import PricingRule
 
 logger = structlog.get_logger(__name__)
+
+
+def validate_rule_invariants(
+    *,
+    generation_type: str,
+    token_cost: int,
+    input_token_cost: int,
+    per_second_token_cost: int,
+    has_video_resolution: bool,
+) -> None:
+    """Check the catalog invariants for the *resulting* state of one rule.
+
+    The database ``chk_pricing_*`` constraints stay as the backstop; this runs
+    first so a violation is a 422 naming the problem, never a 500 — and so a
+    rule that ``quote()`` would later reject for every end user cannot be stored.
+
+    Raises:
+        InvalidPricingRuleError: ``generation_type`` is unknown, a cost is negative, the
+            rule costs nothing, or a per-second / resolution-specific rule targets a
+            generation type without video output.
+    """
+    try:
+        mode = GenerationType(generation_type)
+    except ValueError:
+        raise InvalidPricingRuleError(f"Unknown generation_type '{generation_type}'") from None
+
+    if min(token_cost, input_token_cost, per_second_token_cost) < 0:
+        raise InvalidPricingRuleError("Pricing costs must not be negative")
+    if token_cost == 0 and per_second_token_cost == 0:
+        raise InvalidPricingRuleError(
+            "A pricing rule needs token_cost > 0 or per_second_token_cost > 0"
+        )
+    if (
+        per_second_token_cost > 0 or has_video_resolution
+    ) and mode.output_kind is not MediaKind.VIDEO:
+        raise InvalidPricingRuleError(
+            f"per_second_token_cost and video_resolution apply to video generation types only; "
+            f"'{generation_type}' produces {mode.output_kind.value}"
+        )
 
 
 class PricingService:
@@ -165,6 +204,13 @@ class PricingService:
         admin_id: UUID,
         session: AsyncSession,
     ) -> PricingRule:
+        validate_rule_invariants(
+            generation_type=generation_type,
+            token_cost=token_cost,
+            input_token_cost=input_token_cost,
+            per_second_token_cost=per_second_token_cost,
+            has_video_resolution=video_resolution is not None,
+        )
         repo = BillingRepository(session)
         return await repo.create_pricing_rule(
             id=new_id(),
@@ -206,6 +252,28 @@ class PricingService:
         session: AsyncSession,
     ) -> PricingRule:
         repo = BillingRepository(session)
+        current = await repo.get_pricing_rule(rule_id)
+        if current is None:
+            raise PriceNotFoundError(f"Pricing rule {rule_id} not found")
+        # A patch that only toggles/ends/annotates a rule (notably deactivating a
+        # broken one) must never be blocked by that rule's existing state.
+        touches_costs = any(
+            value is not None for value in (token_cost, input_token_cost, per_second_token_cost)
+        )
+        if touches_costs or is_active is True:
+            validate_rule_invariants(
+                generation_type=current.generation_type,
+                token_cost=current.token_cost if token_cost is None else token_cost,
+                input_token_cost=(
+                    current.input_token_cost if input_token_cost is None else input_token_cost
+                ),
+                per_second_token_cost=(
+                    current.per_second_token_cost
+                    if per_second_token_cost is None
+                    else per_second_token_cost
+                ),
+                has_video_resolution=current.video_resolution is not None,
+            )
         rule = await repo.update_pricing_rule(
             rule_id,
             token_cost=token_cost,

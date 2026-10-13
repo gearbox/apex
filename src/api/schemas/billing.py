@@ -178,8 +178,8 @@ class CreatePricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_on
 class PatchPricingRuleRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Request to update a pricing rule."""
 
-    token_cost: int | None = None
-    input_token_cost: int | None = None
+    token_cost: Annotated[int, msgspec.Meta(ge=0)] | None = None
+    input_token_cost: Annotated[int, msgspec.Meta(ge=0)] | None = None
     per_second_token_cost: Annotated[int, msgspec.Meta(ge=0)] | None = None
     is_active: bool | None = None
     effective_until: datetime | msgspec.UnsetType | None = msgspec.UNSET

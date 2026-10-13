@@ -2331,6 +2331,13 @@ video second per output sample. A rule must cost something: `token_cost > 0` or
 `per_second_token_cost > 0` (`token_cost` may be `0` only for a per-second rule).
 `video_resolution` is part of the rule's identity (it cannot be patched).
 
+**Validation (`422 invalid_pricing_rule`).** The resulting rule must satisfy: costs are
+non-negative; `token_cost > 0` or `per_second_token_cost > 0`; `generation_type` is a known
+generation type; and `per_second_token_cost > 0` or a `video_resolution` is only allowed on a
+**video-output** type (`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) — otherwise every image generation for
+that model would fail at quote time. Violations never reach the database; negative values in a
+body are a `400 validation_error`.
+
 **Enabling `wan3.0-video`:** the model row is seeded disabled and with no prices. Create one rule
 per resolution (`provider: "alibaba"`, `generation_type`, `model: "wan3.0-video"`,
 `video_resolution`, `per_second_token_cost`) from the Model Studio console prices, **then** enable
@@ -2346,6 +2353,11 @@ Response: PricingRuleResponse
 
 Patch fields are optional. Omitted nullable fields are left unchanged; explicit `null` clears
 `effective_until` or `notes`.
+
+The invariants above are checked against the rule **as it would be after the patch** (e.g.
+`{"per_second_token_cost": 0}` on a per-second-only rule is `422 invalid_pricing_rule`). A patch
+that does not touch a cost (notably `{"is_active": false}`) is never blocked by the rule's current
+state, so a broken rule can always be deactivated.
 
 #### `DELETE /v1/admin/pricing/{rule_id}`
 
