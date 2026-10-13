@@ -35,6 +35,29 @@ def _nested_transaction() -> MagicMock:
     return transaction
 
 
+@pytest.fixture(autouse=True)
+def _suppress_configure_logging() -> Generator[None]:
+    """Prevent create_app()/lifespan() from reconfiguring structlog in any unit test.
+
+    ``configure_logging()`` replaces the global structlog processors list with a
+    brand-new list object on every call. With ``cache_logger_on_first_use=True`` a
+    module-level ``logger = structlog.get_logger(__name__)`` binds to whichever list is
+    live the first time it logs, permanently. If a later test calls ``create_app()`` (or
+    runs the real lifespan), the global list is swapped and every already-cached logger is
+    stranded on the dead one, so ``structlog.testing.capture_logs()`` — which edits the
+    *current* list in place — silently misses their events. Which tests fail then depends
+    on collection order (a serial ``make test`` run, not ``-n auto``).
+
+    Restoring the config afterwards (see tests/unit/test_logging.py::_reset_structlog)
+    does not un-cache an already-bound proxy; the only reliable fix is to never let
+    ``create_app()`` touch the global config. Logging configuration itself is tested by
+    ``tests/unit/test_logging.py``, which calls ``src.core.logging.configure_logging``
+    directly and is unaffected by patching the name imported into ``src.api.app``.
+    """
+    with patch("src.api.app.configure_logging"):
+        yield
+
+
 @pytest.fixture
 def mock_session() -> MagicMock:
     """Session double with the savepoint used by AuthService.provision_user."""
