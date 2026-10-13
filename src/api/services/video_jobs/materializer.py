@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import httpx
 import structlog
 from sqlalchemy import func, or_, select, text, update
 from sqlalchemy.exc import IntegrityError
@@ -27,6 +28,7 @@ from src.api.services.media_ingest import InvalidMediaError
 from src.api.services.media_ingest.profile_log import log_video_profile
 from src.api.services.storage import StorageType
 from src.api.services.thumbnail import extract_video_thumbnail
+from src.api.services.video_jobs.errors import ProviderOutputUnavailableError
 from src.api.services.video_jobs.outcome import VideoPollOutcome
 from src.core.enums import JobStatus, MediaFormat, VideoPollStatus
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
@@ -37,7 +39,6 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
     from uuid import UUID
 
-    import httpx
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
@@ -49,6 +50,18 @@ if TYPE_CHECKING:
     from src.core.enums import Provider
 
 logger = structlog.get_logger(__name__)
+
+_RETRYABLE_CLIENT_ERRORS = frozenset({408, 425, 429})
+"""4xx statuses that mean "try again later" rather than "this URL is gone"."""
+
+
+def _is_permanent_status(status_code: int) -> bool:
+    """Whether a result-URL HTTP status can never heal inside the poll window.
+
+    A 404/403/410 on a provider's presigned URL is an expired or invalid signature;
+    retrying only delays the same outcome until the job is refunded as a timeout.
+    """
+    return 400 <= status_code < 500 and status_code not in _RETRYABLE_CLIENT_ERRORS
 
 
 class VideoJobNotFoundError(Exception):
@@ -204,30 +217,26 @@ class RemoteVideoMaterializer:
             logger.exception(
                 "video_job.output_invalid", provider=self._provider.value, job_id=str(job_id)
             )
-            # The ordinary failure transition deliberately cannot preempt a
-            # live finalization claim. Relinquish our own claim before using
-            # that existing settlement path.
-            await self._release_video_finalization_claim(session, job_id, claim_token)
-            failure = apply_provider_billing_policy(
-                ProviderFailure(
-                    kind=ProviderFailureKind.OUTPUT_NOT_DELIVERED,
-                    provider=self._provider,
-                    sanitized_message=ProviderFailure.safe_message_for_kind(
-                        ProviderFailureKind.OUTPUT_NOT_DELIVERED
-                    ),
-                    provider_request_accepted=True,
-                ),
-                registry=self._billing_policy,
-            )
-            return await settle_failure(
+            return await self._settle_undelivered(
                 session,
-                job_id,
-                VideoPollOutcome(
-                    status=VideoPollStatus.FAILED,
-                    error_message=failure.sanitized_message,
-                    failure=failure,
-                ),
-                product_id,
+                job_id=job_id,
+                product_id=product_id,
+                claim_token=claim_token,
+                settle_failure=settle_failure,
+            )
+        except ProviderOutputUnavailableError:
+            await session.rollback()
+            if materialized is not None:
+                # Raised only by the download, which precedes the attempt row.
+                raise RuntimeError(
+                    "ProviderOutputUnavailableError after materialization began"
+                ) from None
+            return await self._settle_undelivered(
+                session,
+                job_id=job_id,
+                product_id=product_id,
+                claim_token=claim_token,
+                settle_failure=settle_failure,
             )
         except Exception:
             # ``commit()`` can raise after PostgreSQL has committed, and a
@@ -246,6 +255,50 @@ class RemoteVideoMaterializer:
             raise
         else:
             return settled_job
+
+    async def _settle_undelivered(
+        self,
+        session: AsyncSession,
+        *,
+        job_id: UUID,
+        product_id: str,
+        claim_token: str,
+        settle_failure: Callable[
+            [AsyncSession, UUID, VideoPollOutcome, str], Awaitable[GenerationJob]
+        ],
+    ) -> GenerationJob:
+        """Settle a completed-upstream job whose output could not be obtained.
+
+        Used when nothing was materialized: the provider finished (and billed) the
+        generation but its result is unusable or no longer served, so the job fails
+        as ``OUTPUT_NOT_DELIVERED`` under the provider's undelivered-output billing
+        policy instead of being retried into a refunded timeout.
+        """
+        # The ordinary failure transition deliberately cannot preempt a live
+        # finalization claim. Relinquish our own claim before using that
+        # existing settlement path.
+        await self._release_video_finalization_claim(session, job_id, claim_token)
+        failure = apply_provider_billing_policy(
+            ProviderFailure(
+                kind=ProviderFailureKind.OUTPUT_NOT_DELIVERED,
+                provider=self._provider,
+                sanitized_message=ProviderFailure.safe_message_for_kind(
+                    ProviderFailureKind.OUTPUT_NOT_DELIVERED
+                ),
+                provider_request_accepted=True,
+            ),
+            registry=self._billing_policy,
+        )
+        return await settle_failure(
+            session,
+            job_id,
+            VideoPollOutcome(
+                status=VideoPollStatus.FAILED,
+                error_message=failure.sanitized_message,
+                failure=failure,
+            ),
+            product_id,
+        )
 
     async def _claim_video_finalization(self, session: AsyncSession, job_id: UUID) -> str | None:
         """Durably acquire a recoverable PostgreSQL claim for one video job."""
@@ -485,10 +538,27 @@ class RemoteVideoMaterializer:
             InvalidMediaError: The body is larger than ``max_output_bytes``. Raised
                 before anything is buffered past the cap, and before the durable
                 materialization attempt exists.
+            ProviderOutputUnavailableError: The URL answered with a permanent 4xx
+                (see ``_is_permanent_status``); also raised before the attempt exists.
+            httpx.HTTPStatusError: Any other error status (5xx, 408, 425, 429); the
+                caller retries on the next poll.
         """
         limit = self._max_output_bytes
         async with self._http_client_provider().stream("GET", url) as response:
-            response.raise_for_status()
+            if response.status_code >= 400:
+                if _is_permanent_status(response.status_code):
+                    logger.warning(
+                        "video_job.output_unavailable",
+                        provider=self._provider.value,
+                        job_id=str(job_id),
+                        http_status=response.status_code,
+                    )
+                    raise ProviderOutputUnavailableError(response.status_code)
+                raise httpx.HTTPStatusError(
+                    f"provider result URL answered HTTP {response.status_code}",
+                    request=response.request,
+                    response=response,
+                )
             declared = response.headers.get("content-length")
             if declared is not None and declared.isdigit() and int(declared) > limit:
                 self._log_output_too_large(job_id, content_length=int(declared))

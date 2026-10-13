@@ -140,7 +140,7 @@ Standard envelope; the codes you will see for Wan:
 | `provider_invalid_request` | 400 | The provider rejected the request shape. |
 | `provider_moderation_rejected` | 422 | Content rejected by the provider's safety system. **Refunded** (the provider only bills successful generations). |
 | `provider_rate_limited` | 429 | Provider throttling; retry later. |
-| `provider_malformed_response`, `provider_output_not_delivered` | 502 | The provider produced something we could not read or fetch. `provider_output_not_delivered` means the provider generated the video and billed us, so the message states the job **was charged**. |
+| `provider_malformed_response`, `provider_output_not_delivered` | 502 | The provider produced something we could not read or fetch. `provider_output_not_delivered` means the provider generated the video and billed us but we could not obtain it (an unreadable file, or a result URL the provider no longer serves, i.e. HTTP 4xx), so the message states the job **was charged**. It is reported on the first poll; a transient download error (5xx, 408, 425, 429, network) is retried instead. |
 | `provider_timeout`, `provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | 503 | Provider-side trouble; refunded. |
 | `insufficient_balance` | 402 | Balance below the quote. |
 

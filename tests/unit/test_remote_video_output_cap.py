@@ -19,7 +19,11 @@ from src.api.services.media_ingest.factory import (
     build_provider_video_ingest_service,
 )
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin
-from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
+from src.api.services.video_jobs.errors import ProviderOutputUnavailableError
+from src.api.services.video_jobs.materializer import (
+    RemoteVideoMaterializer,
+    _is_permanent_status,
+)
 from src.api.services.video_jobs.outcome import RemoteVideoResult
 from src.core.config import Settings
 from src.core.enums import Provider
@@ -141,12 +145,52 @@ async def test_a_body_exactly_at_the_cap_is_accepted() -> None:
     assert len(data) == _CAP
 
 
-async def test_an_http_error_status_still_raises_before_buffering() -> None:
-    transport = httpx.MockTransport(lambda _: httpx.Response(403, content=b"denied"))
+@pytest.mark.parametrize("status", [400, 401, 403, 404, 410, 499])
+async def test_a_permanent_error_status_raises_unavailable_before_buffering(status: int) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(status, content=b"gone"))
     materializer = _materializer(Provider.ALIBABA, VideoProfileOrigin.ALIBABA_OUTPUT, transport)
 
-    with pytest.raises(httpx.HTTPStatusError):
+    with capture_logs() as logs, pytest.raises(ProviderOutputUnavailableError) as raised:
         await materializer._download_video(_URL, uuid4())
+
+    assert raised.value.status_code == status
+    assert "SECRET" not in str(raised.value)
+    (event,) = [e for e in logs if e["event"] == "video_job.output_unavailable"]
+    assert event["http_status"] == status
+    assert "SECRET" not in repr(logs)
+
+
+@pytest.mark.parametrize("status", [408, 425, 429, 500, 502, 503])
+async def test_a_transient_error_status_raises_http_status_error_before_buffering(
+    status: int,
+) -> None:
+    transport = httpx.MockTransport(lambda _: httpx.Response(status, content=b"later"))
+    materializer = _materializer(Provider.ALIBABA, VideoProfileOrigin.ALIBABA_OUTPUT, transport)
+
+    with pytest.raises(httpx.HTTPStatusError) as raised:
+        await materializer._download_video(_URL, uuid4())
+
+    assert raised.value.response.status_code == status
+
+
+@pytest.mark.parametrize(
+    ("status", "permanent"),
+    [
+        (400, True),
+        (401, True),
+        (403, True),
+        (404, True),
+        (408, False),
+        (410, True),
+        (425, False),
+        (429, False),
+        (499, True),
+        (500, False),
+        (503, False),
+    ],
+)
+def test_is_permanent_status(status: int, permanent: bool) -> None:
+    assert _is_permanent_status(status) is permanent
 
 
 def test_provider_and_upload_services_have_independent_byte_budgets() -> None:

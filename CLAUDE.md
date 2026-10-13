@@ -129,6 +129,7 @@ The backend serves two distinct products from the same codebase:
 │   │       │   ├── outcome.py       # RemoteVideoResult, VideoPollOutcome
 │   │       │   ├── protocol.py      # AsyncVideoJobService (provider, transient_poll_errors, running_progress_pct)
 │   │       │   ├── materializer.py  # RemoteVideoMaterializer — finalization claim, R2 materialization, attempt reconciliation
+│   │       │   ├── errors.py        # ProviderOutputUnavailableError — permanent 4xx on a result URL → settled as OUTPUT_NOT_DELIVERED on the first poll (5xx/408/425/429/transport keep retrying)
 │   │       │   ├── worker.py        # AsyncVideoJobWorker(PeriodicWorker) — ONE instance per provider
 │   │       │   ├── settlement.py / transition.py / download.py  # shared settle fn, transition factory, credential-free download client
 │   │       │   └── cli.py           # run_video_worker() — shared standalone-process body
