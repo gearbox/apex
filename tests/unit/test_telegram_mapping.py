@@ -19,6 +19,8 @@ from src.api.schemas.ops_events import (
     PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
+    VideoTaskOrphanedOpsPayload,
+    VideoTaskReceiptUnrecordedOpsPayload,
 )
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.telegram.mapping import map_ops_event
@@ -392,3 +394,87 @@ class TestFeedbackSubmitted:
         assert "<code>&lt;script&gt;&amp;amp</code>" in notification.text
         assert "<script>" not in notification.text
         assert "<p&>" not in notification.text
+
+
+class TestVideoTaskReceipts:
+    """R3 — orphaned / unrecorded video tasks: IDs and enums only, product-scoped."""
+
+    def test_orphaned_cancelled(self) -> None:
+        job_id, user_id = uuid4(), uuid4()
+        envelope = _envelope(
+            OpsEventType.VIDEO_TASK_ORPHANED,
+            "vex",
+            VideoTaskOrphanedOpsPayload(
+                provider="alibaba",
+                external_task_id="task-1",
+                job_id=job_id,
+                user_id=user_id,
+                model="wan3.0-video",
+                token_cost=40,
+                resolution="cancelled",
+                upstream_status="PENDING",
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class == NotificationClass.VIDEO_TASK_ORPHANED
+        assert notification.product_id == "vex"
+        assert "task <code>task-1</code>" in notification.text
+        assert "cancelled upstream" in notification.text
+        assert "the user was not charged" in notification.text
+
+    def test_orphaned_absorbed_points_at_the_provider_console(self) -> None:
+        envelope = _envelope(
+            OpsEventType.VIDEO_TASK_ORPHANED,
+            "vex",
+            VideoTaskOrphanedOpsPayload(
+                provider="grok",
+                external_task_id="req-<1>",
+                job_id=uuid4(),
+                user_id=uuid4(),
+                model="grok-imagine-video",
+                token_cost=10,
+                resolution="absorbed",
+                upstream_status="done",
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert "provider console" in notification.text
+        assert "req-&lt;1&gt;" in notification.text
+        assert "req-<1>" not in notification.text
+
+    def test_receipt_unrecorded_carries_the_task_id(self) -> None:
+        envelope = _envelope(
+            OpsEventType.VIDEO_TASK_RECEIPT_UNRECORDED,
+            "synthara",
+            VideoTaskReceiptUnrecordedOpsPayload(
+                provider="alibaba",
+                external_task_id="task-9",
+                job_id=uuid4(),
+                user_id=uuid4(),
+                model="wan3.0-video",
+            ),
+        )
+
+        notification = map_ops_event(envelope)
+
+        assert notification is not None
+        assert notification.notification_class == NotificationClass.VIDEO_TASK_RECEIPT_UNRECORDED
+        assert "<code>task-9</code>" in notification.text
+        assert "by hand" in notification.text
+
+    def test_both_classes_are_product_scoped_and_catalogued(self) -> None:
+        from src.api.services.admin_notifications import _CATALOG_DESCRIPTIONS
+        from src.core.enums import PLATFORM_SCOPED_NOTIFICATION_CLASSES
+
+        for cls in (
+            NotificationClass.VIDEO_TASK_ORPHANED,
+            NotificationClass.VIDEO_TASK_RECEIPT_UNRECORDED,
+        ):
+            assert cls not in PLATFORM_SCOPED_NOTIFICATION_CLASSES
+            assert _CATALOG_DESCRIPTIONS[cls]

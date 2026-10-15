@@ -783,6 +783,49 @@ class Settings(BaseSettings):
         description="Lifetime of the presigned R2 URLs handed to Model Studio as inputs.",
     )
 
+    # Accepted-task receipts (async video: Wan + Grok). See
+    # src/api/services/video_jobs/receipts.py.
+    video_task_receipt_grace_seconds: int = Field(
+        default=60,
+        ge=10,
+        le=3600,
+        description=(
+            "Minimum age of an accepted-task receipt before the reconciler touches it. It "
+            "only covers the gap between the receipt commit and the request's DELETE; the "
+            "row lock, not this value, protects a slow request."
+        ),
+    )
+    video_task_receipt_reconcile_interval_seconds: int = Field(
+        default=30,
+        ge=5,
+        le=3600,
+        description="Seconds between accepted-task receipt reconciler ticks (per provider).",
+    )
+    video_task_receipt_record_attempts: int = Field(
+        default=3,
+        ge=1,
+        le=5,
+        description="Tries to write an accepted-task receipt before giving up (ops alert).",
+    )
+    video_task_receipt_db_pool_size: int = Field(
+        default=2,
+        ge=1,
+        le=10,
+        description=(
+            "Connections in the dedicated receipt pool. Separate from the request pool: "
+            "the receipt write is autonomous while the request holds a connection."
+        ),
+    )
+    video_task_receipt_db_max_overflow: int = Field(
+        default=2, ge=0, le=10, description="Overflow connections for the receipt pool."
+    )
+    video_task_receipt_db_pool_timeout_seconds: int = Field(
+        default=2,
+        ge=1,
+        le=30,
+        description="Seconds to wait for a receipt-pool connection before retrying.",
+    )
+
     # Generation defaults — bundle.yaml overrides these per-model when present
     default_steps: int = Field(default=12, description="Default generation steps")
     max_steps: int = Field(default=20, description="Maximum generation steps")

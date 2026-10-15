@@ -852,6 +852,8 @@ class NotificationClass(StrEnum):
     TOKEN_REVOCATION_FAILED = "token_revocation.failed"  # noqa: S105
     PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "push_subscriptions.cleanup_failed"
     FEEDBACK_SUBMITTED = "feedback.submitted"
+    VIDEO_TASK_ORPHANED = "video_task.orphaned"
+    VIDEO_TASK_RECEIPT_UNRECORDED = "video_task.receipt_unrecorded"
 
 
 # Platform-scoped classes are delivered to every subscribed admin/superadmin
@@ -869,6 +871,18 @@ PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = froz
         NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
     }
 )
+
+
+class AcceptedTaskReceiptStatus(StrEnum):
+    """Lifecycle of an ``accepted_task_receipts`` row (an upstream task no job references)."""
+
+    PENDING = "pending"
+    """Recorded; either an in-flight request still holds the row lock, or it is an orphan
+    the reconciler has not resolved yet."""
+    CANCELLED = "cancelled"
+    """The upstream task was cancelled (immediately, or by the reconciler)."""
+    ABSORBED = "absorbed"
+    """The upstream task could not be cancelled and is left to finish; never charged to the user."""
 
 
 class OAuthResult(StrEnum):

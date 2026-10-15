@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+from enum import StrEnum
 from typing import TYPE_CHECKING, ClassVar, Protocol
 
 if TYPE_CHECKING:
@@ -45,4 +47,54 @@ class AsyncVideoJobService(Protocol):
         product_id: str,
     ) -> GenerationJob:
         """Apply a poll outcome exactly once through the shared transitions."""
+        ...
+
+
+class OrphanCancelOutcome(StrEnum):
+    """Result of asking a provider to cancel an orphaned task."""
+
+    CANCELLED = "cancelled"
+    NOT_CANCELLABLE = "not_cancellable"
+    """The provider refused: the task is already past the cancellable state."""
+    UNSUPPORTED = "unsupported"
+    """The provider has no cancel operation."""
+
+
+class OrphanTaskState(StrEnum):
+    """What the reconciler needs to know about an upstream task."""
+
+    PENDING = "pending"
+    CANCELLED = "cancelled"
+    OTHER = "other"
+    """Running or finished (succeeded / failed): not cancellable any more."""
+    GONE = "gone"
+    """The provider does not know the task (never existed or expired)."""
+
+
+@dataclass(frozen=True, slots=True)
+class OrphanObservation:
+    """One provider status read for an orphan."""
+
+    state: OrphanTaskState
+    upstream_status: str | None
+    """The provider's own status string, verbatim; ``None`` when ``state`` is GONE."""
+
+
+class OrphanTaskCompensator(Protocol):
+    """Cancel or observe an upstream task that no job row references.
+
+    Both methods raise one of ``transient_errors`` when the provider could not be
+    reached or throttled the call, so the next tick retries; neither ever returns
+    a fabricated value. Any other exception is a permanent failure to compensate.
+    """
+
+    provider: ClassVar[Provider]
+    transient_errors: ClassVar[tuple[type[Exception], ...]]
+
+    async def cancel(self, external_task_id: str) -> OrphanCancelOutcome:
+        """Ask the provider to cancel the task."""
+        ...
+
+    async def observe(self, external_task_id: str) -> OrphanObservation:
+        """Read the task's status without fetching any output."""
         ...

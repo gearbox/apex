@@ -37,6 +37,8 @@ class OpsEventType(StrEnum):
     TOKEN_REVOCATION_FAILED = "ops.auth.token_revocation_failed"  # noqa: S105
     PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "ops.push.subscriptions_cleanup_failed"
     FEEDBACK_SUBMITTED = "ops.feedback.submitted"
+    VIDEO_TASK_ORPHANED = "ops.video_task.orphaned"
+    VIDEO_TASK_RECEIPT_UNRECORDED = "ops.video_task.receipt_unrecorded"
 
 
 class OpsEventEnvelope(msgspec.Struct, kw_only=True):
@@ -125,3 +127,32 @@ class FeedbackSubmittedOpsPayload(msgspec.Struct, kw_only=True):
     user_id: UUID
     category: str
     job_id: UUID | None = None
+
+
+class VideoTaskOrphanedOpsPayload(msgspec.Struct, kw_only=True):
+    """An upstream video task was accepted but no job row references it (D10: IDs/enums only).
+
+    ``resolution`` is an ``AcceptedTaskReceiptStatus`` value (``cancelled`` or
+    ``absorbed``). The user was never charged; an absorbed task may still bill the
+    provider account, so the operator audits it by ``external_task_id`` in the
+    provider console.
+    """
+
+    provider: str
+    external_task_id: str
+    job_id: UUID
+    user_id: UUID
+    model: str
+    token_cost: int
+    resolution: str
+    upstream_status: str | None = None
+
+
+class VideoTaskReceiptUnrecordedOpsPayload(msgspec.Struct, kw_only=True):
+    """The accepted-task receipt could not be written; the task id exists only here."""
+
+    provider: str
+    external_task_id: str
+    job_id: UUID
+    user_id: UUID
+    model: str
