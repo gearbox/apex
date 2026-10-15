@@ -22,6 +22,7 @@ from src.api.services.generation.provider_billing_policy import ProviderBillingP
 from src.api.services.grok import GrokClient
 from src.api.services.grok.factory import build_grok_job_service
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.grok.orphan_compensator import GrokOrphanCompensator
 from src.api.services.video_jobs.cli import BuiltVideoService, VideoWorkerDeps, run_video_worker
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
@@ -77,6 +78,7 @@ class GrokVideoPollerCLI:
             retention_days=settings.retention_days,
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+            receipts=deps.receipts,
         )
         await job_service.connect()
 
@@ -84,7 +86,12 @@ class GrokVideoPollerCLI:
             await job_service.close()
             await grok_client.close()
 
-        return BuiltVideoService(service=job_service, close=close)
+        return BuiltVideoService(
+            service=job_service,
+            close=close,
+            compensator=GrokOrphanCompensator(grok_client),
+            receipt_reconciler_name=GrokJobService.RECEIPT_RECONCILER_NAME,
+        )
 
     def handle_signal(self) -> None:
         """Handle shutdown signal."""

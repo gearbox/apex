@@ -25,6 +25,7 @@ import structlog
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin
 from src.api.services.model_studio.client import ModelStudioClient
+from src.api.services.model_studio.orphan_compensator import ModelStudioOrphanCompensator
 from src.api.services.model_studio.wan_job_service import WanJobService
 from src.api.services.video_jobs.cli import BuiltVideoService, VideoWorkerDeps, run_video_worker
 from src.api.services.video_jobs.download import VideoDownloadClient
@@ -96,10 +97,13 @@ class WanVideoPollerCLI:
                 ops_event_bus=deps.ops_event_bus,
             ),
         )
+        compensator = ModelStudioOrphanCompensator(client)
         job_service = WanJobService(
             client,
             materializer,
             download,
+            receipts=deps.receipts,
+            compensator=compensator,
             billing_service=deps.billing_service,
             event_bus=deps.event_bus,
             ops_event_bus=deps.ops_event_bus,
@@ -112,7 +116,12 @@ class WanVideoPollerCLI:
             await job_service.close()
             await client.close()
 
-        return BuiltVideoService(service=job_service, close=close)
+        return BuiltVideoService(
+            service=job_service,
+            close=close,
+            compensator=compensator,
+            receipt_reconciler_name=WanJobService.RECEIPT_RECONCILER_NAME,
+        )
 
     def handle_signal(self) -> None:
         """Handle shutdown signal."""

@@ -42,6 +42,11 @@ from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.media_ingest import ImageIngestPolicy, MediaIngestor
 from src.api.services.storage import R2StorageService, StorageType
 from src.api.services.video_jobs.outcome import RemoteVideoResult, VideoPollOutcome
+from src.api.services.video_jobs.receipts import (
+    AcceptedTask,
+    cancel_orphan_immediately,
+    record_acceptance,
+)
 from src.core.enums import (
     AspectRatio,
     GenerationType,
@@ -68,6 +73,8 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
     from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
+    from src.api.services.video_jobs.protocol import OrphanTaskCompensator
+    from src.api.services.video_jobs.receipts import AcceptedTaskReceipts
     from src.db.models import GenerationJob
 logger = structlog.get_logger(__name__)
 
@@ -109,6 +116,7 @@ class GrokJobService:
 
     provider: ClassVar[Provider] = Provider.GROK
     VIDEO_POLLER_NAME: ClassVar[str] = "grok_video_poller"
+    RECEIPT_RECONCILER_NAME: ClassVar[str] = "grok_video_receipts"
     transient_poll_errors: ClassVar[tuple[type[Exception], ...]] = (
         GrokRateLimitError,
         GrokTimeoutError,
@@ -124,6 +132,8 @@ class GrokJobService:
         retention_days: int = 7,
         *,
         materializer: RemoteVideoMaterializer,
+        receipts: AcceptedTaskReceipts,
+        compensator: OrphanTaskCompensator,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -139,8 +149,13 @@ class GrokJobService:
             retention_days: Days to retain generated content.
             materializer: Shared completion path (claim, R2 materialization,
                 reconciliation) for finished videos.
+            receipts: Accepted-task receipt store (video submissions only).
+            compensator: Observes/cancels a video task whose post-acceptance
+                persistence failed.
         """
         self._grok = grok_client
+        self._receipts = receipts
+        self._compensator = compensator
         self._storage = storage
         self._retention_days = retention_days
         self._billing = billing_service
@@ -736,6 +751,8 @@ class GrokJobService:
         reservation_created = False
         provider_attempted = False
         provider_accepted = False
+        accepted: AcceptedTask | None = None
+        receipt_recorded = False
         try:
             # --- SAGA: Pre-flight token deduction ---
             try:
@@ -775,6 +792,16 @@ class GrokJobService:
                 video_url=input_video_url,
             )
             provider_accepted = True
+            accepted = AcceptedTask(
+                provider=Provider.GROK,
+                external_task_id=started.request_id,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+                model=model.value,
+                token_cost=token_cost,
+            )
+            receipt_recorded = await record_acceptance(self._receipts, session, accepted)
 
             # Store xAI request ID for polling
             job = await job_repo.update_status(
@@ -812,6 +839,19 @@ class GrokJobService:
                     user_id=user_id,
                     product_id=product_id,
                     reserve_event=reserve_event,
+                )
+            if provider_accepted and accepted is not None:
+                logger.exception(
+                    "grok.post_acceptance_persistence_failed",
+                    job_id=str(job_id),
+                    task_id=accepted.external_task_id,
+                    receipt_recorded=receipt_recorded,
+                )
+                await cancel_orphan_immediately(
+                    receipts=self._receipts,
+                    compensator=self._compensator,
+                    session=session,
+                    task=accepted,
                 )
             raise
 

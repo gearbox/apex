@@ -49,7 +49,8 @@ from src.api.services.gpu_session.provisioning_worker import GpuProvisioningWork
 from src.api.services.gpu_session.service import GpuSessionService
 from src.api.services.grok import GrokClient
 from src.api.services.grok.factory import build_grok_job_service
-from src.api.services.grok.job_service import GrokJobService  # noqa: TC001
+from src.api.services.grok.job_service import GrokJobService
+from src.api.services.grok.orphan_compensator import GrokOrphanCompensator
 from src.api.services.health.checkers.workers import WorkerHeartbeatChecker
 from src.api.services.health.service import HealthService
 from src.api.services.health.worker import HealthSnapshotCleanupWorker, HealthSnapshotWorker
@@ -66,6 +67,7 @@ from src.api.services.media_ingest.factory import (
 )
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin
 from src.api.services.model_studio.client import ModelStudioClient
+from src.api.services.model_studio.orphan_compensator import ModelStudioOrphanCompensator
 from src.api.services.model_studio.wan_job_service import WanJobService
 from src.api.services.oauth import OAuthProviderRegistry, OAuthService, RedisOAuthFlowStore
 from src.api.services.ops_event_bus import OpsEventBus
@@ -94,6 +96,14 @@ from src.api.services.user import UserService
 from src.api.services.user_content import UserContentService
 from src.api.services.video_jobs.download import VideoDownloadClient
 from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
+from src.api.services.video_jobs.receipts import (
+    AcceptedTaskReceipts,
+    build_accepted_task_receipts,
+)
+from src.api.services.video_jobs.reconciler import (
+    AcceptedTaskReconciler,
+    AcceptedTaskReconcilerWorker,
+)
 from src.api.services.video_jobs.transition import make_transition_service_factory
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.api.services.workflow import WorkflowService
@@ -161,6 +171,10 @@ class ServiceContainer:
     model_studio_client: ModelStudioClient | None = None
     wan_job_service: WanJobService | None = None
     wan_video_worker: AsyncVideoJobWorker | None = None
+    receipt_db_manager: DatabaseManager | None = None
+    receipt_store: AcceptedTaskReceipts | None = None
+    grok_receipt_reconciler_worker: AcceptedTaskReconcilerWorker | None = None
+    wan_receipt_reconciler_worker: AcceptedTaskReconcilerWorker | None = None
     email_service: EmailService | None = None
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
@@ -1028,7 +1042,16 @@ async def init_services(settings: Settings) -> JWTService:
         settings, video_slots=video_slots, image_slots=image_slots
     )
 
+    # Accepted-task receipts (Grok + Wan video submissions): own small pool, so the
+    # autonomous receipt write never competes with request connections.
+    if _services.ops_event_bus is None:
+        raise RuntimeError("OpsEventBus must be initialized before accepted-task receipts")
+    _services.receipt_db_manager, _services.receipt_store = build_accepted_task_receipts(
+        settings, _services.ops_event_bus
+    )
+
     # Initialize Grok provider (if configured)
+    grok_orphans: GrokOrphanCompensator | None = None
     if settings.grok_configured and _services.r2_storage is not None:
         grok_client = GrokClient(settings)
         await grok_client.connect()
@@ -1046,14 +1069,21 @@ async def init_services(settings: Settings) -> JWTService:
             retention_days=settings.retention_days,
             max_poll_time=settings.grok_video_max_poll_time,
             finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+            receipts=_services.receipt_store,
         )
+        grok_orphans = GrokOrphanCompensator(grok_client)
         await _services.grok_job_service.connect()
         logger.info("grok.initialized")
     else:
         logger.warning("grok.not_configured")
 
     # Start Grok video polling worker
-    if workers_enabled and settings.grok_configured and _services.grok_job_service is not None:
+    if (
+        workers_enabled
+        and settings.grok_configured
+        and _services.grok_job_service is not None
+        and grok_orphans is not None
+    ):
         if settings.grok_video_worker_in_process:
             _services.grok_video_worker = AsyncVideoJobWorker(
                 job_service=_services.grok_job_service,
@@ -1066,6 +1096,19 @@ async def init_services(settings: Settings) -> JWTService:
             )
             await _services.grok_video_worker.start()
             logger.info("grok.video_poller_in_process_started")
+            _services.grok_receipt_reconciler_worker = AcceptedTaskReconcilerWorker(
+                name=GrokJobService.RECEIPT_RECONCILER_NAME,
+                reconciler=AcceptedTaskReconciler(
+                    _services.receipt_db_manager,
+                    grok_orphans,
+                    _services.ops_event_bus,
+                    grace_seconds=settings.video_task_receipt_grace_seconds,
+                ),
+                interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
+                redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
+            )
+            await _services.grok_receipt_reconciler_worker.start()
         else:
             logger.info(
                 "grok.video_poller_external_recommended",
@@ -1076,6 +1119,7 @@ async def init_services(settings: Settings) -> JWTService:
             )
 
     # Initialize Alibaba Model Studio (Wan) provider (if configured)
+    wan_orphans: ModelStudioOrphanCompensator | None = None
     if (
         settings.model_studio_configured
         and settings.model_studio_api_key is not None
@@ -1107,6 +1151,7 @@ async def init_services(settings: Settings) -> JWTService:
                 ops_event_bus=_services.ops_event_bus,
             ),
         )
+        wan_orphans = ModelStudioOrphanCompensator(model_studio_client)
         _services.wan_job_service = WanJobService(
             model_studio_client,
             wan_materializer,
@@ -1116,6 +1161,8 @@ async def init_services(settings: Settings) -> JWTService:
             ops_event_bus=_services.ops_event_bus,
             max_poll_time=settings.wan_video_max_poll_time,
             billing_policy=wan_billing_policy,
+            receipts=_services.receipt_store,
+            compensator=wan_orphans,
         )
         await _services.wan_job_service.connect()
         logger.info("alibaba.initialized")
@@ -1123,7 +1170,7 @@ async def init_services(settings: Settings) -> JWTService:
         logger.warning("alibaba.not_configured")
 
     # Start Wan video polling worker — its own instance, lease and semaphore
-    if workers_enabled and _services.wan_job_service is not None:
+    if workers_enabled and _services.wan_job_service is not None and wan_orphans is not None:
         if settings.wan_video_worker_in_process:
             _services.wan_video_worker = AsyncVideoJobWorker(
                 job_service=_services.wan_job_service,
@@ -1136,6 +1183,19 @@ async def init_services(settings: Settings) -> JWTService:
             )
             await _services.wan_video_worker.start()
             logger.info("alibaba.video_worker_in_process_started")
+            _services.wan_receipt_reconciler_worker = AcceptedTaskReconcilerWorker(
+                name=WanJobService.RECEIPT_RECONCILER_NAME,
+                reconciler=AcceptedTaskReconciler(
+                    _services.receipt_db_manager,
+                    wan_orphans,
+                    _services.ops_event_bus,
+                    grace_seconds=settings.video_task_receipt_grace_seconds,
+                ),
+                interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
+                redis_enabled=redis_enabled,
+                redis_client_factory=get_operational_redis_client,
+            )
+            await _services.wan_receipt_reconciler_worker.start()
         else:
             logger.info(
                 "alibaba.video_worker_external_recommended",
@@ -1659,6 +1719,8 @@ async def init_services(settings: Settings) -> JWTService:
             _services.health_snapshot_cleanup_worker,
             _services.grok_video_worker,
             _services.wan_video_worker,
+            _services.grok_receipt_reconciler_worker,
+            _services.wan_receipt_reconciler_worker,
             _services.payment_currency_sync_worker,
             _services.telegram_link_poller,
         )
@@ -1742,6 +1804,12 @@ async def shutdown_services() -> None:
     if _services.wan_video_worker is not None:
         await _services.wan_video_worker.stop()
 
+    if _services.grok_receipt_reconciler_worker is not None:
+        await _services.grok_receipt_reconciler_worker.stop()
+
+    if _services.wan_receipt_reconciler_worker is not None:
+        await _services.wan_receipt_reconciler_worker.stop()
+
     if _services.r2_storage is not None:
         await _services.r2_storage.close()
         logger.info("r2.closed")
@@ -1749,6 +1817,10 @@ async def shutdown_services() -> None:
     if _services.r2_public_assets_storage is not None:
         await _services.r2_public_assets_storage.close()
         logger.info("r2_public_assets.closed")
+
+    if _services.receipt_db_manager is not None:
+        await _services.receipt_db_manager.close()
+        logger.info("receipt_db.closed")
 
     if _services.db_manager is not None:
         await _services.db_manager.close()

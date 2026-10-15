@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import asyncio
+from typing import TYPE_CHECKING
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import pytest
 
 from src.workers.grok_video import GrokVideoPollerCLI
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 
 @pytest.fixture
@@ -49,6 +53,23 @@ def settings() -> MagicMock:
     s.media_ingest_video_max_edge = 512
     s.media_ingest_max_animation_frames = 100
     return s
+
+
+@pytest.fixture(autouse=True)
+def _stub_receipt_reconciler() -> Iterator[MagicMock]:
+    """The standalone body builds a receipt pool and reconciler; keep them out of the DB."""
+    reconciler_worker = AsyncMock()
+    with (
+        patch(
+            "src.api.services.video_jobs.cli.build_accepted_task_receipts",
+            return_value=(AsyncMock(), MagicMock()),
+        ),
+        patch(
+            "src.api.services.video_jobs.cli.AcceptedTaskReconcilerWorker",
+            return_value=reconciler_worker,
+        ),
+    ):
+        yield reconciler_worker
 
 
 class TestGrokVideoPollerCLIHandleSignal:

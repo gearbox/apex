@@ -42,6 +42,7 @@ from src.core.enums import (
     VideoResolution,
 )
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
+from tests.video_receipt_support import stub_compensator, stub_receipts
 
 pytestmark = pytest.mark.unit
 
@@ -84,6 +85,8 @@ def _service(client: Any = None, **kwargs: Any) -> WanJobService:
         client or MagicMock(),
         MagicMock(),
         MagicMock(),
+        receipts=kwargs.pop("receipts", None) or stub_receipts(),
+        compensator=kwargs.pop("compensator", None) or stub_compensator(),
         billing_policy=ProviderBillingPolicyRegistry.from_settings(Settings.model_construct()),
         **kwargs,
     )
@@ -302,6 +305,8 @@ async def test_poll_failed_moderation_is_charged_when_the_policy_says_so() -> No
         client,
         MagicMock(),
         MagicMock(),
+        receipts=stub_receipts(),
+        compensator=stub_compensator(),
         billing_policy=ProviderBillingPolicyRegistry.from_settings(
             Settings.model_construct(wan_moderation_billing_policy="charge")
         ),
@@ -767,7 +772,13 @@ async def test_failed_outcome_adapter_routes_back_through_settle() -> None:
 async def test_connect_and_close_manage_the_download_client_only() -> None:
     download = MagicMock(connect=AsyncMock(), close=AsyncMock())
     client = MagicMock()
-    service = WanJobService(client, MagicMock(), download)
+    service = WanJobService(
+        client,
+        MagicMock(),
+        download,
+        receipts=stub_receipts(),
+        compensator=stub_compensator(),
+    )
 
     await service.connect()
     await service.close()
@@ -803,3 +814,105 @@ async def test_long_prompts_get_a_truncated_default_name() -> None:
 
     assert repo.job is not None
     assert repo.job.name == "x" * 50 + "..."
+
+
+# ---- accepted-task receipts (R3 / P1-1) --------------------------------------------------
+
+
+class _UpdateStatusFails(_FakeJobRepository):
+    async def update_status(self, *_: object, **__: object) -> Any:
+        raise RuntimeError("connection reset")
+
+
+def _accepting_client(task_id: str = "task-accepted-1") -> MagicMock:
+    client = MagicMock()
+    client.create_video_task = AsyncMock(return_value=ModelStudioTaskRef(task_id=task_id))
+    return client
+
+
+async def test_start_records_the_receipt_before_the_queued_write() -> None:
+    receipts = stub_receipts()
+    repo = _FakeJobRepository()
+    order: list[str] = []
+
+    async def record(_: object) -> bool:
+        order.append("record")
+        return True
+
+    async def claim(*_: object, **__: object) -> None:
+        order.append("claim")
+
+    receipts.record.side_effect = record
+    receipts.claim_for_request.side_effect = claim
+    real_update = repo.update_status
+
+    async def update_status(*args: Any, **kwargs: Any) -> Any:
+        order.append("update_status")
+        return await real_update(*args, **kwargs)
+
+    repo.update_status = update_status  # type: ignore[method-assign]
+
+    await _start(_service(_accepting_client(), receipts=receipts), repo, _billing())
+
+    assert order == ["record", "claim", "update_status"]
+    task = receipts.record.await_args.args[0]
+    assert task.external_task_id == "task-accepted-1"
+    assert task.provider is Provider.ALIBABA
+    assert task.token_cost == 40
+
+
+async def test_post_acceptance_failure_cancels_the_task_and_still_raises() -> None:
+    receipts = stub_receipts()
+    compensator = stub_compensator()
+    service = _service(_accepting_client(), receipts=receipts, compensator=compensator)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await _start(service, _UpdateStatusFails(), _billing())
+
+    compensator.cancel.assert_awaited_once_with("task-accepted-1")
+    receipts.resolve.assert_awaited_once()
+    assert receipts.resolve.await_args.kwargs["external_task_id"] == "task-accepted-1"
+    assert receipts.resolve.await_args.kwargs["status"].value == "cancelled"
+
+
+async def test_a_failing_cancel_is_swallowed_and_the_original_error_propagates() -> None:
+    receipts = stub_receipts()
+    compensator = stub_compensator()
+    compensator.cancel.side_effect = ModelStudioTransientError(
+        _classifier.timeout(provider_request_accepted=True)
+    )
+    service = _service(_accepting_client(), receipts=receipts, compensator=compensator)
+
+    with pytest.raises(RuntimeError, match="connection reset"):
+        await _start(service, _UpdateStatusFails(), _billing())
+
+    compensator.cancel.assert_awaited_once()
+    receipts.resolve.assert_not_awaited()  # left pending for the reconciler
+
+
+async def test_an_unrecorded_receipt_does_not_fail_the_request() -> None:
+    receipts = stub_receipts(recorded=False)
+    service = _service(_accepting_client(), receipts=receipts)
+
+    result = await _start(service, _FakeJobRepository(), _billing())
+
+    assert result.job.status == JobStatus.QUEUED
+    receipts.claim_for_request.assert_not_awaited()
+
+
+async def test_a_rejected_submission_never_touches_receipts() -> None:
+    receipts = stub_receipts()
+    compensator = stub_compensator()
+    client = MagicMock()
+    client.create_video_task = AsyncMock(
+        side_effect=ModelStudioAPIError(
+            _classifier.classify(code="InvalidParameter", provider_request_accepted=False)
+        )
+    )
+    service = _service(client, receipts=receipts, compensator=compensator)
+
+    with pytest.raises(ProviderSubmissionFailedError):
+        await _start(service, _FakeJobRepository(), _billing())
+
+    receipts.record.assert_not_awaited()
+    compensator.cancel.assert_not_awaited()

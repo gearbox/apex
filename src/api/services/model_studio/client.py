@@ -18,6 +18,7 @@ from src.api.services.generation.provider_failures import ProviderFailureKind
 from src.api.services.model_studio.errors import ModelStudioAPIError, ModelStudioTransientError
 from src.api.services.model_studio.failure_classifier import ModelStudioFailureClassifier
 from src.api.services.model_studio.types import (
+    ModelStudioCancelResult,
     ModelStudioTask,
     ModelStudioTaskRef,
     ModelStudioTaskStatus,
@@ -43,6 +44,7 @@ _TRANSIENT_KINDS = frozenset(
         ProviderFailureKind.PROVIDER_UNAVAILABLE,
     }
 )
+_CANCEL_NOT_CANCELLABLE_CODE = "UnsupportedOperation"
 _QUERY_ONLY_TRANSIENT_KINDS = frozenset({ProviderFailureKind.AUTHENTICATION_FAILED})
 """Transient for a task *query* only: on create, auth failures stay terminal and non-billable."""
 
@@ -226,6 +228,53 @@ class ModelStudioClient:
             usage=body.usage,
             request_id=body.request_id,
         )
+
+    async def cancel_task(self, task_id: str) -> ModelStudioCancelResult:
+        """Cancel a task; upstream only cancels ``PENDING`` ones (20 QPS per account).
+
+        The success body is a bare JSON string and is not decoded: a 2xx is the
+        answer. A refusal is recognised on the structured ``code`` alone, never
+        the message.
+
+        Raises:
+            ModelStudioTransientError: Rate limits, timeouts, upstream 5xx and
+                authentication failures; the caller retries later.
+            ModelStudioAPIError: Any other failure.
+        """
+        try:
+            response = await self._http().post(
+                f"{_TASK_PATH}{quote(task_id, safe='')}/cancel",
+                headers=self._headers(asynchronous=False),
+            )
+        except httpx.TimeoutException as exc:
+            raise ModelStudioTransientError(
+                self._classifier.timeout(
+                    provider_request_accepted=True, provider_request_id=task_id
+                )
+            ) from exc
+        except httpx.TransportError as exc:
+            raise ModelStudioTransientError(
+                self._classifier.unavailable(
+                    provider_request_accepted=True, provider_request_id=task_id
+                )
+            ) from exc
+
+        if response.status_code < 300:
+            logger.info("alibaba.task_cancelled", provider_job_id=task_id)
+            return ModelStudioCancelResult.CANCELLED
+
+        error = self._decode_error(response)
+        if response.status_code == 400 and error.code == _CANCEL_NOT_CANCELLABLE_CODE:
+            logger.info("alibaba.task_not_cancellable", provider_job_id=task_id)
+            return ModelStudioCancelResult.NOT_CANCELLABLE
+        failure = self._classifier.classify(
+            code=error.code,
+            http_status=response.status_code,
+            provider_request_accepted=True,
+            provider_request_id=task_id,
+        )
+        self._log_failure("alibaba.cancel_failed", failure)
+        raise self._query_error(failure)
 
     @staticmethod
     def _decode_error(response: httpx.Response) -> WireError:

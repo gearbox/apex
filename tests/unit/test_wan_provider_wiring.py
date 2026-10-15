@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import asyncio
 from types import SimpleNamespace
-from typing import Any
+from typing import TYPE_CHECKING, Any
 from unittest.mock import ANY, AsyncMock, MagicMock, patch
 
 import msgspec
@@ -26,6 +26,9 @@ from src.core.model_registry import MODEL_METADATA, VideoMeta
 from src.core.product_registry import PRODUCT_REGISTRY
 from src.workers.wan_video import WanVideoPollerCLI
 from tests.unit.helpers import hermetic_settings as _hermetic_settings
+
+if TYPE_CHECKING:
+    from collections.abc import Iterator
 
 pytestmark = pytest.mark.unit
 
@@ -268,6 +271,23 @@ def test_c21_the_api_key_is_a_secret() -> None:
     assert "sk-leaky" not in settings.model_dump_json()
 
 
+@pytest.fixture(autouse=True)
+def _stub_receipt_reconciler() -> Iterator[MagicMock]:
+    """The standalone body builds a receipt pool and reconciler; keep them out of the DB."""
+    reconciler_worker = AsyncMock()
+    with (
+        patch(
+            "src.api.services.video_jobs.cli.build_accepted_task_receipts",
+            return_value=(AsyncMock(), MagicMock()),
+        ),
+        patch(
+            "src.api.services.video_jobs.cli.AcceptedTaskReconcilerWorker",
+            return_value=reconciler_worker,
+        ),
+    ):
+        yield reconciler_worker
+
+
 # ---- C22 ---------------------------------------------------------------------------
 
 
@@ -316,12 +336,17 @@ async def test_c22_exits_1_when_r2_is_not_configured(cli_settings: MagicMock) ->
 
 
 async def test_c22_starts_the_alibaba_poller_and_cleans_up_on_shutdown(
-    cli_settings: MagicMock,
+    cli_settings: MagicMock, _stub_receipt_reconciler: MagicMock
 ) -> None:
     db_manager = AsyncMock()
     r2 = AsyncMock()
     worker = AsyncMock()
-    built = SimpleNamespace(service=MagicMock(), close=AsyncMock())
+    built = SimpleNamespace(
+        service=MagicMock(),
+        close=AsyncMock(),
+        compensator=MagicMock(),
+        receipt_reconciler_name="alibaba_video_receipts",
+    )
 
     runner = WanVideoPollerCLI(cli_settings)
     with (
@@ -355,6 +380,8 @@ async def test_c22_starts_the_alibaba_poller_and_cleans_up_on_shutdown(
     )
     worker.start.assert_awaited_once()
     worker.stop.assert_awaited_once()
+    _stub_receipt_reconciler.start.assert_awaited_once()
+    _stub_receipt_reconciler.stop.assert_awaited_once()
     built.close.assert_awaited_once()
     r2.close.assert_awaited_once()
     db_manager.close.assert_awaited_once()
@@ -378,6 +405,7 @@ async def test_wan_cli_builds_a_polling_service_from_settings(cli_settings: Magi
         ops_event_bus=MagicMock(),
         media_ingestor=MagicMock(),
         provider_video_ingestor=MagicMock(),
+        receipts=MagicMock(),
     )
     cli_settings.wan_video_max_poll_time = 1800
     cli_settings.wan_video_finalization_lease_seconds = 180
@@ -410,6 +438,7 @@ async def test_wan_cli_refuses_to_build_without_an_api_key(cli_settings: MagicMo
         ops_event_bus=MagicMock(),
         media_ingestor=MagicMock(),
         provider_video_ingestor=MagicMock(),
+        receipts=MagicMock(),
     )
 
     with pytest.raises(RuntimeError, match="MODEL_STUDIO_API_KEY"):
@@ -432,6 +461,7 @@ async def test_wan_materializer_uses_the_provider_video_ingestor_and_cap(
         ops_event_bus=MagicMock(),
         media_ingestor=upload_ingestor,
         provider_video_ingestor=provider_ingestor,
+        receipts=MagicMock(),
     )
     cli_settings.wan_video_max_poll_time = 1800
     cli_settings.wan_video_finalization_lease_seconds = 180
@@ -474,6 +504,7 @@ async def test_grok_materializer_uses_the_provider_video_ingestor_and_cap() -> N
         ops_event_bus=MagicMock(),
         media_ingestor=upload_ingestor,
         provider_video_ingestor=provider_ingestor,
+        receipts=MagicMock(),
     )
 
     with patch("src.workers.grok_video.GrokClient") as client_cls:

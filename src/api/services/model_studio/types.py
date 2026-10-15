@@ -19,6 +19,14 @@ class ModelStudioTaskStatus(StrEnum):
     """Upstream: the task does not exist or has expired (24 h)."""
 
 
+class ModelStudioCancelResult(StrEnum):
+    """Outcome of ``POST /api/v1/tasks/{task_id}/cancel``."""
+
+    CANCELLED = "cancelled"
+    NOT_CANCELLABLE = "not_cancellable"
+    """Upstream ``UnsupportedOperation``: only ``PENDING`` tasks can be cancelled."""
+
+
 class ModelStudioTaskRef(msgspec.Struct, frozen=True, kw_only=True):
     """Result of accepting a create call."""
 

@@ -17,6 +17,7 @@ from src.api.services.model_studio import (
     ModelStudioTaskStatus,
     ModelStudioTransientError,
 )
+from src.api.services.model_studio.types import ModelStudioCancelResult
 
 pytestmark = pytest.mark.unit
 
@@ -367,3 +368,85 @@ async def test_c17_a_failing_poll_leaks_neither_logs_nor_exceptions() -> None:
     _assert_clean(str(raised.value))
     _assert_clean(repr(raised.value.failure))
     await client.close()
+
+
+# ---- cancel_task (R3) -------------------------------------------------------------------
+
+
+async def test_cancel_posts_to_the_cancel_path_and_a_2xx_is_cancelled() -> None:
+    seen: dict[str, Any] = {}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        seen["method"] = request.method
+        seen["path"] = request.url.path
+        seen["auth"] = request.headers["authorization"]
+        # Upstream's success body is a bare JSON string, not an object.
+        return httpx.Response(200, json="45ac7f13-0000-0000-0000-e03c35068d83")
+
+    client = _client(handler)
+    await client.connect()
+    result = await client.cancel_task("t-1")
+    await client.close()
+
+    assert result is ModelStudioCancelResult.CANCELLED
+    assert seen == {
+        "method": "POST",
+        "path": "/api/v1/tasks/t-1/cancel",
+        "auth": f"Bearer {_KEY}",
+    }
+
+
+async def test_cancel_unsupported_operation_is_not_cancellable_by_code_not_message() -> None:
+    client = _client(
+        lambda _: _json(400, {"code": "UnsupportedOperation", "message": "some other wording"})
+    )
+    await client.connect()
+
+    assert await client.cancel_task("t-1") is ModelStudioCancelResult.NOT_CANCELLABLE
+    await client.close()
+
+
+async def test_cancel_400_with_another_code_goes_through_the_classifier() -> None:
+    client = _client(lambda _: _json(400, {"code": "InvalidParameter", "message": "bad"}))
+    await client.connect()
+
+    with pytest.raises(ModelStudioAPIError) as raised:
+        await client.cancel_task("t-1")
+    await client.close()
+
+    assert not isinstance(raised.value, ModelStudioTransientError)
+    assert raised.value.failure.kind is ProviderFailureKind.INVALID_REQUEST
+
+
+@pytest.mark.parametrize("status", [429, 503])
+async def test_cancel_throttling_and_5xx_are_transient(status: int) -> None:
+    client = _client(lambda _: _json(status, {"code": "Throttling", "message": "slow down"}))
+    await client.connect()
+
+    with pytest.raises(ModelStudioTransientError):
+        await client.cancel_task("t-1")
+    await client.close()
+
+
+async def test_cancel_transport_error_is_transient() -> None:
+    def handler(_: httpx.Request) -> httpx.Response:
+        raise httpx.ConnectError("boom")
+
+    client = _client(handler)
+    await client.connect()
+
+    with pytest.raises(ModelStudioTransientError):
+        await client.cancel_task("t-1")
+    await client.close()
+
+
+async def test_cancel_never_logs_the_api_key() -> None:
+    client = _client(lambda _: _json(400, {"code": "InvalidParameter", "message": _KEY}))
+    await client.connect()
+
+    with capture_logs() as logs, pytest.raises(ModelStudioAPIError) as raised:
+        await client.cancel_task("t-1")
+    await client.close()
+
+    assert _KEY not in json.dumps(logs, default=str)
+    assert _KEY not in str(raised.value)

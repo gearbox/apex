@@ -8,6 +8,7 @@ import httpx
 
 from src.api.services.generation.provider_billing_policy import DEFAULT_PROVIDER_BILLING_POLICIES
 from src.api.services.grok.factory import build_grok_job_service
+from tests.video_receipt_support import stub_receipts
 
 if TYPE_CHECKING:
     from src.api.services.billing import BillingService
@@ -18,6 +19,7 @@ if TYPE_CHECKING:
     from src.api.services.media_ingest import MediaIngestor
     from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.storage import R2StorageService
+    from src.api.services.video_jobs.receipts import AcceptedTaskReceipts
 
 
 def make_grok_job_service(
@@ -34,6 +36,7 @@ def make_grok_job_service(
     provider_video_ingestor: MediaIngestor | None = None,
     max_output_bytes: int = 200 * 1024 * 1024,
     billing_policy: ProviderBillingPolicyRegistry | None = None,
+    receipts: AcceptedTaskReceipts | None = None,
 ) -> GrokJobService:
     """Build a ``GrokJobService`` (and its materializer) from plain values."""
     return build_grok_job_service(
@@ -49,6 +52,7 @@ def make_grok_job_service(
         retention_days=retention_days,
         max_poll_time=max_poll_time,
         finalization_lease_seconds=finalization_lease_seconds,
+        receipts=receipts or stub_receipts(),
     )
 
 

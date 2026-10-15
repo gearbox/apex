@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.api.services.grok.job_service import GrokJobService
+from src.api.services.grok.orphan_compensator import GrokOrphanCompensator
 from src.api.services.media_ingest.profile_log import VideoProfileOrigin
 from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
 from src.api.services.video_jobs.transition import make_transition_service_factory
@@ -20,6 +21,7 @@ if TYPE_CHECKING:
     from src.api.services.media_ingest import MediaIngestor
     from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.storage import R2StorageService
+    from src.api.services.video_jobs.receipts import AcceptedTaskReceipts
 
 
 def build_grok_job_service(
@@ -36,6 +38,7 @@ def build_grok_job_service(
     retention_days: int,
     max_poll_time: int,
     finalization_lease_seconds: int,
+    receipts: AcceptedTaskReceipts,
 ) -> GrokJobService:
     """Build the Grok job service and the materializer that finishes its videos.
 
@@ -69,6 +72,8 @@ def build_grok_job_service(
         storage=storage,
         retention_days=retention_days,
         materializer=materializer,
+        receipts=receipts,
+        compensator=GrokOrphanCompensator(grok_client),
         billing_service=billing_service,
         event_bus=event_bus,
         ops_event_bus=ops_event_bus,

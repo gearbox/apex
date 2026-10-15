@@ -48,6 +48,7 @@ from src.core.uid import new_id
 from src.db.models.billing import TokenAccount, TokenTransaction
 from src.db.models.storage import GenerationJob, GenerationMaterializationAttempt, GenerationOutput
 from src.db.models.user import User
+from tests.video_receipt_support import stub_compensator, stub_receipts
 
 pytestmark = pytest.mark.asyncio
 
@@ -376,6 +377,8 @@ def _wan_service(
         client,
         materializer,
         VideoDownloadClient(),
+        receipts=stub_receipts(),
+        compensator=stub_compensator(),
         billing_service=BillingService(),
         billing_policy=policy
         or ProviderBillingPolicyRegistry.from_settings(Settings.model_construct()),

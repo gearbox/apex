@@ -22,6 +22,11 @@ from src.api.services.media_ingest.factory import (
 )
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
+from src.api.services.video_jobs.receipts import build_accepted_task_receipts
+from src.api.services.video_jobs.reconciler import (
+    AcceptedTaskReconciler,
+    AcceptedTaskReconcilerWorker,
+)
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.core.redis import get_operational_redis_client
 from src.db import init_db
@@ -30,7 +35,8 @@ if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable
 
     from src.api.services.media_ingest import MediaIngestor
-    from src.api.services.video_jobs.protocol import AsyncVideoJobService
+    from src.api.services.video_jobs.protocol import AsyncVideoJobService, OrphanTaskCompensator
+    from src.api.services.video_jobs.receipts import AcceptedTaskReceipts
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -48,6 +54,8 @@ class VideoWorkerDeps:
     media_ingestor: MediaIngestor
     provider_video_ingestor: MediaIngestor
     """Prepares provider-generated videos under ``MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB``."""
+    receipts: AcceptedTaskReceipts
+    """Accepted-task receipt store on the dedicated receipt pool."""
 
 
 @dataclasses.dataclass(frozen=True, slots=True)
@@ -56,6 +64,10 @@ class BuiltVideoService:
 
     service: AsyncVideoJobService
     close: Callable[[], Awaitable[None]]
+    compensator: OrphanTaskCompensator
+    """The provider's cancel/observe adapter, driven by the receipt reconciler."""
+    receipt_reconciler_name: str
+    """Receipt reconciler worker (and leader-lease) name."""
 
 
 async def run_video_worker(
@@ -137,6 +149,7 @@ async def run_video_worker(
     # no-ops, so standalone polling remains safe without Redis.
     event_bus = EventBus(enabled=settings.redis_url is not None)
     ops_event_bus = OpsEventBus(enabled=settings.redis_url is not None)
+    receipt_db, receipts = build_accepted_task_receipts(settings, ops_event_bus)
 
     # One admission budget for the process: both ingest services share the semaphores.
     video_slots = asyncio.Semaphore(settings.media_ingest_video_concurrency)
@@ -155,6 +168,7 @@ async def run_video_worker(
             provider_video_ingestor=build_provider_video_ingest_service(
                 settings, video_slots=video_slots, image_slots=image_slots
             ),
+            receipts=receipts,
         )
     )
     logger.info("video_worker.job_service_initialized", worker=worker_name)
@@ -174,6 +188,21 @@ async def run_video_worker(
     )
     await worker.start()
 
+    # Orphan reconciliation shares the lease with an in-process twin, like the poller.
+    reconciler_worker = AcceptedTaskReconcilerWorker(
+        name=built.receipt_reconciler_name,
+        reconciler=AcceptedTaskReconciler(
+            receipt_db,
+            built.compensator,
+            ops_event_bus,
+            grace_seconds=settings.video_task_receipt_grace_seconds,
+        ),
+        interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
+        redis_enabled=settings.redis_url is not None,
+        redis_client_factory=get_operational_redis_client,
+    )
+    await reconciler_worker.start()
+
     logger.info(
         "video_worker.running",
         worker=worker_name,
@@ -187,9 +216,11 @@ async def run_video_worker(
 
     # Cleanup
     logger.info("video_worker.shutting_down", worker=worker_name)
+    await reconciler_worker.stop()
     await worker.stop()
     await built.close()
     await r2_storage.close()
+    await receipt_db.close()
     await db_manager.close()
     if settings.redis_url:
         from src.core.redis import close_redis_pool

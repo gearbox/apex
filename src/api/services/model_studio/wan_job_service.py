@@ -30,6 +30,11 @@ from src.api.services.model_studio.errors import ModelStudioAPIError, ModelStudi
 from src.api.services.model_studio.failure_classifier import ModelStudioFailureClassifier
 from src.api.services.model_studio.types import ModelStudioTask, ModelStudioTaskStatus
 from src.api.services.video_jobs.outcome import RemoteVideoResult, VideoPollOutcome
+from src.api.services.video_jobs.receipts import (
+    AcceptedTask,
+    cancel_orphan_immediately,
+    record_acceptance,
+)
 from src.api.services.video_jobs.settlement import settle_video_poll_outcome
 from src.api.services.video_jobs.transition import make_transition_service_factory
 from src.core.enums import JobStatus, Provider, VideoPollStatus
@@ -50,6 +55,8 @@ if TYPE_CHECKING:
     from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.video_jobs.download import VideoDownloadClient
     from src.api.services.video_jobs.materializer import RemoteVideoMaterializer
+    from src.api.services.video_jobs.protocol import OrphanTaskCompensator
+    from src.api.services.video_jobs.receipts import AcceptedTaskReceipts
     from src.core.enums import AspectRatio, GenerationType, ModelType, VideoResolution
     from src.db.models import GenerationJob
 
@@ -75,6 +82,7 @@ class WanJobService:
 
     provider: ClassVar[Provider] = Provider.ALIBABA
     VIDEO_POLLER_NAME: ClassVar[str] = "alibaba_video_poller"
+    RECEIPT_RECONCILER_NAME: ClassVar[str] = "alibaba_video_receipts"
     transient_poll_errors: ClassVar[tuple[type[Exception], ...]] = (ModelStudioTransientError,)
     # Model Studio reports no progress; we do not invent a percentage.
     running_progress_pct: ClassVar[int | None] = None
@@ -85,6 +93,8 @@ class WanJobService:
         materializer: RemoteVideoMaterializer,
         download_client: VideoDownloadClient,
         *,
+        receipts: AcceptedTaskReceipts,
+        compensator: OrphanTaskCompensator,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -97,6 +107,8 @@ class WanJobService:
             client: Model Studio REST client (already ``connect()``-ed by the owner).
             materializer: Shared completion path for finished videos.
             download_client: Owns the credential-free HTTP client the materializer uses.
+            receipts: Accepted-task receipt store (see ``video_jobs.receipts``).
+            compensator: Cancels a task whose post-acceptance persistence failed.
             billing_service: Ledger service for settlement transitions.
             event_bus: Real-time event bus.
             ops_event_bus: Ops event bus.
@@ -106,6 +118,8 @@ class WanJobService:
         self._client = client
         self._materializer = materializer
         self._download = download_client
+        self._receipts = receipts
+        self._compensator = compensator
         self._billing = billing_service
         self._max_poll_time = max_poll_time
         self._billing_policy = billing_policy or DEFAULT_PROVIDER_BILLING_POLICIES
@@ -153,6 +167,10 @@ class WanJobService:
         QUEUED with the task id. Provider failures are raised as
         ``ProviderSubmissionFailedError`` for the orchestrator to settle.
 
+        Once the provider accepts, a receipt is recorded and claimed before any
+        further write; if a later write fails the task is cancelled at once and
+        the original error propagates (the request transaction rolls back).
+
         Args:
             payload: The prebuilt request body (see ``build_wan_video_payload``).
             aspect_ratio: The ratio actually sent upstream (see
@@ -187,6 +205,8 @@ class WanJobService:
         reservation_created = False
         provider_attempted = False
         provider_accepted = False
+        accepted: AcceptedTask | None = None
+        receipt_recorded = False
         try:
             try:
                 reserve_result = await billing_service.check_and_reserve(
@@ -220,6 +240,16 @@ class WanJobService:
             provider_attempted = True
             task = await self._client.create_video_task(payload)
             provider_accepted = True
+            accepted = AcceptedTask(
+                provider=Provider.ALIBABA,
+                external_task_id=task.task_id,
+                job_id=job_id,
+                user_id=user_id,
+                product_id=product_id,
+                model=model.value,
+                token_cost=token_cost,
+            )
+            receipt_recorded = await record_acceptance(self._receipts, session, accepted)
 
             job = await job_repo.update_status(
                 job_id,
@@ -263,6 +293,19 @@ class WanJobService:
                     user_id=user_id,
                     product_id=product_id,
                     reserve_event=reserve_event,
+                )
+            if provider_accepted and accepted is not None:
+                logger.exception(
+                    "alibaba.post_acceptance_persistence_failed",
+                    job_id=str(job_id),
+                    task_id=accepted.external_task_id,
+                    receipt_recorded=receipt_recorded,
+                )
+                await cancel_orphan_immediately(
+                    receipts=self._receipts,
+                    compensator=self._compensator,
+                    session=session,
+                    task=accepted,
                 )
             raise
 
