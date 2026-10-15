@@ -704,6 +704,8 @@ Note:     Revokes ALL refresh tokens, plus all live access tokens and the conten
 
 Single endpoint for all generation types and providers.
 
+> **Async video (Wan, Grok):** a `500` after the provider has already accepted the task is reconciled server-side (the task is cancelled or left to finish); the user is **not** charged and the client contract is unchanged. See `docs/contracts/wan-video-contract.md` §8.
+
 ```
 Request: {
   prompt: string (1–4096 chars),
@@ -3123,8 +3125,10 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 | `feedback.submitted` | product | A user submitted an in-product problem report (§12b). The message carries the report id, user id, category and optional job id only — never the text |
+| `video_task.orphaned` | product | An async video task (Wan/Grok) was accepted upstream but its request failed before commit. It was `cancelled` or left to finish (`absorbed`); the user was **not** charged. IDs and enums only. An absorbed task may still bill the provider account — audit it by task id |
+| `video_task.receipt_unrecorded` | product | A video task was accepted upstream but its receipt could not be written. The task id is in the alert — cancel or audit it by hand |
 
-- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`, `feedback.submitted`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`, `feedback.submitted`, `video_task.orphaned`, `video_task.receipt_unrecorded`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
 - **Platform-scoped** classes (`provider_authentication.failed`, `health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
 - `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`); `provider_authentication.failed` ships the same way in migration `034` (kept separate from the `033` migration that introduced the class's schema/mapping, because Alembic never re-runs an already-applied revision — appending the seed to `033` would silently skip any environment already at `033`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` and `provider_authentication.failed` have no second, preference-independent channel (no health checker watches them), which is why seeding — not just a release note — was judged necessary there.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
@@ -3436,6 +3440,8 @@ Values: `"billing_adjust"`
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup failed |
 | `feedback.submitted` | product | A user submitted an in-product problem report |
+| `video_task.orphaned` | product | A video task accepted upstream has no job (request failed after acceptance); cancelled or absorbed, user not charged |
+| `video_task.receipt_unrecorded` | product | A video task was accepted upstream but its receipt could not be written (task id in the alert) |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 

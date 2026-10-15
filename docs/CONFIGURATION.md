@@ -277,6 +277,28 @@ prices, then enable the model in admin. Frontend contract: `docs/contracts/wan-v
 Wan and Grok poll independently: each has its own worker (`alibaba_video_poller` /
 `grok_video_poller`), leader lease, interval and concurrency limit.
 
+#### Accepted-task receipts (Wan + Grok video)
+
+A video task a provider accepted whose request later failed is recorded on its own small
+connection pool and cancelled or absorbed (never charged) by a per-provider reconciler
+(`alibaba_video_receipts` / `grok_video_receipts`). See `docs/contracts/wan-video-contract.md` §8.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `VIDEO_TASK_RECEIPT_GRACE_SECONDS` | `60` | `int (10–3600)` | Minimum receipt age before the reconciler touches it. Only covers the commit→`DELETE` gap; the row lock protects slow requests. |
+| `VIDEO_TASK_RECEIPT_RECONCILE_INTERVAL_SECONDS` | `30` | `int (5–3600)` | Seconds between reconciler ticks, per provider. |
+| `VIDEO_TASK_RECEIPT_RECORD_ATTEMPTS` | `3` | `int (1–5)` | Tries to write a receipt before the `video_task.receipt_unrecorded` ops alert. |
+| `VIDEO_TASK_RECEIPT_DB_POOL_SIZE` | `2` | `int (1–10)` | Dedicated receipt pool; separate from `DB_POOL_SIZE`. Counts against PostgreSQL `max_connections` per process. |
+| `VIDEO_TASK_RECEIPT_DB_MAX_OVERFLOW` | `2` | `int (0–10)` | Overflow connections for the receipt pool. |
+| `VIDEO_TASK_RECEIPT_DB_POOL_TIMEOUT_SECONDS` | `2` | `int (1–30)` | Wait for a receipt-pool connection before retrying. |
+
+**Runbook — `video_task.receipt_unrecorded`:** the alert carries the provider and task id of a
+task that is accepted upstream but has no receipt (the database was unreachable on the receipt
+pool). Nothing will reconcile it. Cancel it by hand (Model Studio console → task → cancel, only
+possible while `PENDING`) or audit its cost by task id; the user was not charged.
+**`video_task.orphaned` with `resolution=absorbed`:** the task could not be cancelled and may
+still bill the provider account — look up its cost by task id in the provider console.
+
 ---
 
 ### Content & Upload Limits

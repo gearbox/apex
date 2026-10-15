@@ -12,7 +12,7 @@
 - Five modes: `t2v`, `i2v`, `flf2v`, `v2v` (edit **or** extend) and the new **`r2v`** (reference images → video).
 - Same `POST /v1/generate` as every other model. Jobs are asynchronous: the response is `queued`, and the job completes through the normal job status / SSE flow, typically in **1–5 minutes**.
 - Everything model-specific is discoverable on `GET /v1/providers` (§1). Build the UI from that payload, not from this document's numbers.
-- Wan is **off until an admin enables it** and prices exist (§8). Until then it is simply absent from `GET /v1/providers`.
+- Wan is **off until an admin enables it** and prices exist (§9). Until then it is simply absent from `GET /v1/providers`.
 
 ---
 
@@ -146,7 +146,7 @@ Standard envelope; the codes you will see for Wan:
 | `validation_error` | 400 | Duration, resolution or aspect ratio outside what the model supports (including `aspect_ratio` sent in an input-anchored mode: `i2v`, `flf2v`, `v2v`), or a `seed` outside `seed_range` (including `-1`). |
 | `validation_error` | 422 | `source_media` problems: wrong count/kind, a source video of unknown duration, a source container not accepted (`video.input_video.formats`), a source over `max_bytes`, shorter than `min_duration_ms` (1 s) or longer than `max_duration_ms` (15 s), or over the 30 s combined limit. |
 | `unsupported_generation_parameter` | 422 | `audio` or `prompt_extend` sent to a model that does not list it in `video.supported_parameters`; the message names the parameter. |
-| `price_not_found` | 404 | No pricing rule for this model/resolution yet (§8). |
+| `price_not_found` | 404 | No pricing rule for this model/resolution yet (§9). |
 | `provider_invalid_request` | 400 | The provider rejected the request shape. |
 | `provider_moderation_rejected` | 422 | Content rejected by the provider's safety system. **Refunded** (the provider only bills successful generations). |
 | `provider_rate_limited` | 429 | Provider throttling; retry later. |
@@ -164,7 +164,30 @@ An authentication or permission failure while *checking* an accepted job (rotate
 
 The quote assumes the requested `duration`. An edit can finish near the source length, so the provider's billed seconds can differ from the quote; the backend only records this for now — there is no automatic extra charge or refund yet.
 
-## 8. Rollout order (admins)
+## 8. Accepted-task receipts (backend behaviour, no wire change)
+
+A provider accepts a Wan task **inside the still-open request transaction**; nothing is durable until the route commits. A failure in between (the `QUEUED` write, the job-source write, idempotency completion, the commit itself) rolls back the job row and the reservation while the task keeps running upstream. The client sees `500 Generation failed due to an internal error.` — and **is not charged**: no ledger entry survives, and the backend never adopts-and-charges an orphan.
+
+Mechanism (shared with Grok video):
+
+1. Right after acceptance the task id is inserted into `accepted_task_receipts` and **committed on a dedicated two-connection pool** (never the request pool).
+2. The request transaction then `DELETE`s that row. The delete holds the row lock until the request ends: a commit removes the receipt atomically with the job; a rollback brings it back, unlocked — an orphan by construction.
+3. Immediately, if a job-service write failed after acceptance, the task is cancelled in-process (best chance it is still `PENDING`).
+4. A per-provider reconciler (`alibaba_video_receipts`, `grok_video_receipts`) reads orphans with `FOR UPDATE SKIP LOCKED` — it can never touch an in-flight request's receipt — and **observes first, then acts**.
+
+| Receipt status | Meaning |
+|---|---|
+| `pending` | Recorded. Either an in-flight request still holds its lock, or it is an orphan not yet reconciled. |
+| `cancelled` | Upstream `CANCELED` (cancelled immediately, or by the reconciler while `PENDING`). |
+| `absorbed` | Not cancellable (running or finished upstream, Model Studio refused with `UnsupportedOperation`, or the provider has no cancel — Grok). Left to finish; `upstream_status` is recorded. |
+
+Model Studio only cancels `PENDING` tasks (`POST /api/v1/tasks/{task_id}/cancel`; any other status is HTTP 400 `UnsupportedOperation`). xAI documents no cancel for video requests, so Grok orphans are always `absorbed`.
+
+Ops alerts (Telegram, product-scoped, IDs only): `video_task.orphaned` once per receipt on its first resolution (`cancelled` or `absorbed`; an absorbed task may still bill the provider account — audit it by task id in the provider console) and `video_task.receipt_unrecorded` when the receipt itself could not be written (the task id is in the alert).
+
+Frontend: nothing changes. A retry with the same `Idempotency-Key` after such a 500 submits a fresh task, as before.
+
+## 9. Rollout order (admins)
 
 1. Create the pricing rules: `POST /v1/admin/pricing` with `provider: "alibaba"`, `model: "wan3.0-video"`, the `generation_type`, `video_resolution` and `per_second_token_cost` taken from the Model Studio console. Pricing has **no `generation_type` wildcard**, so a rule is needed for every combination: **5 modes (`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) × 3 resolutions (`480p`, `720p`, `1080p`) = 15 rules**. A missing combination fails only that mode/resolution with `price_not_found`. Per-second or resolution-specific rules must target a video mode, and every rule needs `token_cost > 0` or `per_second_token_cost > 0` (`422 invalid_pricing_rule` otherwise).
 2. Only then enable the model: `PATCH /v1/admin/models/wan3.0-video`.
