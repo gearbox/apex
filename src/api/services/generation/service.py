@@ -13,6 +13,10 @@ from src.api.services.billing_errors import BillingError
 from src.api.services.bundle_index import BundleIndexService, BundleNotFoundError
 from src.api.services.generation.generation_modes import resolve_generation_modes
 from src.api.services.generation.provider_failures import ProviderSubmissionFailedError
+from src.api.services.generation.public_errors import (
+    INTERNAL_FAILURE_CODE,
+    INTERNAL_FAILURE_MESSAGE,
+)
 from src.api.services.generation.request_validation import validate_seed
 from src.api.services.generation.source_media import (
     ResolvedSourceMedia,
@@ -473,6 +477,7 @@ class GenerationService:
 
         job: GenerationJob | None = None
         reserve_event: BalanceEvent | None = None
+        receipt_held = False
         try:
             submit_result = await provider.submit(
                 request,
@@ -489,6 +494,7 @@ class GenerationService:
             )
             job = submit_result.job
             reserve_event = submit_result.balance_event
+            receipt_held = submit_result.receipt_held
             if resolved_source_media:
                 await GenerationJobSourceRepository(session).create_many(
                     job_id=job.id,
@@ -556,18 +562,26 @@ class GenerationService:
             # already written, then re-raise unchanged so the route surfaces
             # the deliberate message.
             await self._resolve_submit_failure(
-                job, session=session, product_id=product_id, reserve_event=reserve_event
+                job,
+                session=session,
+                product_id=product_id,
+                reserve_event=reserve_event,
+                receipt_held=receipt_held,
             )
             raise
         except Exception as exc:
             logger.exception("generation.submit_failed", model=request.model.value)
             await self._resolve_submit_failure(
-                job, session=session, product_id=product_id, reserve_event=reserve_event
+                job,
+                session=session,
+                product_id=product_id,
+                reserve_event=reserve_event,
+                receipt_held=receipt_held,
             )
             # Any other exception (asyncpg errors, httpx errors carrying tunnel
             # hostnames, raw provider payload fragments, ...) MUST NOT reach
             # the client — only this fixed message may.
-            raise GenerationError("Generation failed due to an internal error.") from exc
+            raise GenerationError(INTERNAL_FAILURE_MESSAGE) from exc
 
         async def callback() -> None:
             await self._publish_generation_created(
@@ -648,42 +662,69 @@ class GenerationService:
         *,
         session: AsyncSession,
         product_id: str,
+        receipt_held: bool,
         reserve_event: BalanceEvent | None = None,
     ) -> None:
-        """Resolve the DB transaction after a failed ``provider.submit()`` call.
+        """Resolve the DB transaction after a failed step following ``provider.submit()``.
 
-        ``job is None`` ⇒ no external side effect is durable yet — the job
-        row and its debit, if either was written, are still uncommitted in
-        this same transaction. Roll back rather than committing an orphaned
-        charge for a job that never ran. ``reserve_event`` is never published
-        in this branch (nothing committed).
+        Three cases, so a failed request never leaves a live job behind (the
+        client got a 500, so nothing may keep running for free):
 
-        ``job is not None`` ⇒ the job row (and its debit) were already
-        written by the provider. Refund and commit so the ledger nets to
-        zero and the failed job stays visible in the user's history. A
-        refund failure is treated the same as "nothing durable" — roll back
-        rather than leave an uncovered debit. On success, both the original
-        reserve's event and the refund's event describe rows that just
-        committed together in this one transaction — publish both.
+        * ``job is None`` (or the job has no debit) ⇒ nothing durable yet. Roll
+          back rather than commit an orphaned charge for a job that never ran.
+        * ``receipt_held`` ⇒ the provider accepted an async task and this
+          transaction holds its accepted-task receipt. Roll back: the job, its
+          debit and the receipt delete all vanish, the receipt is restored, and
+          the reconciler cancels or absorbs the task and never charges.
+        * otherwise (Aisha, Grok image, or a receipt that failed to record) ⇒ the
+          job row is the only record of the work. Fail it (``internal_error``) and
+          refund in one transaction, then commit: it stays visible in history as a
+          terminal job and is never polled. A job that is already terminal (a
+          completed Grok image) cannot transition, so it is rolled back like the
+          first case instead of leaving a charged job beside a 500. If the
+          transition itself fails, roll back as well.
+
+        ``reserve_event`` is published only for a settlement that committed (the
+        transition service publishes it with the refund); nothing is published
+        when this method rolls back.
         """
         if job is None or job.debit_transaction_id is None:
             await session.rollback()
             return
-        try:
-            refund_result = await self._billing.refund(
-                job.id,
-                description="Generation failed — tokens refunded",
-                session=session,
-                product_id=product_id,
+        if receipt_held:
+            logger.warning(
+                "generation.post_submit_failure_receipt_restored",
+                job_id=str(job.id),
+                provider=str(job.provider),
             )
-        except Exception:
-            logger.exception("generation.refund_failed", job_id=str(job.id))
             await session.rollback()
             return
-        await session.commit()
-        if self._event_bus is not None:
-            await self._event_bus.publish_balance(reserve_event)
-            await self._event_bus.publish_balance(refund_result.event)
+        job_id = job.id
+        transition_service = self._make_transition_service(session)
+        try:
+            _, did_transition = await transition_service.transition_to_failed(
+                job_id,
+                public_error_message=INTERNAL_FAILURE_MESSAGE,
+                failure_code=INTERNAL_FAILURE_CODE,
+                refund=True,
+                product_id=product_id,
+                reserve_event=reserve_event,
+                commit=False,
+            )
+            if not did_transition:
+                await session.rollback()
+                return
+            publication = transition_service.deferred_failure
+            await session.commit()
+        except Exception:
+            logger.exception("generation.post_submit_failure_settle_failed", job_id=str(job_id))
+            await session.rollback()
+            return
+        if publication is not None:
+            try:
+                await transition_service.publish_deferred_failure(publication)
+            except Exception:
+                logger.exception("generation.post_commit_publish_failed", job_id=str(job_id))
 
     @staticmethod
     def _validate_source_cardinality(

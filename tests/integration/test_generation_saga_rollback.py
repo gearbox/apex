@@ -128,6 +128,57 @@ class _WriteThenFailProvider:
         raise ProviderResponseError("The generation backend returned an unexpected response.")
 
 
+class _WriteThenReturnProvider(_WriteThenFailProvider):
+    """Writes a queued job + debit and *returns* — the failure comes after ``submit``."""
+
+    async def submit(  # type: ignore[override]
+        self,
+        request: UnifiedGenerationRequest,
+        *,
+        user_id: UUID,
+        session: AsyncSession,
+        billing_service: BillingService,
+        account_id: UUID,
+        token_cost: int,
+        product_id: str,
+        **_: object,
+    ) -> ProviderSubmitResult:
+        from src.api.services.generation.base import ProviderSubmitResult
+
+        job_id = new_id()
+        self.written_job_id = job_id
+        job = await JobRepository(session).create(
+            id=job_id,
+            user_id=user_id,
+            name="Test job",
+            prompt=request.prompt,
+            generation_type=request.generation_type,
+            status=JobStatus.QUEUED,
+            provider=Provider.AISHA,
+            model=request.model.value,
+            product_id=product_id,
+            gpu_session_id=self._gpu_session_id,
+        )
+        reserve = await billing_service.check_and_reserve(
+            account_id,
+            token_cost,
+            job_id,
+            metadata={"type": "generation", "provider": "aisha"},
+            description="Generation charge",
+            session=session,
+            product_id=product_id,
+        )
+        job.token_cost = token_cost
+        job.debit_transaction_id = reserve.txn.id
+        await session.flush()
+        return ProviderSubmitResult(
+            receipt_held=False,
+            job=job,
+            balance_after=reserve.txn.balance_after,
+            balance_event=reserve.event,
+        )
+
+
 def _make_enabled_model_mock() -> MagicMock:
     record = MagicMock()
     record.is_enabled = True
@@ -265,5 +316,87 @@ async def test_provider_raising_after_job_and_debit_write_rolls_back_fully(
             # refund transaction needed because nothing was ever committed).
             final_balance = await billing.get_balance(account.id, session=verify_session)
             assert final_balance == 1000
+    finally:
+        await _cleanup(db_engine, account_id=account.id, user_id=user.id)
+
+
+async def test_failure_after_submit_commits_a_failed_refunded_job_that_is_never_polled(
+    db_engine: AsyncEngine,
+) -> None:
+    """P1-3: ``submit`` returned (job queued + debit) and the next step failed.
+
+    The client gets a 500, so the job must not stay live: it is committed
+    ``failed`` with the internal-error code, refunded exactly once, and the
+    Aisha poller never sees it.
+    """
+    user, account, gpu_session = await _seed_user_and_account(db_engine, balance=1000)
+    provider = _WriteThenReturnProvider(gpu_session_id=gpu_session.id)
+    pricing = AsyncMock()
+    pricing.quote = AsyncMock(return_value=50)
+    billing = BillingService()
+    service = GenerationService(
+        providers={Provider.AISHA: provider},
+        billing_service=billing,
+        pricing_service=pricing,
+        rate_limiter=MagicMock(spec=ModelRateLimiter),
+    )
+    request = UnifiedGenerationRequest(
+        prompt="A cat",
+        generation_type=GenerationType.T2I,
+        model=ModelType.AISHA_IMAGE,
+        aspect_ratio=AspectRatio.RATIO_1_1,
+    )
+
+    try:
+        session = AsyncSession(bind=db_engine, expire_on_commit=False)
+        real_commit = session.commit
+        calls = 0
+
+        async def flaky_commit() -> None:
+            nonlocal calls
+            calls += 1
+            if calls == 1:
+                raise RuntimeError("db connection lost")  # the transaction is still open
+            await real_commit()
+
+        try:
+            with (
+                patch(
+                    "src.api.services.generation.service.GenerationModelRepository.get_by_model_key",
+                    new=AsyncMock(return_value=_make_enabled_model_mock()),
+                ),
+                patch(
+                    "src.db.repositories.user.UserRepository.get_user",
+                    new=AsyncMock(return_value=MagicMock(age_verified_at=datetime.now(UTC))),
+                ),
+                patch.object(session, "commit", new=flaky_commit),
+                pytest.raises(GenerationError) as exc_info,
+            ):
+                await service.generate(
+                    request, user_id=user.id, session=session, product_config=VEX_CONFIG
+                )
+        finally:
+            await session.close()
+
+        assert str(exc_info.value) == "Generation failed due to an internal error."
+        assert provider.written_job_id is not None
+        async with AsyncSession(bind=db_engine, expire_on_commit=False) as verify:
+            job = await verify.get(GenerationJob, provider.written_job_id)
+            assert job is not None
+            assert job.status == JobStatus.FAILED.value
+            assert job.failure_code == "internal_error"
+            assert await billing.get_balance(account.id, session=verify) == 1000
+            kinds = (
+                await verify.execute(
+                    text(
+                        "SELECT transaction_type FROM token_transactions "
+                        "WHERE account_id = :a ORDER BY created_at, id"
+                    ),
+                    {"a": account.id},
+                )
+            ).scalars()
+            assert sorted(kinds) == ["credit", "debit", "refund"]
+            polled = await JobRepository(verify).list_aisha_jobs_for_polling()
+            assert provider.written_job_id not in {j.id for j in polled}
     finally:
         await _cleanup(db_engine, account_id=account.id, user_id=user.id)

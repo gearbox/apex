@@ -309,7 +309,9 @@ def _make_mock_provider() -> MagicMock:
     job.name = "Test"
     job.created_at = datetime.now(UTC)
     provider.submit = AsyncMock(
-        return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=100, balance_event=None
+        )
     )
     return provider
 
@@ -958,11 +960,11 @@ class TestGenerationServiceGenerate:
         assert "external_request_id" not in message
         assert "DETAIL" not in message
 
-    async def test_commit_failure_after_submit_refunds_and_rolls_back(self) -> None:
-        """If provider.submit() succeeds (job + debit written) but the
-        subsequent session.commit() fails, the orchestrator must refund the
-        job and commit that compensating transaction — never leave a debit
-        on the ledger with no refund."""
+    @staticmethod
+    def _post_submit_failure_service(
+        *, receipt_held: bool, did_transition: bool = True
+    ) -> tuple[GenerationService, AsyncMock, MagicMock, MagicMock]:
+        """A service whose ``submit`` succeeds and whose first commit then fails."""
         job = MagicMock()
         job.id = uuid4()
         job.status = JobStatus.QUEUED.value
@@ -972,14 +974,14 @@ class TestGenerationServiceGenerate:
         mock_provider = MagicMock()
         mock_provider.validate = MagicMock()
         mock_provider.submit = AsyncMock(
-            return_value=ProviderSubmitResult(job=job, balance_after=100, balance_event=None)
+            return_value=ProviderSubmitResult(
+                receipt_held=receipt_held, job=job, balance_after=100, balance_event=None
+            )
         )
 
         billing = AsyncMock()
         billing.resolve_account_for_user = AsyncMock(return_value=MagicMock(id=uuid4()))
         billing.assert_sufficient_balance = AsyncMock()
-        billing.refund = AsyncMock(return_value=MagicMock(event=None))
-
         pricing = AsyncMock()
         pricing.quote = AsyncMock(return_value=50)
 
@@ -988,13 +990,23 @@ class TestGenerationServiceGenerate:
         # commit inside the failure-handling path should still succeed.
         session.commit = AsyncMock(side_effect=[Exception("db connection lost"), None])
 
+        transition = MagicMock()
+        transition.transition_to_failed = AsyncMock(return_value=(job, did_transition))
+        transition.deferred_failure = MagicMock()
+        transition.publish_deferred_failure = AsyncMock()
+
         service = GenerationService(
             providers={Provider.GROK: mock_provider},
             billing_service=billing,
             pricing_service=pricing,
             rate_limiter=MagicMock(spec=ModelRateLimiter),
+            transition_service_factory=lambda _session: transition,
         )
+        return service, session, transition, billing
 
+    async def _generate_expecting_internal_error(
+        self, service: GenerationService, session: AsyncMock
+    ) -> None:
         request = UnifiedGenerationRequest(
             prompt="A cat",
             generation_type=GenerationType.T2I,
@@ -1013,11 +1025,49 @@ class TestGenerationServiceGenerate:
                 session=session,
                 product_config=VEX_CONFIG,
             )
-
         assert str(exc_info.value) == "Generation failed due to an internal error."
-        billing.refund.assert_awaited_once()
-        assert billing.refund.await_args.args[0] == job.id
+
+    async def test_commit_failure_after_submit_fails_and_refunds_the_job(self) -> None:
+        """If provider.submit() succeeds (job + debit written) but the subsequent
+        commit fails and no receipt is held, the job must end terminal (failed,
+        refunded) — never a live job beside a 500, never a debit without a refund."""
+        service, session, transition, billing = self._post_submit_failure_service(
+            receipt_held=False
+        )
+
+        await self._generate_expecting_internal_error(service, session)
+
+        transition.transition_to_failed.assert_awaited_once()
+        kwargs = transition.transition_to_failed.await_args.kwargs
+        assert kwargs["refund"] is True
+        assert kwargs["failure_code"] == "internal_error"
+        assert kwargs["public_error_message"] == "Generation failed due to an internal error."
         assert session.commit.await_count == 2
+        transition.publish_deferred_failure.assert_awaited_once()
+        billing.refund.assert_not_awaited()  # the transition service owns the refund
+
+    async def test_commit_failure_after_submit_rolls_back_when_a_receipt_is_held(self) -> None:
+        """A held receipt is restored by the rollback; the reconciler owns the task."""
+        service, session, transition, _ = self._post_submit_failure_service(receipt_held=True)
+
+        await self._generate_expecting_internal_error(service, session)
+
+        transition.transition_to_failed.assert_not_awaited()
+        session.rollback.assert_awaited_once()
+        assert session.commit.await_count == 1
+
+    async def test_an_already_terminal_job_is_rolled_back_not_committed(self) -> None:
+        """A job that cannot transition (e.g. a completed Grok image) is not left charged."""
+        service, session, transition, _ = self._post_submit_failure_service(
+            receipt_held=False, did_transition=False
+        )
+
+        await self._generate_expecting_internal_error(service, session)
+
+        transition.transition_to_failed.assert_awaited_once()
+        session.rollback.assert_awaited_once()
+        transition.publish_deferred_failure.assert_not_awaited()
+        assert session.commit.await_count == 1
 
     async def test_job_status_publish_failure_does_not_refund_or_error(self) -> None:
         """A post-commit publish() failure (e.g. a Redis hiccup on the
@@ -1033,7 +1083,9 @@ class TestGenerationServiceGenerate:
         mock_provider.validate = MagicMock()
         mock_provider.supports_image_sizing = True
         mock_provider.submit = AsyncMock(
-            return_value=ProviderSubmitResult(job=job, balance_after=950, balance_event=None)
+            return_value=ProviderSubmitResult(
+                receipt_held=False, job=job, balance_after=950, balance_event=None
+            )
         )
 
         billing = AsyncMock()
@@ -1097,7 +1149,9 @@ class TestGenerationServiceGenerate:
         mock_provider.validate = MagicMock()
         mock_provider.supports_image_sizing = True
         mock_provider.submit = AsyncMock(
-            return_value=ProviderSubmitResult(job=job, balance_after=725, balance_event=None)
+            return_value=ProviderSubmitResult(
+                receipt_held=False, job=job, balance_after=725, balance_event=None
+            )
         )
 
         billing = AsyncMock()

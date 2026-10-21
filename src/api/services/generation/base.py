@@ -31,10 +31,17 @@ class ProviderSubmitResult:
     from ``balance_event``, which is the optional SSE payload and must not be
     used as the response balance source (it's ``None`` whenever there's no
     SSE target).
+
+    ``receipt_held`` is required (no default) so every provider decides it: it is
+    ``True`` when the request transaction holds this task's accepted-task receipt
+    (``record_acceptance`` returned ``True``), i.e. rolling back restores the
+    receipt for the reconciler to cancel or absorb the upstream task. The
+    orchestrator uses it to choose how to unwind a failure *after* ``submit()``.
     """
 
     job: GenerationJob
     balance_after: int
+    receipt_held: bool
     balance_event: BalanceEvent | None = None
 
 

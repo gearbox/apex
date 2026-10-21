@@ -10,6 +10,11 @@ from src.core.enums import JobStatus
 
 LEGACY_FAILED_JOB_MESSAGE = "Generation failed. Please try again."
 
+INTERNAL_FAILURE_CODE = "internal_error"
+"""``failure_code`` of a job failed by our own post-submit error (not the provider's)."""
+INTERNAL_FAILURE_MESSAGE = "Generation failed due to an internal error."
+"""Fixed client text for an internal failure: the job's public message and the HTTP 500 body."""
+
 
 def public_error_for_job(*, status: str, public_error_message: str | None) -> str | None:
     """Return the only failure text that may cross the user-facing boundary.

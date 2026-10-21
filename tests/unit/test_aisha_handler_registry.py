@@ -40,7 +40,9 @@ def _request(generation_type: GenerationType = GenerationType.T2I) -> UnifiedGen
 async def test_submit_delegates_to_the_handler_for_output_media() -> None:
     handler = _ImageHandler()
     job = MagicMock(status=JobStatus.PENDING)
-    handler.submit.return_value = ProviderSubmitResult(job=job, balance_after=42)
+    handler.submit.return_value = ProviderSubmitResult(
+        receipt_held=False, job=job, balance_after=42
+    )
     provider = AishaGenerationProvider(
         workflow_service=MagicMock(),
         gpu_session_service=None,

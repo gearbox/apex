@@ -262,6 +262,7 @@ class WanJobService:
             return ProviderSubmitResult(
                 job=job,
                 balance_after=reserve_result.txn.balance_after,
+                receipt_held=receipt_recorded,
                 balance_event=reserve_result.event,
             )
 

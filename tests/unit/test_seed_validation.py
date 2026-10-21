@@ -77,7 +77,9 @@ async def test_grok_image_with_a_large_seed_still_reaches_the_provider() -> None
     provider = MagicMock()
     provider.supports_image_sizing = False
     provider.submit = AsyncMock(
-        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=1, balance_event=None
+        )
     )
     service._providers[Provider.GROK] = provider
     request = _request(ModelType.GROK_IMAGINE_IMAGE, generation_type=GenerationType.T2I, seed=2**40)

@@ -157,6 +157,8 @@ Standard envelope; the codes you will see for Wan:
 
 Failures that happen after the job is accepted arrive as the job's terminal `failed` state with the same `failure_code` and a public message.
 
+`internal_error` is the one `failure_code` that is not the provider's: a step *after* a provider accepted a submission failed on our side (for example the source-lineage write) and no accepted-task receipt could be restored. The client receives `500 Generation failed due to an internal error.`; the job is committed `failed` with `failure_code: "internal_error"`, refunded once, and never polled. When a receipt is held the whole request is rolled back instead (no job row) and the receipt reconciler cancels or absorbs the upstream task (§8).
+
 An authentication or permission failure while *checking* an accepted job (rotated or revoked key, workspace permission) is **not** a job failure: the task keeps running and billing upstream, so the job stays `running` and is retried every poll (operators see `alibaba.poll_auth_failed` at `error` level). If the key is never fixed the job ends as `provider_timeout` after `WAN_VIDEO_MAX_POLL_TIME` and is refunded. A rejected key on *submission* still fails the request immediately with `provider_authentication_failed` (nothing was accepted, nothing is charged).
 
 ## 7. Cost

@@ -396,6 +396,7 @@ class GrokJobService:
             return ProviderSubmitResult(
                 job=_require_job_after_status_update(job, job_id, "completion"),
                 balance_after=reserve_result.txn.balance_after,
+                receipt_held=False,
                 balance_event=reserve_result.event,
             )
 
@@ -817,6 +818,7 @@ class GrokJobService:
             return ProviderSubmitResult(
                 job=_require_job_after_status_update(job, job_id, "start"),
                 balance_after=reserve_result.txn.balance_after,
+                receipt_held=receipt_recorded,
                 balance_event=reserve_result.event,
             )
 

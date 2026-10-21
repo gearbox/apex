@@ -56,6 +56,7 @@ from src.db.repositories.accepted_task_receipt import AcceptedTaskReceiptReposit
 from src.db.repositories.job import JobRepository
 from src.db.session import DatabaseManager
 from tests.grok_support import make_grok_job_service
+from tests.video_receipt_support import stub_receipts
 
 if TYPE_CHECKING:
     from collections.abc import AsyncIterator
@@ -219,7 +220,9 @@ def _grok_stack(
         receipts=receipts,
     )
     job_service._compensator = compensator
-    provider = GrokGenerationProvider(job_service, MagicMock())
+    r2 = MagicMock()
+    r2.get_presigned_url = AsyncMock(return_value=SimpleNamespace(presigned_url="https://r2/x"))
+    provider = GrokGenerationProvider(job_service, r2)
     return _service(Provider.GROK, provider), client.start_video_generation
 
 
@@ -238,6 +241,14 @@ def _request(kind: str, source_ref: str | None = None) -> UnifiedGenerationReque
             generation_type=GenerationType.T2V,
             model=ModelType.WAN_3_VIDEO,
             duration=5,
+        )
+    if source_ref is not None:
+        return UnifiedGenerationRequest(
+            prompt="a fox",
+            generation_type=GenerationType.I2V,
+            model=ModelType.GROK_IMAGINE_VIDEO,
+            duration=5,
+            source_media=[SourceMediaReference(asset_ref=source_ref)],
         )
     return UnifiedGenerationRequest(
         prompt="a fox",
@@ -454,36 +465,80 @@ async def test_a_task_accepted_upstream_is_never_lost(
         await _cleanup(db_engine, user.id, account.id)
 
 
-async def test_a_failed_source_write_is_tracked_by_the_committed_job(
-    db_engine: AsyncEngine, receipts: AcceptedTaskReceipts
-) -> None:
-    """``_resolve_submit_failure`` commits a refund when the job row exists.
+def _failing_source_write() -> Any:
+    """A non-DB error after ``submit`` (the session is *not* poisoned)."""
+    return patch(
+        "src.api.services.generation.service.GenerationJobSourceRepository.create_many",
+        new=AsyncMock(side_effect=ValueError("unexpected source row")),
+    )
 
-    A failure after ``submit`` (here: the job-source write) therefore commits the
-    job *with* its task id and the request's receipt delete — the task is tracked
-    by the job, not orphaned, so no receipt may remain and the reconciler has
-    nothing to do.
+
+@pytest.mark.parametrize("kind", ["wan", "grok"])
+async def test_a_failed_source_write_restores_the_receipt_instead_of_committing_a_job(
+    db_engine: AsyncEngine,
+    receipts: AcceptedTaskReceipts,
+    receipt_db: DatabaseManager,
+    ops_bus: MagicMock,
+    kind: str,
+) -> None:
+    """P1-3: a post-submit failure with the receipt held rolls everything back.
+
+    No job row (so no poller can complete it for free), an unchanged balance, and
+    one ``pending`` receipt that the reconciler resolves — exactly like every
+    other window after acceptance.
     """
     user, account = await _seed(db_engine)
-    compensator = _fake_compensator()
-    service, upstream = _wan_stack(receipts, compensator)
+    task_id = _WAN_TASK if kind == "wan" else _GROK_TASK
+    compensator = _fake_compensator(provider=Provider.ALIBABA if kind == "wan" else Provider.GROK)
+    stack = _wan_stack if kind == "wan" else _grok_stack
+    service, upstream = stack(receipts, compensator)
     upload_id = await _seed_upload(db_engine, user.id)
-    failing = patch(
-        "src.api.services.generation.service.GenerationJobSourceRepository.create_many",
-        new=AsyncMock(side_effect=OperationalError("INSERT", {}, Exception("connection reset"))),
-    )
+    try:
+        await _generate(
+            db_engine,
+            service,
+            _request(kind, source_ref=f"upload:{upload_id}"),
+            user,
+            extra_patches=(_failing_source_write(),),
+        )
+
+        assert upstream.await_count == 1
+        assert await _count(db_engine, GenerationJob, GenerationJob.user_id == user.id) == 0
+        async with AsyncSession(bind=db_engine) as session:
+            assert await BillingService().get_balance(account.id, session=session) == 1000
+        (row,) = await _receipt_rows(db_engine, user.id)
+        assert (row.external_task_id, row.status) == (task_id, "pending")
+        await _assert_not_locked(db_engine, row.id)
+
+        reconciler = AcceptedTaskReconciler(receipt_db, compensator, ops_bus, grace_seconds=0)
+        assert await reconciler.run_once() == 1
+        (resolved,) = await _receipt_rows(db_engine, user.id)
+        assert resolved.status == "cancelled"
+        compensator.cancel.assert_awaited_once_with(task_id)
+    finally:
+        await _cleanup(db_engine, user.id, account.id)
+
+
+async def test_a_failed_source_write_without_a_receipt_fails_and_refunds_the_job(
+    db_engine: AsyncEngine,
+) -> None:
+    """P1-3: no receipt to restore ⇒ the job is committed terminal, never left live."""
+    user, account = await _seed(db_engine)
+    compensator = _fake_compensator()
+    service, upstream = _wan_stack(stub_receipts(recorded=False), compensator)
+    upload_id = await _seed_upload(db_engine, user.id)
     try:
         await _generate(
             db_engine,
             service,
             _request("wan", source_ref=f"upload:{upload_id}"),
             user,
-            extra_patches=(failing,),
+            extra_patches=(_failing_source_write(),),
         )
 
         assert upstream.await_count == 1
         async with AsyncSession(bind=db_engine) as session:
-            jobs = (
+            (job,) = (
                 (
                     await session.execute(
                         select(GenerationJob).where(GenerationJob.user_id == user.id)
@@ -492,8 +547,20 @@ async def test_a_failed_source_write_is_tracked_by_the_committed_job(
                 .scalars()
                 .all()
             )
-            assert [j.external_request_id for j in jobs] == [_WAN_TASK]
+            assert job.status == JobStatus.FAILED.value
+            assert job.failure_code == "internal_error"
+            assert job.public_error_message == "Generation failed due to an internal error."
             assert await BillingService().get_balance(account.id, session=session) == 1000
+            ledger = (
+                await session.execute(
+                    select(TokenTransaction.transaction_type)
+                    .where(TokenTransaction.account_id == account.id)
+                    .order_by(TokenTransaction.created_at, TokenTransaction.id)
+                )
+            ).scalars()
+            assert sorted(ledger) == ["credit", "debit", "refund"]  # refunded exactly once
+            polled = await JobRepository(session).list_pending_video_jobs(provider=Provider.ALIBABA)
+            assert job.id not in {j.id for j in polled}
         assert await _receipt_rows(db_engine, user.id) == []
         compensator.cancel.assert_not_awaited()
     finally:

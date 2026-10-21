@@ -434,7 +434,9 @@ async def test_r2_grok_v2v_still_accepts_a_webm_source() -> None:
     provider = MagicMock()
     provider.validate = MagicMock()
     provider.submit = AsyncMock(
-        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=1, balance_event=None
+        )
     )
     service._providers[Provider.GROK] = provider
     source = dataclasses.replace(_video_source(60_000), content_type="video/webm")
@@ -473,7 +475,9 @@ def _submitting_service() -> GenerationService:
     provider = MagicMock()
     provider.validate = MagicMock()
     provider.submit = AsyncMock(
-        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=1, balance_event=None
+        )
     )
     service._providers[Provider.ALIBABA] = provider
     return service
@@ -534,7 +538,9 @@ async def test_c11_image_quote_has_no_video_basis() -> None:
     provider = MagicMock()
     provider.supports_image_sizing = False
     provider.submit = AsyncMock(
-        return_value=ProviderSubmitResult(job=job, balance_after=1, balance_event=None)
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=1, balance_event=None
+        )
     )
     service._providers[Provider.GROK] = provider
     request = _request(ModelType.GROK_IMAGINE_IMAGE, generation_type=GenerationType.T2I, duration=9)
