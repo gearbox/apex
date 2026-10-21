@@ -101,8 +101,8 @@ from src.api.services.video_jobs.receipts import (
     build_accepted_task_receipts,
 )
 from src.api.services.video_jobs.reconciler import (
-    AcceptedTaskReconciler,
     AcceptedTaskReconcilerWorker,
+    build_receipt_reconciler_worker,
 )
 from src.api.services.video_jobs.transition import make_transition_service_factory
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
@@ -129,6 +129,7 @@ from src.workers.token_cleanup import TokenCleanupWorker
 if TYPE_CHECKING:
     from src.api.services.generation.base import GenerationProvider
     from src.api.services.media_ingest import MediaIngestService
+    from src.api.services.video_jobs.protocol import AsyncVideoJobService, OrphanTaskCompensator
     from src.workers.base import PeriodicWorker
 
 logger = structlog.get_logger(__name__)
@@ -798,6 +799,108 @@ def get_product_id(request: Request) -> str:  # type: ignore[type-arg]
 # -----------------------------------------------------------------------------
 
 
+@dataclass(frozen=True, slots=True)
+class VideoLifecycleWorkers:
+    """The in-process lifecycle workers started for one async-video provider."""
+
+    poller: AsyncVideoJobWorker | None
+    """The proactive poller; ``None`` when opted out or workers are disabled."""
+    reconciler: AcceptedTaskReconcilerWorker | None
+    """The accepted-task receipt reconciler; independent of the poller flag."""
+
+
+async def _start_video_lifecycle_workers(
+    *,
+    provider_label: str,
+    workers_enabled: bool,
+    job_service: AsyncVideoJobService | None,
+    compensator: OrphanTaskCompensator | None,
+    poller_in_process: bool,
+    poll_interval_seconds: int,
+    max_concurrent_polls: int,
+    reconciler_name: str,
+    standalone_module: str,
+    settings: Settings,
+    db_manager: DatabaseManager | None,
+    receipt_db: DatabaseManager | None,
+    event_bus: EventBus | None,
+    ops_event_bus: OpsEventBus | None,
+    redis_enabled: bool,
+) -> VideoLifecycleWorkers:
+    """Start one provider's receipt reconciler and, unless opted out, its poller.
+
+    The reconciler is the only thing that compensates a task accepted upstream whose
+    request rolled back, so it runs wherever workers run, **independently** of
+    ``*_VIDEO_WORKER_IN_PROCESS``. That flag only decides whether this process also
+    polls proactively; with it off, jobs settle on read unless a standalone worker runs.
+
+    Args:
+        provider_label: Log prefix (``grok`` / ``alibaba``).
+        workers_enabled: Whether this process runs background workers at all.
+        job_service: The provider's job service; ``None`` when the provider is unconfigured.
+        compensator: The provider's cancel/observe adapter; ``None`` when unconfigured.
+        poller_in_process: Whether to also start the proactive poller here.
+        poll_interval_seconds: Poller interval.
+        max_concurrent_polls: Poller semaphore bound.
+        reconciler_name: Reconciler worker (and leader-lease) name.
+        standalone_module: Module of the standalone worker, for the opt-out warning.
+        settings: Application settings.
+        db_manager: Main database manager (poller).
+        receipt_db: Dedicated receipt pool (reconciler).
+        event_bus: Event bus.
+        ops_event_bus: Ops event bus.
+        redis_enabled: Whether Redis is configured (enables leader leases).
+
+    Returns:
+        The started workers; either field is ``None`` when it was not started.
+
+    Raises:
+        RuntimeError: If a collaborator the started workers need is missing.
+    """
+    if not workers_enabled or job_service is None or compensator is None:
+        return VideoLifecycleWorkers(poller=None, reconciler=None)
+    if db_manager is None or receipt_db is None or ops_event_bus is None:
+        raise RuntimeError(f"{provider_label} lifecycle workers need the database and ops bus")
+
+    from src.core.redis import get_operational_redis_client
+
+    poller: AsyncVideoJobWorker | None = None
+    if poller_in_process:
+        poller = AsyncVideoJobWorker(
+            job_service=job_service,
+            interval_seconds=poll_interval_seconds,
+            max_concurrent_polls=max_concurrent_polls,
+            db_manager=db_manager,
+            event_bus=event_bus,
+            redis_enabled=redis_enabled,
+            redis_client_factory=get_operational_redis_client,
+        )
+        await poller.start()
+        started_event = provider_label + ".video_poller_in_process_started"
+        logger.info(started_event)
+    else:
+        disabled_event = provider_label + ".video_poller_disabled"
+        logger.warning(
+            disabled_event,
+            hint=(
+                "jobs settle only on read unless a standalone worker runs "
+                "('python -m " + standalone_module + "')"
+            ),
+        )
+
+    reconciler = build_receipt_reconciler_worker(
+        name=reconciler_name,
+        receipt_db=receipt_db,
+        compensator=compensator,
+        ops_event_bus=ops_event_bus,
+        settings=settings,
+        redis_enabled=redis_enabled,
+        redis_client_factory=get_operational_redis_client,
+    )
+    await reconciler.start()
+    return VideoLifecycleWorkers(poller=poller, reconciler=reconciler)
+
+
 async def init_services(settings: Settings) -> JWTService:
     """Initialize all service singletons.
 
@@ -1077,46 +1180,28 @@ async def init_services(settings: Settings) -> JWTService:
     else:
         logger.warning("grok.not_configured")
 
-    # Start Grok video polling worker
-    if (
-        workers_enabled
-        and settings.grok_configured
-        and _services.grok_job_service is not None
-        and grok_orphans is not None
-    ):
-        if settings.grok_video_worker_in_process:
-            _services.grok_video_worker = AsyncVideoJobWorker(
-                job_service=_services.grok_job_service,
-                interval_seconds=settings.grok_video_poll_interval,
-                max_concurrent_polls=settings.grok_video_max_concurrent_polls,
-                db_manager=_services.db_manager,
-                event_bus=_services.event_bus,
-                redis_enabled=redis_enabled,
-                redis_client_factory=get_operational_redis_client,
-            )
-            await _services.grok_video_worker.start()
-            logger.info("grok.video_poller_in_process_started")
-            _services.grok_receipt_reconciler_worker = AcceptedTaskReconcilerWorker(
-                name=GrokJobService.RECEIPT_RECONCILER_NAME,
-                reconciler=AcceptedTaskReconciler(
-                    _services.receipt_db_manager,
-                    grok_orphans,
-                    _services.ops_event_bus,
-                    grace_seconds=settings.video_task_receipt_grace_seconds,
-                ),
-                interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
-                redis_enabled=redis_enabled,
-                redis_client_factory=get_operational_redis_client,
-            )
-            await _services.grok_receipt_reconciler_worker.start()
-        else:
-            logger.info(
-                "grok.video_poller_external_recommended",
-                hint=(
-                    "Poll-on-read settles videos safely without a worker; run "
-                    "'python -m src.workers.grok_video' for proactive completion"
-                ),
-            )
+    # Grok lifecycle workers: the receipt reconciler runs whenever workers do; the
+    # proactive poller is opt-out via GROK_VIDEO_WORKER_IN_PROCESS.
+    if settings.grok_configured:
+        grok_lifecycle = await _start_video_lifecycle_workers(
+            provider_label="grok",
+            workers_enabled=workers_enabled,
+            job_service=_services.grok_job_service,
+            compensator=grok_orphans,
+            poller_in_process=settings.grok_video_worker_in_process,
+            poll_interval_seconds=settings.grok_video_poll_interval,
+            max_concurrent_polls=settings.grok_video_max_concurrent_polls,
+            reconciler_name=GrokJobService.RECEIPT_RECONCILER_NAME,
+            standalone_module="src.workers.grok_video",
+            settings=settings,
+            db_manager=_services.db_manager,
+            receipt_db=_services.receipt_db_manager,
+            event_bus=_services.event_bus,
+            ops_event_bus=_services.ops_event_bus,
+            redis_enabled=redis_enabled,
+        )
+        _services.grok_video_worker = grok_lifecycle.poller
+        _services.grok_receipt_reconciler_worker = grok_lifecycle.reconciler
 
     # Initialize Alibaba Model Studio (Wan) provider (if configured)
     wan_orphans: ModelStudioOrphanCompensator | None = None
@@ -1169,41 +1254,26 @@ async def init_services(settings: Settings) -> JWTService:
     else:
         logger.warning("alibaba.not_configured")
 
-    # Start Wan video polling worker — its own instance, lease and semaphore
-    if workers_enabled and _services.wan_job_service is not None and wan_orphans is not None:
-        if settings.wan_video_worker_in_process:
-            _services.wan_video_worker = AsyncVideoJobWorker(
-                job_service=_services.wan_job_service,
-                interval_seconds=settings.wan_video_poll_interval,
-                max_concurrent_polls=settings.wan_video_max_concurrent_polls,
-                db_manager=_services.db_manager,
-                event_bus=_services.event_bus,
-                redis_enabled=redis_enabled,
-                redis_client_factory=get_operational_redis_client,
-            )
-            await _services.wan_video_worker.start()
-            logger.info("alibaba.video_worker_in_process_started")
-            _services.wan_receipt_reconciler_worker = AcceptedTaskReconcilerWorker(
-                name=WanJobService.RECEIPT_RECONCILER_NAME,
-                reconciler=AcceptedTaskReconciler(
-                    _services.receipt_db_manager,
-                    wan_orphans,
-                    _services.ops_event_bus,
-                    grace_seconds=settings.video_task_receipt_grace_seconds,
-                ),
-                interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
-                redis_enabled=redis_enabled,
-                redis_client_factory=get_operational_redis_client,
-            )
-            await _services.wan_receipt_reconciler_worker.start()
-        else:
-            logger.info(
-                "alibaba.video_worker_external_recommended",
-                hint=(
-                    "Poll-on-read settles videos safely without a worker; run "
-                    "'python -m src.workers.wan_video' for proactive completion"
-                ),
-            )
+    # Wan lifecycle workers — its own instances, leases and semaphore
+    wan_lifecycle = await _start_video_lifecycle_workers(
+        provider_label="alibaba",
+        workers_enabled=workers_enabled,
+        job_service=_services.wan_job_service,
+        compensator=wan_orphans,
+        poller_in_process=settings.wan_video_worker_in_process,
+        poll_interval_seconds=settings.wan_video_poll_interval,
+        max_concurrent_polls=settings.wan_video_max_concurrent_polls,
+        reconciler_name=WanJobService.RECEIPT_RECONCILER_NAME,
+        standalone_module="src.workers.wan_video",
+        settings=settings,
+        db_manager=_services.db_manager,
+        receipt_db=_services.receipt_db_manager,
+        event_bus=_services.event_bus,
+        ops_event_bus=_services.ops_event_bus,
+        redis_enabled=redis_enabled,
+    )
+    _services.wan_video_worker = wan_lifecycle.poller
+    _services.wan_receipt_reconciler_worker = wan_lifecycle.reconciler
 
     # Initialize authentication services
     jwt_config = JWTConfig(

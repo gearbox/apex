@@ -23,10 +23,7 @@ from src.api.services.media_ingest.factory import (
 from src.api.services.ops_event_bus import OpsEventBus
 from src.api.services.storage import R2StorageService, R2StorageSettings
 from src.api.services.video_jobs.receipts import build_accepted_task_receipts
-from src.api.services.video_jobs.reconciler import (
-    AcceptedTaskReconciler,
-    AcceptedTaskReconcilerWorker,
-)
+from src.api.services.video_jobs.reconciler import build_receipt_reconciler_worker
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.core.redis import get_operational_redis_client
 from src.db import init_db
@@ -189,15 +186,12 @@ async def run_video_worker(
     await worker.start()
 
     # Orphan reconciliation shares the lease with an in-process twin, like the poller.
-    reconciler_worker = AcceptedTaskReconcilerWorker(
+    reconciler_worker = build_receipt_reconciler_worker(
         name=built.receipt_reconciler_name,
-        reconciler=AcceptedTaskReconciler(
-            receipt_db,
-            built.compensator,
-            ops_event_bus,
-            grace_seconds=settings.video_task_receipt_grace_seconds,
-        ),
-        interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
+        receipt_db=receipt_db,
+        compensator=built.compensator,
+        ops_event_bus=ops_event_bus,
+        settings=settings,
         redis_enabled=settings.redis_url is not None,
         redis_client_factory=get_operational_redis_client,
     )

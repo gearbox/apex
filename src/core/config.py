@@ -707,11 +707,12 @@ class Settings(BaseSettings):
         ),
     )
     grok_video_worker_in_process: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Start Grok video polling worker in-process. "
-            "Set to True for single-worker deployments. "
-            "For multi-worker Granian, use the standalone worker instead."
+            "Start the Grok video poller in-process. Set false only when a standalone "
+            "worker (python -m src.workers.grok_video) runs this provider's poller. "
+            "Both modes share one leader lease, so running both is safe. Without any "
+            "poller, jobs settle only when their owner reads them."
         ),
     )
     grok_video_max_concurrent_polls: int = Field(
@@ -764,10 +765,12 @@ class Settings(BaseSettings):
         ),
     )
     wan_video_worker_in_process: bool = Field(
-        default=False,
+        default=True,
         description=(
-            "Start the Wan video polling worker in-process. For multi-worker Granian, "
-            "use the standalone worker (python -m src.workers.wan_video)."
+            "Start the Wan video poller in-process. Set false only when a standalone "
+            "worker (python -m src.workers.wan_video) runs this provider's poller. "
+            "Both modes share one leader lease, so running both is safe. Without any "
+            "poller, jobs settle only when their owner reads them."
         ),
     )
     wan_video_max_concurrent_polls: int = Field(

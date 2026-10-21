@@ -35,6 +35,7 @@ if TYPE_CHECKING:
 
     from src.api.services.ops_event_bus import OpsEventBus
     from src.api.services.video_jobs.protocol import OrphanTaskCompensator
+    from src.core.config import Settings
     from src.db.models.accepted_task_receipt import AcceptedTaskReceipt
     from src.db.session import DatabaseManager
 
@@ -209,3 +210,44 @@ class AcceptedTaskReconcilerWorker(PeriodicWorker):
     async def run_once(self) -> None:
         """Reconcile one batch."""
         await self._reconciler.run_once()
+
+
+def build_receipt_reconciler_worker(
+    *,
+    name: str,
+    receipt_db: DatabaseManager,
+    compensator: OrphanTaskCompensator,
+    ops_event_bus: OpsEventBus,
+    settings: Settings,
+    redis_enabled: bool,
+    redis_client_factory: Callable[[], Redis],
+) -> AcceptedTaskReconcilerWorker:
+    """Build one provider's receipt reconciler worker.
+
+    The single construction site shared by the in-process wiring and the standalone
+    worker processes, so both agree on the lease name, grace and interval.
+
+    Args:
+        name: Worker (and leader-lease) name — the provider's ``RECEIPT_RECONCILER_NAME``.
+        receipt_db: Database manager the receipts live on.
+        compensator: The provider's cancel/observe adapter.
+        ops_event_bus: Ops event bus.
+        settings: Application settings (grace and interval).
+        redis_enabled: Whether Redis is configured (enables the leader lease).
+        redis_client_factory: Factory for the operational Redis client.
+
+    Returns:
+        A worker that has not been started.
+    """
+    return AcceptedTaskReconcilerWorker(
+        name=name,
+        reconciler=AcceptedTaskReconciler(
+            receipt_db,
+            compensator,
+            ops_event_bus,
+            grace_seconds=settings.video_task_receipt_grace_seconds,
+        ),
+        interval_seconds=settings.video_task_receipt_reconcile_interval_seconds,
+        redis_enabled=redis_enabled,
+        redis_client_factory=redis_client_factory,
+    )

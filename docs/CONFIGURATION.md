@@ -242,6 +242,7 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 | `GROK_VIDEO_POLL_INTERVAL` | `5` | `int (1–60)` | Seconds between polls when the Grok video worker checks async job status. Lower reduces latency; higher reduces API call volume. |
 | `GROK_VIDEO_MAX_POLL_TIME` | `600` | `int (60–1800)` | Maximum total seconds the video worker polls before marking a job as timed out. |
 | `GROK_VIDEO_FINALIZATION_LEASE_SECONDS` | `120` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. Expiry permits a new claimant, but does not invalidate the current token by itself. |
+| `GROK_VIDEO_WORKER_IN_PROCESS` | `true` | `bool` | Run the `grok_video_poller` worker in the API process. Opt-out: set `false` only when a standalone `python -m src.workers.grok_video` runs the poller (shared leader lease). The receipt reconciler runs in-process regardless of this flag. |
 | `GROK_MODERATION_BILLING_POLICY` | `charge` | `charge` \| `refund` | Whether an accepted xAI moderation rejection retains the debit or receives a refund. This is applied by both in-process and standalone video workers. |
 
 > **Materialization migration and operations:** migration 033 adds product-scoped durable
@@ -268,7 +269,7 @@ prices, then enable the model in admin. Frontend contract: `docs/contracts/wan-v
 | `WAN_VIDEO_POLL_INTERVAL` | `15` | `int (5–60)` | Seconds between status polls (upstream recommends ~15). |
 | `WAN_VIDEO_MAX_POLL_TIME` | `1800` | `int (300–7200)` | Seconds from acceptance before a job times out. Upstream `task_id` and `video_url` expire after 24 h. |
 | `WAN_VIDEO_FINALIZATION_LEASE_SECONDS` | `180` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. `MEDIA_INGEST_VIDEO_DEADLINE_SECONDS` must be ≤ 75 % of this (and of the Grok lease). |
-| `WAN_VIDEO_WORKER_IN_PROCESS` | `false` | `bool` | Run the `alibaba_video_poller` worker in the API process. For multi-worker Granian use `python -m src.workers.wan_video`. |
+| `WAN_VIDEO_WORKER_IN_PROCESS` | `true` | `bool` | Run the `alibaba_video_poller` worker in the API process. Opt-out: set `false` only when a standalone `python -m src.workers.wan_video` runs the poller (both share one leader lease, so running both is safe). Without any poller, jobs settle only when their owner reads them. The receipt reconciler runs in-process regardless of this flag. |
 | `WAN_VIDEO_MAX_CONCURRENT_POLLS` | `8` | `int (1–64)` | Maximum concurrent status polls per worker tick. |
 | `WAN_INPUT_URL_TTL_SECONDS` | `3600` | `int (300–86400)` | Lifetime of the presigned R2 URLs passed to Model Studio as inputs. |
 | `WAN_MODERATION_BILLING_POLICY` | `refund` | `charge` \| `refund` | Model Studio bills successful tasks only, so a moderation rejection refunds by default. |
@@ -298,6 +299,8 @@ pool). Nothing will reconcile it. Cancel it by hand (Model Studio console → ta
 possible while `PENDING`) or audit its cost by task id; the user was not charged.
 **`video_task.orphaned` with `resolution=absorbed`:** the task could not be cancelled and may
 still bill the provider account — look up its cost by task id in the provider console.
+The reconciler that raises this alert runs in-process in every API deployment with workers
+enabled (independently of `*_VIDEO_WORKER_IN_PROCESS`); a standalone worker is optional.
 
 ---
 

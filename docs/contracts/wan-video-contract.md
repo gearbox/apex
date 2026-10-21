@@ -173,7 +173,7 @@ Mechanism (shared with Grok video):
 1. Right after acceptance the task id is inserted into `accepted_task_receipts` and **committed on a dedicated two-connection pool** (never the request pool).
 2. The request transaction then `DELETE`s that row. The delete holds the row lock until the request ends: a commit removes the receipt atomically with the job; a rollback brings it back, unlocked — an orphan by construction.
 3. Immediately, if a job-service write failed after acceptance, the task is cancelled in-process (best chance it is still `PENDING`).
-4. A per-provider reconciler (`alibaba_video_receipts`, `grok_video_receipts`) reads orphans with `FOR UPDATE SKIP LOCKED` — it can never touch an in-flight request's receipt — and **observes first, then acts**.
+4. A per-provider reconciler (`alibaba_video_receipts`, `grok_video_receipts`) reads orphans with `FOR UPDATE SKIP LOCKED` — it can never touch an in-flight request's receipt — and **observes first, then acts**. The reconciler runs wherever workers run, independently of the poller (`WAN_VIDEO_WORKER_IN_PROCESS` / `GROK_VIDEO_WORKER_IN_PROCESS` only choose whether that process also polls).
 
 | Receipt status | Meaning |
 |---|---|

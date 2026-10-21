@@ -281,7 +281,7 @@ def _stub_receipt_reconciler() -> Iterator[MagicMock]:
             return_value=(AsyncMock(), MagicMock()),
         ),
         patch(
-            "src.api.services.video_jobs.cli.AcceptedTaskReconcilerWorker",
+            "src.api.services.video_jobs.cli.build_receipt_reconciler_worker",
             return_value=reconciler_worker,
         ),
     ):
