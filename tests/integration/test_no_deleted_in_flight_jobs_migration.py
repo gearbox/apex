@@ -113,7 +113,7 @@ async def test_upgrade_undeletes_in_flight_rows_and_keeps_finished_ones_deleted(
                 text("SELECT status, is_deleted FROM generation_jobs WHERE user_id = :u"),
                 {"u": user_id},
             )
-            assert dict(rows.all()) == {
+            assert {row[0]: row[1] for row in rows.all()} == {
                 "pending": False,
                 "queued": False,
                 "running": False,

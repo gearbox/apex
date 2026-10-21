@@ -33,25 +33,26 @@ depends_on: str | Sequence[str] | None = None
 
 logger = logging.getLogger("alembic.runtime.migration")
 
-_CONSTRAINT = "ck_generation_jobs_not_deleted_in_flight"
-_IN_FLIGHT = "('pending','queued','running')"
-
 
 def upgrade() -> None:
     """Upgrade database schema."""
     result = op.get_bind().exec_driver_sql(
-        f"UPDATE generation_jobs SET is_deleted = false "
-        f"WHERE is_deleted AND status IN {_IN_FLIGHT}"
+        "UPDATE generation_jobs SET is_deleted = false "
+        "WHERE is_deleted AND status IN ('pending','queued','running')"
     )
     logger.info("054: un-deleted %s in-flight generation_jobs rows", result.rowcount)
 
     op.execute(
-        f"ALTER TABLE generation_jobs ADD CONSTRAINT {_CONSTRAINT} "
-        f"CHECK (NOT (is_deleted AND status IN {_IN_FLIGHT})) NOT VALID"
+        "ALTER TABLE generation_jobs ADD CONSTRAINT ck_generation_jobs_not_deleted_in_flight "
+        "CHECK (NOT (is_deleted AND status IN ('pending','queued','running'))) NOT VALID"
     )
-    op.execute(f"ALTER TABLE generation_jobs VALIDATE CONSTRAINT {_CONSTRAINT}")
+    op.execute(
+        "ALTER TABLE generation_jobs VALIDATE CONSTRAINT ck_generation_jobs_not_deleted_in_flight"
+    )
 
 
 def downgrade() -> None:
     """Downgrade database schema (the un-delete is not reversed)."""
-    op.execute(f"ALTER TABLE generation_jobs DROP CONSTRAINT {_CONSTRAINT}")
+    op.execute(
+        "ALTER TABLE generation_jobs DROP CONSTRAINT ck_generation_jobs_not_deleted_in_flight"
+    )
