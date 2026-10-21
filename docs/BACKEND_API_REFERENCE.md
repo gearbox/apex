@@ -1030,7 +1030,14 @@ Note:     For queued/running Grok video jobs this is poll-on-read. It also enfor
 
 ```
 Response: 204 No Content
-Note:     Soft-hide from history
+Errors:   404 (not found / not yours)
+          409 job_in_progress — the job is still pending, queued or running
+Note:     Soft-hide a FINISHED job from history (idempotent). An in-flight job has already
+          been charged and its upstream work cannot be stopped, so it cannot be deleted:
+          "This job is still running and has already been charged. It can't be stopped.
+          You can delete it once it finishes." Hide/disable the action for in-flight jobs;
+          the output arrives as usual and the finished job can then be deleted.
+          Enforced in the database by ck_generation_jobs_not_deleted_in_flight.
 ```
 
 ### UnifiedJobResponse Schema

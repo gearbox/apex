@@ -292,6 +292,8 @@ class ContentRetentionService:
                 )
                 batch_rows_deleted = delete_result.rowcount or 0  # type: ignore[attr-defined]
 
+                # Only finished jobs reach here (their outputs just expired); an in-flight
+                # one would violate ck_generation_jobs_not_deleted_in_flight, loudly.
                 # Soft-delete only jobs touched by this batch that now have no
                 # remaining outputs — never a table-wide scan. Note: this also
                 # relies on generation_jobs.source_output_id / input_image_id

@@ -153,6 +153,7 @@ Standard envelope; the codes you will see for Wan:
 | `provider_malformed_response`, `provider_output_not_delivered` | 502 | The provider produced something we could not read or fetch. `provider_output_not_delivered` means the provider generated the video and billed us but we could not obtain it (an unreadable file, or a result URL the provider no longer serves, i.e. HTTP 4xx), so the message states the job **was charged**. It is reported on the first poll; a transient download error (5xx, 408, 425, 429, network) is retried instead. |
 | `provider_timeout`, `provider_unavailable`, `provider_authentication_failed`, `provider_unknown` | 503 | Provider-side trouble; refunded. |
 | `insufficient_balance` | 402 | Balance below the quote. |
+| `job_in_progress` | 409 | `DELETE /v1/jobs/{id}` on a `pending`, `queued` or `running` job. The job is already charged and cannot be stopped; delete it once it finishes. Hide or disable "Delete" for in-flight jobs. |
 
 Failures that happen after the job is accepted arrive as the job's terminal `failed` state with the same `failure_code` and a public message.
 

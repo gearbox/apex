@@ -232,6 +232,7 @@ Routes (Controllers) → Services (Business Logic) → Repository (Data Access) 
 - **Services** (`src/api/services/`): Business logic. Injected via Litestar DI. Services receive repositories/other services as constructor args.
 - **Repository** (`src/db/repositories/`): `UserRepository`, `BillingRepository`, `JobRepository`, `OutputRepository`, `UserImageRepository` — all DB queries go here. Receive `AsyncSession`. Never imported directly by routes.
 - **Models** (`src/db/models/`): SQLAlchemy 2.0 declarative models using `Mapped[]` and `mapped_column()`.
+- **In-flight jobs cannot be soft-deleted** (`JobRepository.soft_delete` is one conditional `UPDATE … WHERE status NOT IN (JobStatus.in_flight())` returning `SoftDeleteOutcome`; the route answers 409 `job_in_progress`). Enforced by `ck_generation_jobs_not_deleted_in_flight` (migration 054), so a lifecycle query's `is_deleted` filter can never hide a charged job. Retention only soft-deletes finished jobs.
 
 ### Dependency Injection
 

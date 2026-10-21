@@ -154,22 +154,6 @@ class TestListInFlightForSession:
         jobs = await repo.list_in_flight_for_session(gpu_session.id)
         assert jobs == []
 
-    async def test_excludes_soft_deleted_jobs(self, db_session: AsyncSession) -> None:
-        user = await _insert_user(db_session)
-        gpu_session = await _insert_gpu_session(db_session, user)
-        repo = JobRepository(db_session)
-
-        await _insert_job(
-            db_session,
-            user,
-            status=JobStatus.QUEUED.value,
-            gpu_session_id=gpu_session.id,
-            is_deleted=True,
-        )
-
-        jobs = await repo.list_in_flight_for_session(gpu_session.id)
-        assert jobs == []
-
     async def test_excludes_jobs_for_other_sessions(self, db_session: AsyncSession) -> None:
         """Jobs bound to a different GPU session are not returned."""
         # Use distinct users so each can have one active session (unique index

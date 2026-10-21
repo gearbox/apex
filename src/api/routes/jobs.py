@@ -28,8 +28,8 @@ from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.jobs import UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
-from src.api.services.unified_jobs import UnifiedJobService
-from src.core.enums import GenerationType, JobStatus, Provider
+from src.api.services.unified_jobs import JobInProgressError, UnifiedJobService
+from src.core.enums import GenerationType, JobStatus, Provider, SoftDeleteOutcome
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -129,24 +129,38 @@ class UnifiedJobController(Controller):
         job_id: UUID,
         session: AsyncSession,
     ) -> None:
-        """Soft-delete a job from the user's history.
+        """Soft-delete a finished job from the user's history.
 
         The job record and R2 outputs are retained until the normal retention
         policy cleans them up. The job simply stops appearing in list results.
+        Deleting an already-deleted finished job is idempotent (204).
 
         Returns 404 if the job does not exist or is not owned by the caller.
+        Raises ``JobInProgressError`` (409 ``job_in_progress``) while the job is still ``pending``,
+        ``queued`` or ``running``: its upstream work is already accepted and
+        charged and cannot be stopped, so it can be deleted once it finishes.
+        (Enforced in the database by ``ck_generation_jobs_not_deleted_in_flight``.)
 
         NOTE: Full hard-delete with R2 cleanup is a future enhancement.
               For MVP, the retention-based cleanup is sufficient.
         """
         from src.db.repositories.job import JobRepository
 
-        job = await JobRepository(session).soft_delete(job_id, user_id=current_user_id)
+        repo = JobRepository(session)
+        outcome = await repo.soft_delete(job_id, user_id=current_user_id)
 
-        if job is None:
+        if outcome is SoftDeleteOutcome.NOT_FOUND:
             from litestar.exceptions import NotFoundException
 
             raise NotFoundException(detail=f"Job {job_id} not found")
+
+        if outcome is SoftDeleteOutcome.IN_FLIGHT:
+            job = await repo.get(job_id, user_id=current_user_id)
+            raise JobInProgressError(
+                job_id=job_id,
+                user_id=current_user_id,
+                status=str(job.status) if job is not None else None,
+            )
 
         await session.commit()
 

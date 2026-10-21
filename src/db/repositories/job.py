@@ -14,6 +14,7 @@ from src.core.enums import (
     JobStatus,
     MediaKind,
     Provider,
+    SoftDeleteOutcome,
     TransactionType,
 )
 from src.db.models.billing import TokenTransaction
@@ -295,36 +296,51 @@ class JobRepository(BaseRepository[GenerationJob]):
         job_id: UUID,
         *,
         user_id: UUID,
-    ) -> GenerationJob | None:
-        """Soft-delete a job — marks it as deleted without removing the record.
+    ) -> SoftDeleteOutcome:
+        """Soft-delete a finished job — marks it as deleted without removing the record.
 
         The job record and R2 outputs are retained until the retention
         policy cleans them up. The job stops appearing in user-facing
         list/get results.
 
-        Uses a direct query that bypasses the is_deleted filter so that
-        soft-deleting an already-deleted job is idempotent.
+        A job that is still in flight (``JobStatus.in_flight()``) is refused:
+        its upstream work is already accepted and charged and cannot be stopped,
+        so hiding it would hide the output the user paid for. The check is one
+        conditional ``UPDATE`` (never read-then-write) and the database enforces
+        it with ``ck_generation_jobs_not_deleted_in_flight``.
+
+        Soft-deleting an already-deleted finished job is idempotent: the
+        ``UPDATE`` still matches it.
 
         Args:
             job_id: Job to soft-delete.
             user_id: Owner check — only the owner can delete their own job.
 
         Returns:
-            Updated GenerationJob if found and owned, None otherwise.
+            ``DELETED``, ``IN_FLIGHT`` (refused), or ``NOT_FOUND`` (missing or not owned).
         """
-        result = await self._session.execute(
-            select(GenerationJob).where(
+        deleted = await self._session.execute(
+            update(GenerationJob)
+            .where(
                 GenerationJob.id == job_id,
                 GenerationJob.user_id == user_id,
+                GenerationJob.status.not_in([s.value for s in JobStatus.in_flight()]),
+            )
+            .values(is_deleted=True)
+            .returning(GenerationJob.id)
+        )
+        if deleted.scalar_one_or_none() is not None:
+            return SoftDeleteOutcome.DELETED
+
+        # No row updated: either it is in flight, or it does not exist / is not owned.
+        owned = await self._session.execute(
+            select(GenerationJob.id).where(
+                GenerationJob.id == job_id, GenerationJob.user_id == user_id
             )
         )
-        job = result.scalar_one_or_none()
-        if job is None:
-            return None
-
-        job.is_deleted = True
-        await self._session.flush()
-        return job
+        if owned.scalar_one_or_none() is None:
+            return SoftDeleteOutcome.NOT_FOUND
+        return SoftDeleteOutcome.IN_FLIGHT
 
     async def list_aisha_jobs_for_polling(
         self,

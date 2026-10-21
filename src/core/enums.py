@@ -179,6 +179,24 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
     MODERATED = "moderated"
 
+    @classmethod
+    def in_flight(cls) -> tuple[JobStatus, ...]:
+        """Statuses whose upstream work is accepted but not yet settled.
+
+        A job in one of these cannot be soft-deleted (Z1): enforced by the
+        ``ck_generation_jobs_not_deleted_in_flight`` CHECK constraint.
+        """
+        return (cls.PENDING, cls.QUEUED, cls.RUNNING)
+
+
+class SoftDeleteOutcome(StrEnum):
+    """Result of ``JobRepository.soft_delete``."""
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    IN_FLIGHT = "in_flight"
+    """The job is still running (already charged, cannot be stopped); delete it once it finishes."""
+
 
 class AspectRatio(StrEnum):
     """Supported aspect ratios."""
