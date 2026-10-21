@@ -26,8 +26,8 @@ from src.api.services.generation.source_media import (
 from src.api.services.generation.video_validation import (
     input_video_seconds,
     unsupported_video_parameters,
+    validate_source_media,
     validate_video_request,
-    validate_video_sources,
 )
 from src.api.services.job_state_transition import JobStateTransitionService
 from src.api.services.ops_event_bus import OpsEventBus
@@ -350,7 +350,7 @@ class GenerationService:
         # 2.2 Per-item validation requires the ownership-checked rows.
         self._validate_resolved_sources(resolved_source_media, contract)
         if video_meta is not None:
-            validate_video_sources(resolved_source_media, request, video_meta)
+            validate_source_media(resolved_source_media, request, video_meta)
 
         # 3. Output count cap
         max_n = request.model.max_concurrent_outputs

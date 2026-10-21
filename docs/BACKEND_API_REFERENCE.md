@@ -928,6 +928,10 @@ VideoConstraints: {
     max_duration_ms: int | null,         //   longest accepted clip; null = no model-specific cap
     max_bytes: int | null                //   largest accepted file in bytes; null = no model-specific cap
   } | null,
+  input_image: {                         // i2v/flf2v/r2v source limits; null = the model accepts no image source
+    formats: string[],                   //   sorted accepted image formats, e.g. ["jpeg", "png", "webp"]
+    max_bytes: int | null                //   largest accepted file in bytes (Wan: 20000000); null = no model-specific cap
+  } | null,
   max_combined_duration: int | null,     // v2v: input seconds + requested duration must not exceed this; null = no rule
   input_anchored_modes: string[]         // sorted generation modes whose output ratio follows the input ⇒ omit aspect_ratio there; other modes accept it (Wan: ["flf2v","i2v","v2v"]; others: [])
 }

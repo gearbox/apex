@@ -278,9 +278,42 @@ class TestModelInfoSchema:
             "resolutions",
             "supported_parameters",
             "input_video",
+            "input_image",
             "max_combined_duration",
             "input_anchored_modes",
         }
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            (
+                ModelType.WAN_3_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": 20000000},
+            ),
+            (
+                ModelType.GROK_IMAGINE_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": None},
+            ),
+            (
+                ModelType.AISHA_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": None},
+            ),
+        ],
+    )
+    def test_image_input_constraints_are_discoverable(
+        self, model_type: ModelType, expected: dict[str, object]
+    ) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=aisha_video_capabilities()
+            if model_type is ModelType.AISHA_VIDEO
+            else None,
+        )
+
+        assert info.video is not None
+        assert msgspec.to_builtins(info.video.input_image) == expected
 
     @pytest.mark.parametrize("model_type", ModelType)
     def test_seed_range_is_discoverable_only_where_declared(self, model_type: ModelType) -> None:

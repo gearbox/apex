@@ -344,6 +344,11 @@ class MediaFormat(StrEnum):
         """Check if this is a video format."""
         return self in (MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV)
 
+    @property
+    def is_image(self) -> bool:
+        """Check if this is an image format."""
+        return not self.is_video
+
 
 class MediaKind(StrEnum):
     """Supported owned-library media kinds."""

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import dataclasses
-from contextlib import contextmanager
+from contextlib import AbstractContextManager, contextmanager
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, MagicMock, patch
@@ -26,8 +26,8 @@ from src.api.services.generation.source_media import (
 from src.api.services.generation.video_validation import (
     input_video_seconds,
     unsupported_video_parameters,
+    validate_source_media,
     validate_video_request,
-    validate_video_sources,
 )
 from src.api.services.model_studio.wan_payload import build_wan_video_payload
 from src.core.enums import (
@@ -343,17 +343,17 @@ def _v2v_request(model: ModelType, *, duration: int = 5) -> UnifiedGenerationReq
 
 
 @contextmanager
-def _resolved_v2v_source(source: ResolvedSourceMedia) -> Iterator[None]:
-    """Patch the owned-library lookups so ``generate`` sees exactly ``source``."""
+def _resolved_sources(*sources: ResolvedSourceMedia) -> Iterator[None]:
+    """Patch the owned-library lookups so ``generate`` sees exactly ``sources``."""
     with (
         _ENABLED_MODEL,
         patch(
             "src.api.services.generation.service.SourceMediaResolver.resolve",
-            new=AsyncMock(return_value=[source]),
+            new=AsyncMock(return_value=list(sources)),
         ),
         patch(
             "src.api.services.generation.service.UserImageRepository.touch_expiry_many",
-            new=AsyncMock(return_value=1),
+            new=AsyncMock(return_value=len(sources)),
         ),
         patch(
             "src.api.services.generation.service.GenerationJobSourceRepository.create_many",
@@ -361,6 +361,10 @@ def _resolved_v2v_source(source: ResolvedSourceMedia) -> Iterator[None]:
         ),
     ):
         yield
+
+
+def _resolved_v2v_source(source: ResolvedSourceMedia) -> AbstractContextManager[None]:
+    return _resolved_sources(source)
 
 
 @pytest.mark.parametrize(
@@ -395,7 +399,7 @@ def test_r2_the_container_message_lists_the_accepted_formats_sorted() -> None:
     source = dataclasses.replace(_video_source(6_000), content_type="video/webm")
 
     with pytest.raises(SourceMediaValidationError) as raised:
-        validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
+        validate_source_media([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
 
     assert str(raised.value) == (
         "source_media position 0: webm is not accepted; use one of mov, mp4"
@@ -409,7 +413,7 @@ def test_r2_an_unknown_container_is_named_by_its_content_type() -> None:
     source = dataclasses.replace(_video_source(6_000), content_type="video/x-matroska")
 
     with pytest.raises(SourceMediaValidationError, match="video/x-matroska is not accepted"):
-        validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
+        validate_source_media([source], _v2v_request(ModelType.WAN_3_VIDEO), wan)
 
 
 @pytest.mark.parametrize(
@@ -425,7 +429,7 @@ def test_r2_wan_accepts_a_source_exactly_at_the_provider_limits(
     wan = get_model_meta(ModelType.WAN_3_VIDEO).video
     assert wan is not None
 
-    validate_video_sources([source], _v2v_request(ModelType.WAN_3_VIDEO, duration=5), wan)
+    validate_source_media([source], _v2v_request(ModelType.WAN_3_VIDEO, duration=5), wan)
 
 
 async def test_r2_grok_v2v_still_accepts_a_webm_source() -> None:
@@ -551,3 +555,132 @@ async def test_c11_image_quote_has_no_video_basis() -> None:
     kwargs = service._pricing.quote.await_args.kwargs  # type: ignore[attr-defined]
     assert kwargs["billed_seconds"] == 0
     assert kwargs["video_resolution"] is None
+
+
+# ---- Z3: image sources are validated against ``video.input_image`` before billing -----------
+
+
+def _image_source(
+    size_bytes: int, *, position: int = 0, content_type: str = "image/png"
+) -> ResolvedSourceMedia:
+    return dataclasses.replace(
+        _video_source(None, position=position),
+        media_kind=MediaKind.IMAGE,
+        content_type=content_type,
+        storage_key=f"uploads/{uuid4()}.png",
+        size_bytes=size_bytes,
+    )
+
+
+def _image_request(
+    generation_type: GenerationType, count: int, model: ModelType = ModelType.WAN_3_VIDEO
+) -> UnifiedGenerationRequest:
+    return _request(
+        model,
+        generation_type=generation_type,
+        duration=5,
+        source_media=[SourceMediaReference(asset_ref=f"upload:{uuid4()}") for _ in range(count)],
+    )
+
+
+_OVERSIZE = "the maximum is 20000000 bytes"
+
+
+@pytest.mark.parametrize("size_bytes", [20_000_001, 20_500_000, 20 * 1024 * 1024, 35_000_000])
+@pytest.mark.parametrize(
+    ("generation_type", "sources"),
+    [
+        pytest.param(GenerationType.I2V, [0], id="i2v"),
+        pytest.param(GenerationType.FLF2V, [0, 1], id="flf2v-first"),
+        pytest.param(GenerationType.FLF2V, [1, 0], id="flf2v-last"),
+        pytest.param(GenerationType.R2V, [0, 1, 2], id="r2v-first"),
+        pytest.param(GenerationType.R2V, [2, 1, 0], id="r2v-last"),
+    ],
+)
+async def test_z3_an_oversized_wan_image_source_is_rejected_before_any_billing_work(
+    size_bytes: int, generation_type: GenerationType, sources: list[int]
+) -> None:
+    """Regression for the 20 MB probe: the quote and the submit used to run."""
+    service = _submitting_service()
+    # ``sources`` lists positions; the first entry is the oversized one.
+    images = [
+        _image_source(size_bytes if i == 0 else 1_000, position=pos)
+        for i, pos in enumerate(sources)
+    ]
+    oversized_position = sources[0]
+    request = _image_request(generation_type, len(images))
+
+    with (
+        _resolved_sources(*images),
+        pytest.raises(SourceMediaValidationError, match=_OVERSIZE) as raised,
+    ):
+        await _generate(service, request)
+
+    assert f"position {oversized_position}: source image is {size_bytes} bytes" in str(raised.value)
+    _assert_no_billing_work(service)
+    service._providers[Provider.ALIBABA].submit.assert_not_awaited()  # type: ignore[attr-defined]
+
+
+async def test_z3_wan_accepts_an_image_source_of_exactly_20_000_000_bytes() -> None:
+    service = _submitting_service()
+
+    with _resolved_sources(_image_source(20_000_000)):
+        await _generate(service, _image_request(GenerationType.I2V, 1))
+
+    assert service._pricing.quote.await_count == 1  # type: ignore[attr-defined]
+    service._providers[Provider.ALIBABA].submit.assert_awaited_once()  # type: ignore[attr-defined]
+
+
+async def test_z3_a_wan_image_in_an_unaccepted_format_is_rejected_before_billing() -> None:
+    service = _submitting_service()
+
+    with (
+        _resolved_sources(_image_source(1_000, content_type="image/gif")),
+        pytest.raises(SourceMediaValidationError, match="is not accepted"),
+    ):
+        await _generate(service, _image_request(GenerationType.I2V, 1))
+
+    _assert_no_billing_work(service)
+
+
+def test_z3_the_image_format_message_lists_the_accepted_formats_sorted() -> None:
+    wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert wan is not None
+
+    with pytest.raises(SourceMediaValidationError) as raised:
+        validate_source_media(
+            [_image_source(1, content_type="image/gif")], _image_request(GenerationType.I2V, 1), wan
+        )
+
+    assert str(raised.value) == (
+        "source_media position 0: image/gif is not accepted; use one of jpeg, png, webp"
+    )
+
+
+async def test_z3_grok_i2v_still_accepts_a_35_mb_image() -> None:
+    service = _service()
+    job = MagicMock(id=uuid4(), status="queued", name="x", created_at=datetime.now(UTC))
+    provider = MagicMock()
+    provider.validate = MagicMock()
+    provider.submit = AsyncMock(
+        return_value=ProviderSubmitResult(
+            receipt_held=False, job=job, balance_after=1, balance_event=None
+        )
+    )
+    service._providers[Provider.GROK] = provider
+
+    with _resolved_sources(_image_source(35_000_000)):
+        await _generate(
+            service, _image_request(GenerationType.I2V, 1, ModelType.GROK_IMAGINE_VIDEO)
+        )
+
+    provider.submit.assert_awaited_once()
+
+
+def test_z3_an_image_on_a_model_without_image_input_fails_closed() -> None:
+    wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+    assert wan is not None
+    no_images = dataclasses.replace(wan, input_image=None)
+
+    with pytest.raises(SourceMediaValidationError, match="does not accept an image source"):
+        validate_source_media([_image_source(1)], _image_request(GenerationType.I2V, 1), no_images)

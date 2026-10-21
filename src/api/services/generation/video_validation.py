@@ -3,7 +3,7 @@
 Pure functions over ``VideoMeta`` so every rule is unit-testable without the
 orchestrator. ``GenerationService.generate`` calls these before any billing
 work, in two phases: ``validate_video_request`` (request only) and
-``validate_video_sources`` (needs the ownership-checked, resolved assets).
+``validate_source_media`` (needs the ownership-checked, resolved assets).
 """
 
 from __future__ import annotations
@@ -98,8 +98,14 @@ def _video_source_seconds(sources: Sequence[ResolvedSourceMedia], video: VideoMe
     return seconds
 
 
-def _validate_clip(source: ResolvedSourceMedia, clip: InputVideoConstraints) -> None:
-    """Check one video source's container, size and duration, in that order.
+def _check_format_and_size(
+    source: ResolvedSourceMedia,
+    *,
+    formats: frozenset[MediaFormat],
+    max_bytes: int | None,
+    noun: str,
+) -> None:
+    """Check one source's container/format, then its size, in that order.
 
     Every message names the limit and the position only; none carries a storage key or URL.
     """
@@ -108,17 +114,23 @@ def _validate_clip(source: ResolvedSourceMedia, clip: InputVideoConstraints) -> 
         container: MediaFormat | None = MediaFormat.from_content_type(source.content_type)
     except ValueError:
         container = None
-    if container is None or container not in clip.formats:
+    if container is None or container not in formats:
         shown = container.value if container is not None else source.content_type
-        allowed = ", ".join(sorted(fmt.value for fmt in clip.formats))
+        allowed = ", ".join(sorted(fmt.value for fmt in formats))
         raise SourceMediaValidationError(
             f"source_media position {position}: {shown} is not accepted; use one of {allowed}"
         )
-    if clip.max_bytes is not None and source.size_bytes > clip.max_bytes:
+    if max_bytes is not None and source.size_bytes > max_bytes:
         raise SourceMediaValidationError(
-            f"source_media position {position}: source video is {source.size_bytes} bytes; "
-            f"the maximum is {clip.max_bytes} bytes"
+            f"source_media position {position}: source {noun} is {source.size_bytes} bytes; "
+            f"the maximum is {max_bytes} bytes"
         )
+
+
+def _validate_clip(source: ResolvedSourceMedia, clip: InputVideoConstraints) -> None:
+    """Check one video source's container, size and duration, in that order."""
+    position = source.position
+    _check_format_and_size(source, formats=clip.formats, max_bytes=clip.max_bytes, noun="video")
     if clip.min_duration_ms == 0 and clip.max_duration_ms is None:
         return
     if source.duration_ms is None:
@@ -138,12 +150,27 @@ def _validate_clip(source: ResolvedSourceMedia, clip: InputVideoConstraints) -> 
         )
 
 
-def validate_video_sources(
+def validate_source_media(
     sources: Sequence[ResolvedSourceMedia],
     request: UnifiedGenerationRequest,
     video: VideoMeta,
 ) -> None:
-    """Enforce container, size, per-clip and combined-duration limits on video inputs."""
+    """Enforce format, size, per-clip and combined-duration limits on image and video inputs."""
+    images = [source for source in sources if source.media_kind is MediaKind.IMAGE]
+    if images:
+        if video.input_image is None:
+            # Source cardinality/kind validation rejects this earlier; fail closed on a
+            # registry that lets an image through to a model that takes none.
+            raise SourceMediaValidationError(
+                f"Model '{request.model.value}' does not accept an image source"
+            )
+        for image in images:
+            _check_format_and_size(
+                image,
+                formats=video.input_image.formats,
+                max_bytes=video.input_image.max_bytes,
+                noun="image",
+            )
     clips = [source for source in sources if source.media_kind is MediaKind.VIDEO]
     if not clips:
         return

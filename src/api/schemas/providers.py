@@ -75,6 +75,16 @@ class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
     """Largest accepted source file in bytes. null = no model-specific cap."""
 
 
+class InputImageConstraintsInfo(msgspec.Struct, kw_only=True):
+    """What the model accepts as an image source (i2v, flf2v, r2v)."""
+
+    formats: list[str]
+    """Accepted image formats (sorted), e.g. ["jpeg", "png", "webp"]. Filter the library picker by these."""
+
+    max_bytes: int | None = None
+    """Largest accepted source file in bytes. null = no model-specific cap."""
+
+
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
 
@@ -93,6 +103,9 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
 
     input_video: InputVideoConstraintsInfo | None = None
     """Video-source (v2v) limits. null = the model accepts no video source."""
+
+    input_image: InputImageConstraintsInfo | None = None
+    """Image-source (i2v/flf2v/r2v) limits. null = the model accepts no image source."""
 
     max_combined_duration: int | None = None
     """v2v: input seconds + requested output seconds must not exceed this. null = no rule."""

@@ -100,6 +100,27 @@ class InputVideoConstraints:
 
 
 @dataclass(frozen=True, slots=True)
+class InputImageConstraints:
+    """What a model accepts as an *image source* (I2V, FLF2V, R2V), checked before billing.
+
+    Every field is required with no default so a new model decides each one.
+    """
+
+    formats: frozenset[MediaFormat]
+    """Image formats the provider decodes; a source in any other format is rejected locally."""
+
+    max_bytes: int | None
+    """Largest accepted source file in bytes (decimal, never rounded up). None = no cap."""
+
+    def __post_init__(self) -> None:
+        """Reject a registry entry that could never accept any source."""
+        if not self.formats or not all(fmt.is_image for fmt in self.formats):
+            raise ValueError("input image formats must be a non-empty set of image formats")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+
+@dataclass(frozen=True, slots=True)
 class SeedRange:
     """Inclusive bounds a model accepts for ``seed``."""
 
@@ -143,6 +164,10 @@ class VideoMeta:
     input_video: InputVideoConstraints | None
     """Video-source (V2V) limits. None = the model accepts no video source; it must be
     non-None exactly when one of the model's generation modes takes ``MediaKind.VIDEO``."""
+
+    input_image: InputImageConstraints | None
+    """Image-source (I2V/FLF2V/R2V) limits. None = the model accepts no image source; it must
+    be non-None exactly when one of the model's generation modes takes ``MediaKind.IMAGE``."""
 
     max_combined_duration: int | None
     """V2V: input seconds + requested output seconds must not exceed this. None = no rule."""
@@ -295,6 +320,11 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                 max_duration_ms=None,
                 max_bytes=None,
             ),
+            # Every library image format, no size cap: preserves the pre-registry behaviour.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=None,
+            ),
             max_combined_duration=None,
             bills_input_video_seconds=False,
         ),
@@ -390,6 +420,11 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             supported_parameters=frozenset(),
             input_anchored_modes=frozenset(),
             input_video=None,  # no mode takes a video source
+            # Every library image format, no size cap: preserves the pre-registry behaviour.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=None,
+            ),
             max_combined_duration=None,
             bills_input_video_seconds=False,
         ),
@@ -457,6 +492,14 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
                 min_duration_ms=1_000,
                 max_duration_ms=15_000,
                 max_bytes=100_000_000,
+            ),
+            # first_frame / last_frame / reference_image: JPEG, JPG, PNG, BMP, WEBP (the
+            # library holds png/jpeg/webp), <= 20 MB each (Wan 3.0 API reference). Decimal
+            # 20 MB, the conservative reading. Side length (240-8000 px) and aspect ratio
+            # (<= 8:1) are not checked locally: ResolvedSourceMedia has no dimensions.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=20_000_000,
             ),
             max_combined_duration=30,
             bills_input_video_seconds=True,

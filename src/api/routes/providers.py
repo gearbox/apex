@@ -19,6 +19,7 @@ from src.api.dependencies.auth import get_optional_user_id
 from src.api.schemas.providers import (
     GenerationModeInfo,
     ImageConstraints,
+    InputImageConstraintsInfo,
     InputVideoConstraintsInfo,
     ModelInfo,
     ModelProvisioningHintResponse,
@@ -180,6 +181,14 @@ def _build_model_info(
                         max_bytes=meta.video.input_video.max_bytes,
                     )
                     if meta.video.input_video is not None
+                    else None
+                ),
+                input_image=(
+                    InputImageConstraintsInfo(
+                        formats=sorted(f.value for f in meta.video.input_image.formats),
+                        max_bytes=meta.video.input_image.max_bytes,
+                    )
+                    if meta.video.input_image is not None
                     else None
                 ),
                 max_combined_duration=meta.video.max_combined_duration,

@@ -185,6 +185,9 @@ class VideoConstraints(msgspec.Struct, kw_only=True):
     """v2v source limits (formats, min/max duration in ms, max bytes). None = the model
     accepts no video source."""
 
+    input_image: InputImageConstraintsInfo | None = None
+    """i2v/flf2v/r2v source limits (formats, max bytes). None = the model accepts no image source."""
+
     max_combined_duration: int | None = None
     """v2v: input seconds + requested duration must not exceed this. None = no rule."""
 

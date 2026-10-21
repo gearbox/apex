@@ -18,7 +18,12 @@ from src.core.enums import (
     MediaSlot,
     ModelType,
 )
-from src.core.model_registry import MODEL_METADATA, InputVideoConstraints, get_model_meta
+from src.core.model_registry import (
+    MODEL_METADATA,
+    InputImageConstraints,
+    InputVideoConstraints,
+    get_model_meta,
+)
 from src.db.models.base import Base
 
 if TYPE_CHECKING:
@@ -309,6 +314,60 @@ class TestInputVideoConstraints:
         }
         with pytest.raises(ValueError):
             InputVideoConstraints(**(base | kwargs))  # type: ignore[arg-type]
+
+
+class TestInputImageConstraints:
+    """``VideoMeta.input_image`` is declared exactly where a mode takes an image source."""
+
+    _VIDEO_MODELS: ClassVar[list[ModelType]] = [
+        m for m in ModelType if MODEL_METADATA[m].video is not None
+    ]
+
+    @pytest.mark.parametrize("model", _VIDEO_MODELS)
+    def test_declared_iff_a_mode_accepts_an_image_source(self, model: ModelType) -> None:
+        video = get_model_meta(model).video
+        assert video is not None
+        accepts = any(
+            mode.source_media is not None and MediaKind.IMAGE in mode.source_media.media_types
+            for mode in get_model_meta(model).generation_modes.values()
+        )
+        assert (video.input_image is not None) is accepts
+
+    @pytest.mark.parametrize("model", _VIDEO_MODELS)
+    def test_formats_are_a_non_empty_set_of_image_formats(self, model: ModelType) -> None:
+        video = get_model_meta(model).video
+        assert video is not None
+        if video.input_image is None:
+            return
+        assert video.input_image.formats
+        assert all(fmt.is_image for fmt in video.input_image.formats)
+
+    def test_pinned_values(self) -> None:
+        library_images = frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP})
+        wan = get_model_meta(ModelType.WAN_3_VIDEO).video
+        grok = get_model_meta(ModelType.GROK_IMAGINE_VIDEO).video
+        aisha = get_model_meta(ModelType.AISHA_VIDEO).video
+        assert wan is not None
+        assert grok is not None
+        assert aisha is not None
+        assert wan.input_image == InputImageConstraints(
+            formats=library_images, max_bytes=20_000_000
+        )
+        assert grok.input_image == InputImageConstraints(formats=library_images, max_bytes=None)
+        assert aisha.input_image == InputImageConstraints(formats=library_images, max_bytes=None)
+
+    @pytest.mark.parametrize(
+        "kwargs",
+        [
+            {"formats": frozenset()},
+            {"formats": frozenset({MediaFormat.MP4})},
+            {"max_bytes": 0},
+        ],
+    )
+    def test_an_unsatisfiable_declaration_is_rejected(self, kwargs: dict[str, object]) -> None:
+        base: dict[str, object] = {"formats": frozenset({MediaFormat.PNG}), "max_bytes": None}
+        with pytest.raises(ValueError):
+            InputImageConstraints(**(base | kwargs))  # type: ignore[arg-type]
 
 
 def test_every_declarative_model_is_exported_from_models_registry() -> None:
