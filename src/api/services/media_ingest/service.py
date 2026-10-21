@@ -129,6 +129,8 @@ class MediaIngestService:
         video_deadline_seconds: float = 90.0,
         stage_timeout_seconds: float = 30.0,
         max_animation_frames: int = 100,
+        video_slots: asyncio.Semaphore | None = None,
+        image_slots: asyncio.Semaphore | None = None,
     ) -> None:
         if max_image_megapixels <= 0 or max_input_bytes <= 0:
             raise ValueError("media byte and pixel limits must be positive")
@@ -146,8 +148,14 @@ class MediaIngestService:
         self._video_deadline_seconds = video_deadline_seconds
         self._stage_timeout_seconds = stage_timeout_seconds
         self._max_animation_frames = max_animation_frames
-        self._image_slots = asyncio.Semaphore(image_concurrency)
-        self._video_slots = asyncio.Semaphore(video_concurrency)
+        # Supplying a semaphore lets several instances (different byte budgets)
+        # share one process-wide admission budget; ``None`` keeps the own-slot default.
+        self._image_slots = (
+            image_slots if image_slots is not None else asyncio.Semaphore(image_concurrency)
+        )
+        self._video_slots = (
+            video_slots if video_slots is not None else asyncio.Semaphore(video_concurrency)
+        )
 
     async def prepare_image(self, data: bytes, *, policy: ImageIngestPolicy) -> PreparedImage:
         """Normalize/strip an image, then compute PDQ from exactly stored bytes."""

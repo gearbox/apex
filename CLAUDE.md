@@ -12,6 +12,16 @@ One project lives in this repo:
 
 **Aisha** lives in its own separate repo (`gearbox/apex`).
 
+### Generation Providers
+
+| Provider | `Provider` | Mode | Models | Video worker |
+|----------|-----------|------|--------|--------------|
+| Aisha (own ComfyUI GPU nodes) | `aisha` | on-demand (per-user GPU session) | `aisha-image`, `aisha-image-lite`, `aisha-video` | `AishaJobPoller` |
+| xAI Grok | `grok` | always-on | `grok-imagine-image`, `grok-2-image-1212`, `grok-imagine-video` | `grok_video_poller` |
+| Alibaba Model Studio (Wan) | `alibaba` | always-on | `wan3.0-video` (t2v, i2v, flf2v, v2v, r2v) | `alibaba_video_poller` |
+
+Async cloud-video completion is provider-neutral (`src/api/services/video_jobs/`); Grok and Wan each run **their own** `AsyncVideoJobWorker` (separate lease, interval, semaphore and standalone process), so they poll and finalize independently. Frontend contract for Wan: `docs/contracts/wan-video-contract.md`.
+
 ### Multi-Product Architecture
 
 The backend serves two distinct products from the same codebase:
@@ -115,6 +125,19 @@ The backend serves two distinct products from the same codebase:
 │   │       │       ├── cloud_provider.py  # CloudProviderChecker (ABC), GrokChecker
 │   │       │       ├── platform_api.py    # VastAIChecker
 │   │       │       └── gpu_session.py     # GpuSessionReconciler — probes active sessions, marks stale
+│   │       ├── video_jobs/     # Provider-neutral async-video completion (Grok + Wan)
+│   │       │   ├── receipts.py      # AcceptedTaskReceipts (record on a dedicated pool, claim under the request lock),
+│   │       │   │                    #   record_acceptance(), cancel_orphan_immediately(), build_accepted_task_receipts()
+│   │       │   ├── reconciler.py    # AcceptedTaskReconciler(+Worker) — observe, then cancel/absorb orphans; never bills
+│   │       │   ├── outcome.py       # RemoteVideoResult, VideoPollOutcome
+│   │       │   ├── protocol.py      # AsyncVideoJobService (provider, transient_poll_errors, running_progress_pct)
+│   │       │   ├── materializer.py  # RemoteVideoMaterializer — finalization claim, R2 materialization, attempt reconciliation
+│   │       │   ├── errors.py        # ProviderOutputUnavailableError — permanent 4xx on a result URL → settled as OUTPUT_NOT_DELIVERED on the first poll (5xx/408/425/429/transport keep retrying)
+│   │       │   ├── worker.py        # AsyncVideoJobWorker(PeriodicWorker) — ONE instance per provider
+│   │       │   ├── settlement.py / transition.py / download.py  # shared settle fn, transition factory, credential-free download client
+│   │       │   └── cli.py           # run_video_worker() — shared standalone-process body
+│   │       ├── model_studio/   # Alibaba Model Studio (DashScope): client.py (create/get task), failure_classifier.py
+│   │       │                   #   (structured codes only), wan_payload.py (pure body builder), wan_job_service.py
 │   │       ├── session_termination.py  # SessionTerminationService — terminate_all(): lock user, revoke refresh tokens,
 │   │       │                        #   bulk access-token epoch, ops report, push cleanup (never commits; reset_password + OAuth claim)
 │   │       ├── job_manager.py
@@ -209,6 +232,7 @@ Routes (Controllers) → Services (Business Logic) → Repository (Data Access) 
 - **Services** (`src/api/services/`): Business logic. Injected via Litestar DI. Services receive repositories/other services as constructor args.
 - **Repository** (`src/db/repositories/`): `UserRepository`, `BillingRepository`, `JobRepository`, `OutputRepository`, `UserImageRepository` — all DB queries go here. Receive `AsyncSession`. Never imported directly by routes.
 - **Models** (`src/db/models/`): SQLAlchemy 2.0 declarative models using `Mapped[]` and `mapped_column()`.
+- **In-flight jobs cannot be soft-deleted** (`JobRepository.soft_delete` is one conditional `UPDATE … WHERE status NOT IN (JobStatus.in_flight())` returning `SoftDeleteOutcome`; the route answers 409 `job_in_progress`). Enforced by `ck_generation_jobs_not_deleted_in_flight` (migration 054), so a lifecycle query's `is_deleted` filter can never hide a charged job. Retention only soft-deletes finished jobs.
 
 ### Dependency Injection
 
@@ -229,6 +253,9 @@ dependencies = {
     "user_content": Provide(get_user_content, sync_to_thread=False),  # request-scoped
     # Grok services
     "grok_job_service": Provide(get_grok_job_service, sync_to_thread=False),
+    "wan_job_service": Provide(
+        get_wan_job_service, sync_to_thread=False
+    ),  # Alibaba Model Studio (Wan)
     # Billing services
     "billing_service": Provide(get_billing_service, sync_to_thread=False),
     "pricing_service": Provide(get_pricing_service, sync_to_thread=False),
@@ -293,7 +320,7 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
    - Pydantic is exclusively for `Settings(BaseSettings)` in `src/core/config.py`
 
 2. **Enums in `src/core/enums.py`** — all `str, Enum` for JSON compatibility:
-   - `ModelType`, `GenerationType` (t2i, i2i, t2v, i2v, flf2v, v2v), `JobStatus`, `AspectRatio`
+   - `ModelType`, `GenerationType` (t2i, i2i, t2v, i2v, flf2v, v2v, r2v), `JobStatus`, `AspectRatio`
    - `TransactionType` (debit, credit, refund, admin_adjust), `AccountType`, `PaymentStatus`, `SubscriptionTier`
    - `Product` (vex, synthara)
    - `OutputMediaType` (image, video), `LibraryBadge` (image, prompt), `LibraryGroupSourceType` (upload, output)
@@ -345,6 +372,8 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
 
 15. **OAuth sign-in** — server-side OIDC code flow (Google today) in `src/api/services/oauth/`, routes in `src/api/routes/oauth.py`, identities in `user_identities` (`UserIdentity`, `password_hash` is nullable for OAuth-only users). Per-product clients via `ProductConfig.oauth_clients` → `Settings.google_oauth_client_*_{slug}` + `api_public_url_{slug}` (the only redirect_uri source); `OAuthProviderRegistry.is_enabled` gates `/authorize` and `product-info`. State/handoff/ticket are single-use Redis values (`oauth:flow|handoff|signup:*`, `GETDEL`) bound to the `apex_oauth_tx` cookie; tokens are minted only at `/exchange` and `/complete-signup`; the callback commits DB writes **before** writing the handoff. Unknown identities create **no rows** until `complete-signup` (legal acceptance first). A same-email local account is linked (verified: password and sessions kept) or, if its email was never verified, **claimed** (D5'): `UserRepository.claim_unverified_email` (conditional UPDATE — sets `email_verified_at`, clears `password_hash`) then `SessionTerminationService.terminate_all`, all before the callback commit; `identity_conflict` is checked *before* any claim, and `AuthService.issue_session` waits out the revocation epoch's second so the exchange token isn't born revoked. There is no `account_exists_unverified` error. Self-closure deletes identities; admin deactivation keeps them. Contract: `docs/contracts/oauth-contract.md`.
 
+16. **Registry-driven video validation & pricing** — `ModelMeta.video` (`VideoMeta`, `src/core/model_registry.py`) is the single source for video limits: `min_duration`/`max_duration`, `resolutions`, `supported_parameters` (`VideoParameter`: `audio`, `prompt_extend`), `input_anchored_modes`, `input_video` (`InputVideoConstraints`: accepted `formats`, `min_duration_ms`/`max_duration_ms`, `max_bytes`; `None` = the model takes no video source — non-`None` exactly when a mode accepts `MediaKind.VIDEO`), `max_combined_duration`, `bills_input_video_seconds`. Every field is required with **no default** — a new video model must decide each one. `GenerationService.generate()` validates against it **before any billing call** (`src/api/services/generation/video_validation.py`: request phase, then resolved-source phase for V2V); never re-implement these rules in a provider's `validate()`. An optional parameter sent non-`None` to a model that doesn't declare it raises `UnsupportedGenerationParameterError` (also for image models). `ModelMeta.seed_range` (`SeedRange`; `None` = unbounded, Wan is 0–2147483647) is enforced for **every** model by `validate_seed` (`generation/request_validation.py`) before any billing call; `null`/omitted always means random and `-1` is rejected, so there is one spelling of "random". Pricing: `quote = (token_cost + input_token_cost·k + per_second_token_cost·billed_seconds) · n`, with `billed_seconds = duration (+ input-video seconds when bills_input_video_seconds)`; `pricing_catalog.video_resolution` (NULL = any) selects the rule by four tiers (model+resolution → model → resolution → wildcard) and image jobs never match a resolution-specific rule. A per-second rule priced with `billed_seconds == 0` raises. Per-provider charge/refund rules come from `ProviderBillingPolicyRegistry.from_settings(settings)`.
+
 ---
 
 ## Common Commands
@@ -393,7 +422,7 @@ make format                       # ruff format
 | `GenerationOutput` | `generation_outputs` | Generated output images metadata |
 | `TokenAccount` | `token_accounts` | Token balance accounts (personal or enterprise) |
 | `TokenTransaction` | `token_transactions` | Append-only token ledger (debits, credits, refunds) |
-| `PricingRule` | `pricing_rules` | Per-model token cost catalog |
+| `PricingRule` | `pricing_catalog` | Token cost catalog: flat `token_cost`, per-input `input_token_cost`, per-video-second `per_second_token_cost`, optional `video_resolution` |
 | `Payment` | `payments` | Stripe payment records |
 | `Organization` | `organizations` | Teams with shared token accounts |
 | `OrganizationMember` | `organization_members` | Org membership + roles (owner/admin/member) |
@@ -421,7 +450,8 @@ All periodic background loops (token cleanup, Aisha/Grok job polling, GPU provis
 - **Rate limiter failure posture**: `RateLimitMiddleware` (`src/api/middleware/rate_limit.py`) fails OPEN on Redis storage errors from `limiter.hit()`/`get_window_stats()` — logs `rate_limit.storage_error` at `warning` and lets the request through with no `X-RateLimit-*` headers, rather than 500ing login/register/content-cookie. This matches `TokenRevocationService.is_revoked`'s established fail-open posture for the same dependency (rate limiting is abuse control, not authorization). The rate limiter uses its own independent Redis client (`limits.aio.storage.RedisStorage`, not the pools above) but is configured with the same `Settings`-derived socket timeouts so it can't stall the auth path waiting on a hung backend.
 - **`WORKER_MODE`** (env, `Settings.worker_mode`): `all` (default) starts every worker alongside the API; `api_only` starts none, for a process that only serves HTTP while workers run elsewhere. `asgi_workers > 1` with `WORKER_MODE=all` requires `REDIS_URL` (enforced by a `Settings` startup validator) — without it every Granian process would run every worker with no leader election.
 - **Liveness**: `WorkerHeartbeatChecker` (`src/api/services/health/checkers/workers.py`, category `ComponentCategory.workers`) reports a worker stale if it's running, holds the leader lease, and hasn't ticked within `max(3 × interval, 120s)` (with a startup grace period for workers that haven't ticked yet). Non-leader and stopped workers are never reported stale. Registered into the same `HealthCheckRegistry` surfaced at `/v1/admin/health`.
-- **Grok video worker**: also runnable standalone via `python -m src.workers.grok_video` — it shares the same lease key as the in-process worker, so running both simultaneously is safe.
+- **Async video workers** (`AsyncVideoJobWorker`, `src/api/services/video_jobs/worker.py`): one instance **per provider**, each with its own name (lease key), interval, concurrency semaphore and settings, built from the provider's `AsyncVideoJobService`. Grok's is `grok_video_poller` (name is byte-for-byte stable — it feeds the lease key; also runnable standalone via `python -m src.workers.grok_video`); Wan's is `alibaba_video_poller` (`WAN_VIDEO_*` settings, standalone `python -m src.workers.wan_video`). A standalone process shares the lease with its in-process twin, so running both is safe. **Poller defaults:** `GROK_VIDEO_WORKER_IN_PROCESS` / `WAN_VIDEO_WORKER_IN_PROCESS` default to `true` (opt-out only when a standalone worker polls): without a proactive poller a job nobody reads never settles. The receipt reconcilers are started by `_start_video_lifecycle_workers` (`dependencies/common.py`) whenever workers run and the provider is configured, **independently of the poller flag**; `build_receipt_reconciler_worker` is the one construction site (in-process and standalone). Each worker polls only its own provider's jobs (`JobRepository.list_pending_video_jobs(provider=…)` — `provider` is required; the polled types are every `GenerationType` with video output). Completion is shared: `RemoteVideoMaterializer` owns the finalization claim, R2 materialization and crash reconciliation for every provider. Provider outputs have their **own** byte budget (`MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB`, default 200): the materializer streams the download and aborts above `max_output_bytes`, and prepares it with a separate `MediaIngestService` built by `build_provider_video_ingest_service` (user uploads keep `MAX_UPLOAD_SIZE_MB`; both services share one pair of admission semaphores, so ffmpeg concurrency stays a single per-process budget). Grok still emits a legacy fabricated 50 % progress while running (`running_progress_pct`); new providers must use `None`.
+- **Accepted-task receipts** (`src/api/services/video_jobs/receipts.py`, `reconciler.py`, table `accepted_task_receipts`, migration 053): a provider accepts an async video task *inside* the open request transaction, so a later failure/rollback would leave a billable upstream task nobody references. Both `WanJobService` and `GrokJobService.start_video_job` call `record_acceptance()` right after acceptance: the task id is inserted and committed on a **dedicated small pool** (`receipt_db`, `VIDEO_TASK_RECEIPT_DB_*` — never the request pool), then the request transaction `DELETE`s the row under `READ COMMITTED`, holding its lock until commit/rollback. A commit removes the receipt with the job; a rollback leaves an unlocked `pending` orphan. `job_id` has no FK on purpose. The per-provider `AcceptedTaskReconcilerWorker` (`alibaba_video_receipts` / `grok_video_receipts`, `RECEIPT_RECONCILER_NAME`) reads with `FOR UPDATE SKIP LOCKED`, so it can never touch an in-flight request, and **observes first, then acts**: `cancelled` (upstream `CANCELED`, or `PENDING` → cancel) or `absorbed` (anything else; Grok has no cancel). The reconciler absorbs only on a compensator's `permanent_errors` (a provider answer retrying cannot change); any other exception (a bug) leaves the receipt `pending` and is retried loudly. **Orphans are cancelled or absorbed, never charged** — the reconciler imports nothing from billing and writes no ledger row. A post-acceptance failure inside the job service also cancels immediately (`cancel_orphan_immediately`: rolls the request back first, since it holds the receipt's row lock). A receipt that cannot be written never fails the request: `video_receipt.unrecorded` (ERROR) + `video_task.receipt_unrecorded` ops alert with the task id. `receipts` and `compensator` are **required** constructor args of both job services. `GenerationService`/routes know nothing about receipts. The standalone `src.workers.*_video` processes run the reconciler too (same lease as the in-process twin). The reconciler runs wherever workers run, independently of the poller.
 - **Push dispatcher** (`src/workers/push_dispatcher.py`): fans out real-time events as Web Push notifications. Deliberately does **not** subclass `PeriodicWorker` — it's a long-lived Redis Pub/Sub read loop (`psubscribe("user:*")` + `subscribe("system:broadcast")`), not a tick — but reuses the same `LeaderLease` so only one process holds the subscription in multi-worker deployments. Starts only when `Settings.push_enabled` (VAPID keys + `REDIS_URL` all set). See §15b of `docs/BACKEND_API_REFERENCE.md` for the event → notification mapping and wire contract.
 - **Content retention sweeper** (`ContentRetentionWorker`, `src/workers/content_retention.py` + `ContentRetentionService`, `src/api/services/content_retention.py`): enforces `expires_at` on `generation_outputs`/`user_images` — deletes expired DB rows first (bulk core `DELETE`, batched via `Settings.content_cleanup_batch_size`/`content_cleanup_max_batches_per_run`), soft-deletes jobs left with zero outputs, purges the matching `library_asset_metadata`/`library_asset_tags` rows (polymorphic, no FK — orphaned otherwise), commits, then best-effort deletes the matching R2 objects (`R2StorageService.delete_many`). Deliberately opts out of the leader lease (`use_leader_lease=False`, D5) — sweep deletes are idempotent (a row already gone isn't reselected; an R2 delete of a missing key is a no-op), so duplicate ticks across instances are harmless; revisit if Apex goes multi-replica and duplicate R2 delete traffic becomes worth avoiding. Starts only when `Settings.content_cleanup_enabled` and R2 is configured. ⚠️ With the default `RETENTION_DAYS=7`, all user generations are deleted a week after creation — confirm the production retention value before enabling in prod.
 - **Media ingest and PDQ ledger** (`src/api/services/media_ingest/`, `src/api/services/media_hash_ledger.py`, `media_hashes`): every new original is prepared before R2 by the process-local shared ingestor. It strips unapproved container metadata, bakes static orientation, and hashes the exact stored image/video samples under immutable profiles. ICC/colour/aspect and compressed rendering data are functional exceptions, so “sanitized” does not mean every identifying byte is removed. Original row → ledger rows → mandatory flush must occur before each optional thumbnail savepoint. Ledger rows survive content retention/deletion, cascade with a hard user deletion, and null their job relation on hard job deletion. See `docs/designs/media-ingest-pdq-ledger.md` for format, animation, failure, and transaction details.
@@ -480,6 +510,11 @@ PUSH_BROADCAST_CONCURRENCY=10  # Max concurrent Web Push sends per broadcast fan
 
 # Legal documents (see docs/CONFIGURATION.md)
 LEGAL_DOCUMENTS_DIR=legal      # manifest.toml + {product}/{doc_type}/{YYYY-MM-DD}.md; validated at startup
+
+# Alibaba Model Studio / Wan (empty URL or key = provider disabled; see docs/CONFIGURATION.md)
+MODEL_STUDIO_BASE_URL=https://<workspace>.ap-southeast-1.maas.aliyuncs.com   # https origin, no path
+MODEL_STUDIO_API_KEY=...       # sk- key; SecretStr, never logged
+WAN_VIDEO_POLL_INTERVAL=15     # + WAN_VIDEO_MAX_POLL_TIME, WAN_VIDEO_FINALIZATION_LEASE_SECONDS, WAN_VIDEO_WORKER_IN_PROCESS, ...
 
 # Aisha-specific
 ACS_COMFYUI_PATH=/workspace/ComfyUI

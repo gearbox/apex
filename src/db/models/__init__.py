@@ -1,5 +1,6 @@
 """Database models module."""
 
+from .accepted_task_receipt import AcceptedTaskReceipt
 from .admin import AdminAuditLog, AdminPermissionGrant
 from .admin_notifications import AdminNotificationPreference, AdminTelegramLink
 from .auth_tokens import EmailVerificationToken, PasswordResetToken
@@ -38,6 +39,7 @@ from .user import RefreshToken, User
 from .user_identity import UserIdentity
 
 __all__ = [
+    "AcceptedTaskReceipt",
     "AdminAuditLog",
     "AdminNotificationPreference",
     "AdminPermissionGrant",

@@ -80,7 +80,9 @@ async def test_grok_i2i_source_images_resolve_storage_references_to_provider_url
     job = MagicMock()
     job.status = JobStatus.COMPLETED.value
     grok_job_service = SimpleNamespace(
-        create_image_job=AsyncMock(return_value=ProviderSubmitResult(job=job, balance_after=88))
+        create_image_job=AsyncMock(
+            return_value=ProviderSubmitResult(receipt_held=False, job=job, balance_after=88)
+        )
     )
     provider = GrokGenerationProvider(
         cast("GrokJobService", grok_job_service),
@@ -124,7 +126,9 @@ async def test_grok_i2i_without_resolved_sources_skips_presigning() -> None:
     r2_storage = SimpleNamespace(get_presigned_url=AsyncMock())
     job = MagicMock(status=JobStatus.COMPLETED.value)
     grok_job_service = SimpleNamespace(
-        create_image_job=AsyncMock(return_value=ProviderSubmitResult(job=job, balance_after=25))
+        create_image_job=AsyncMock(
+            return_value=ProviderSubmitResult(receipt_held=False, job=job, balance_after=25)
+        )
     )
     provider = GrokGenerationProvider(
         cast("GrokJobService", grok_job_service),
@@ -171,7 +175,9 @@ async def test_grok_i2i_resolved_upload_is_presigned_for_provider() -> None:
     job = MagicMock()
     job.status = JobStatus.COMPLETED.value
     grok_job_service = SimpleNamespace(
-        create_image_job=AsyncMock(return_value=ProviderSubmitResult(job=job, balance_after=77))
+        create_image_job=AsyncMock(
+            return_value=ProviderSubmitResult(receipt_held=False, job=job, balance_after=77)
+        )
     )
     provider = GrokGenerationProvider(
         cast("GrokJobService", grok_job_service),
@@ -220,7 +226,9 @@ async def test_grok_video_routes_resolved_assets_by_media_kind() -> None:
     )
     job = MagicMock(status=JobStatus.QUEUED.value)
     grok_job_service = SimpleNamespace(
-        start_video_job=AsyncMock(return_value=ProviderSubmitResult(job=job, balance_after=77))
+        start_video_job=AsyncMock(
+            return_value=ProviderSubmitResult(receipt_held=False, job=job, balance_after=77)
+        )
     )
     provider = GrokGenerationProvider(
         cast("GrokJobService", grok_job_service),

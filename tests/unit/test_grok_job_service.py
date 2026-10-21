@@ -12,9 +12,9 @@ import pytest
 from src.api.services.generation.provider_failures import ProviderModerationRejectedError
 from src.api.services.grok import GrokClient, GrokImageResult, GrokModerationError
 from src.api.services.grok.enums import ResponseImageFormat
-from src.api.services.grok.job_service import GrokJobService
 from src.api.services.media_ingest import InvalidMediaError
 from src.core.enums import AspectRatio, GenerationType, JobStatus, ModelType
+from tests.grok_support import make_grok_job_service
 from tests.media_ingest_support import make_media_ingestor
 
 if TYPE_CHECKING:
@@ -98,7 +98,7 @@ async def test_create_image_job_i2i_preserves_requested_output_count() -> None:
         ),
         refund=AsyncMock(),
     )
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
     store_image_result = AsyncMock()
@@ -160,7 +160,7 @@ async def test_invalid_image_after_provider_acceptance_leaves_job_unsettled() ->
             )
         )
     )
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
     with (
@@ -203,7 +203,7 @@ async def test_create_image_job_i2i_without_resolved_input_url_fails_before_rese
         ),
         refund=AsyncMock(),
     )
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
     store_image_result = AsyncMock()
@@ -250,7 +250,7 @@ async def test_create_image_job_moderation_rejection_is_billable_and_safe() -> N
         generate_image=AsyncMock(side_effect=GrokModerationError(raw_provider_message)),
     )
     billing_service = _billing_stub()
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
 
@@ -295,7 +295,7 @@ async def test_create_image_job_classifies_raising_sdk_url_property_as_billable_
     job_repo = _FakeJobRepository()
     session = SimpleNamespace(flush=AsyncMock())
     billing_service = _billing_stub()
-    service = GrokJobService(
+    service = make_grok_job_service(
         _client_with_moderated_image(), MagicMock(), media_ingestor=make_media_ingestor()
     )
 
@@ -350,7 +350,7 @@ async def test_create_image_job_t2i_defaults_aspect_to_1_1_when_unset() -> None:
         ),
     )
     billing_service = _billing_stub()
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
 
@@ -402,7 +402,7 @@ async def test_create_image_job_i2i_stores_null_aspect_when_unset() -> None:
         generate_image=AsyncMock(),
     )
     billing_service = _billing_stub()
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
 
@@ -449,7 +449,7 @@ async def test_start_video_job_defaults_aspect_to_16_9_when_unset() -> None:
         start_video_generation=AsyncMock(return_value=SimpleNamespace(request_id="req-123")),
     )
     billing_service = _billing_stub()
-    service = GrokJobService(
+    service = make_grok_job_service(
         cast("GrokClient", grok), MagicMock(), media_ingestor=make_media_ingestor()
     )
 

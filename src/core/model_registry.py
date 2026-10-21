@@ -14,11 +14,13 @@ from typing import TYPE_CHECKING
 from src.core.enums import (
     AspectRatio,
     GenerationType,
+    MediaFormat,
     MediaKind,
     MediaSlot,
     ModelType,
     Provider,
     Resolution,
+    VideoParameter,
     VideoResolution,
 )
 from src.core.generation_mode import GenerationModeMeta, SourceMediaConstraints
@@ -66,14 +68,112 @@ class ImageMeta:
 
 
 @dataclass(frozen=True, slots=True)
+class InputVideoConstraints:
+    """What a model accepts as a *video source* (V2V), checked before any billing work.
+
+    Every field is required with no default so a new model decides each one.
+    """
+
+    formats: frozenset[MediaFormat]
+    """Containers the provider decodes; a source in any other format is rejected
+    locally (e.g. a library WebM for a model that takes only mp4/mov)."""
+
+    min_duration_ms: int
+    """Shortest accepted source clip in milliseconds. 0 = no minimum."""
+
+    max_duration_ms: int | None
+    """Longest accepted source clip in milliseconds. None = no model-specific cap."""
+
+    max_bytes: int | None
+    """Largest accepted source file in bytes (decimal, never rounded up). None = no cap."""
+
+    def __post_init__(self) -> None:
+        """Reject a registry entry that could never accept any source."""
+        if not self.formats or not all(fmt.is_video for fmt in self.formats):
+            raise ValueError("input video formats must be a non-empty set of video formats")
+        if self.min_duration_ms < 0:
+            raise ValueError("min_duration_ms must be >= 0")
+        if self.max_duration_ms is not None and self.max_duration_ms < self.min_duration_ms:
+            raise ValueError("max_duration_ms must be >= min_duration_ms")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class InputImageConstraints:
+    """What a model accepts as an *image source* (I2V, FLF2V, R2V), checked before billing.
+
+    Every field is required with no default so a new model decides each one.
+    """
+
+    formats: frozenset[MediaFormat]
+    """Image formats the provider decodes; a source in any other format is rejected locally."""
+
+    max_bytes: int | None
+    """Largest accepted source file in bytes (decimal, never rounded up). None = no cap."""
+
+    def __post_init__(self) -> None:
+        """Reject a registry entry that could never accept any source."""
+        if not self.formats or not all(fmt.is_image for fmt in self.formats):
+            raise ValueError("input image formats must be a non-empty set of image formats")
+        if self.max_bytes is not None and self.max_bytes <= 0:
+            raise ValueError("max_bytes must be positive")
+
+
+@dataclass(frozen=True, slots=True)
+class SeedRange:
+    """Inclusive bounds a model accepts for ``seed``."""
+
+    min: int
+    max: int
+
+    def __post_init__(self) -> None:
+        """Reject an empty range."""
+        if self.min > self.max:
+            raise ValueError("seed range min must be <= max")
+
+
+@dataclass(frozen=True, slots=True)
 class VideoMeta:
-    """Video-specific constraints."""
+    """Video-specific constraints.
+
+    Every field is required with no default: each video model must make a
+    conscious decision about each one (fail-loud at review time, not runtime).
+    """
+
+    min_duration: int
+    """Minimum video duration in seconds."""
 
     max_duration: int
     """Maximum video duration in seconds."""
 
     resolutions: tuple[VideoResolution, ...]
     """Supported video resolutions."""
+
+    supported_parameters: frozenset[VideoParameter]
+    """Optional request parameters this model honours; sending any other as
+    non-``None`` raises ``UnsupportedGenerationParameterError``."""
+
+    input_anchored_modes: frozenset[GenerationType]
+    """Modes whose output ratio follows the input media: ``aspect_ratio`` must be
+    omitted for them (sending one is a validation error). Modes not listed accept
+    ``aspect_ratio`` even when source media is supplied (e.g. reference-to-video,
+    whose references are subjects, not frames). Every entry must be one of the
+    model's ``generation_modes`` with video output."""
+
+    input_video: InputVideoConstraints | None
+    """Video-source (V2V) limits. None = the model accepts no video source; it must be
+    non-None exactly when one of the model's generation modes takes ``MediaKind.VIDEO``."""
+
+    input_image: InputImageConstraints | None
+    """Image-source (I2V/FLF2V/R2V) limits. None = the model accepts no image source; it must
+    be non-None exactly when one of the model's generation modes takes ``MediaKind.IMAGE``."""
+
+    max_combined_duration: int | None
+    """V2V: input seconds + requested output seconds must not exceed this. None = no rule."""
+
+    bills_input_video_seconds: bool
+    """Pricing: whether input video seconds count toward billed_seconds."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -122,6 +222,10 @@ class ModelMeta:
 
     video: VideoMeta | None = None
     """Video constraints. None for image-only models."""
+
+    seed_range: SeedRange | None = None
+    """Accepted ``seed`` bounds. None = no model-specific bound. ``null`` / omitted on the
+    wire always means "random"; a value outside the range is rejected before any billing."""
 
     audio: AudioMeta | None = None
     """Audio constraints. Reserved until an audio generation type exists."""
@@ -204,8 +308,25 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             ),
         },
         video=VideoMeta(
+            min_duration=1,
             max_duration=15,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+            supported_parameters=frozenset(),
+            input_anchored_modes=frozenset(),
+            # Every library video format, no clip limits: preserves the pre-registry behaviour.
+            input_video=InputVideoConstraints(
+                formats=frozenset({MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV}),
+                min_duration_ms=0,
+                max_duration_ms=None,
+                max_bytes=None,
+            ),
+            # Every library image format, no size cap: preserves the pre-registry behaviour.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=None,
+            ),
+            max_combined_duration=None,
+            bills_input_video_seconds=False,
         ),
         rate_limit=RateLimitMeta(max_requests=10, window_seconds=60),
     ),
@@ -293,14 +414,100 @@ MODEL_METADATA: dict[ModelType, ModelMeta] = {
             ),
         },
         video=VideoMeta(
+            min_duration=1,
             max_duration=10,
             resolutions=(VideoResolution.RES_480P, VideoResolution.RES_720P),
+            supported_parameters=frozenset(),
+            input_anchored_modes=frozenset(),
+            input_video=None,  # no mode takes a video source
+            # Every library image format, no size cap: preserves the pre-registry behaviour.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=None,
+            ),
+            max_combined_duration=None,
+            bills_input_video_seconds=False,
         ),
         rate_limit=None,
         requires_age_verification=True,
         # Configured display hints only. They never feed an operation ETA.
         typical_bootstrap_seconds=900,
         typical_attach_seconds=420,
+    ),
+    ModelType.WAN_3_VIDEO: ModelMeta(
+        provider=Provider.ALIBABA,
+        max_prompt_length=4096,  # PromptStr cap; upstream allows 20 000, do not widen here
+        supports_negative_prompt=False,  # Wan 3.0 has no negative_prompt
+        aspect_ratios=(
+            AspectRatio.RATIO_16_9,
+            AspectRatio.RATIO_4_3,
+            AspectRatio.RATIO_1_1,
+            AspectRatio.RATIO_3_4,
+            AspectRatio.RATIO_9_16,
+        ),
+        max_concurrent_outputs=1,
+        generation_modes={
+            GenerationType.T2V: GenerationModeMeta(),
+            GenerationType.I2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=1,
+                    max=1,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME,),
+                )
+            ),
+            GenerationType.FLF2V: GenerationModeMeta(
+                SourceMediaConstraints(
+                    min=2,
+                    max=2,
+                    media_types=frozenset({MediaKind.IMAGE}),
+                    roles=(MediaSlot.FIRST_FRAME, MediaSlot.LAST_FRAME),
+                )
+            ),
+            GenerationType.V2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=1, media_types=frozenset({MediaKind.VIDEO}))
+            ),
+            # "Image 1..N" in the prompt refers to source_media in request order.
+            GenerationType.R2V: GenerationModeMeta(
+                SourceMediaConstraints(min=1, max=8, media_types=frozenset({MediaKind.IMAGE}))
+            ),
+        },
+        video=VideoMeta(
+            min_duration=2,
+            max_duration=30,
+            resolutions=(
+                VideoResolution.RES_480P,
+                VideoResolution.RES_720P,
+                VideoResolution.RES_1080P,
+            ),
+            supported_parameters=frozenset({VideoParameter.AUDIO, VideoParameter.PROMPT_EXTEND}),
+            input_anchored_modes=frozenset(
+                {GenerationType.I2V, GenerationType.FLF2V, GenerationType.V2V}
+            ),
+            # reference_video: mp4/mov, 1-15 s per clip, <= 100 MB (Wan 3.0 API reference).
+            # Decimal 100 MB, the conservative reading. Frame rate (>= 16 fps) and side
+            # length (240-4096 px) are not checked locally: ResolvedSourceMedia has neither.
+            input_video=InputVideoConstraints(
+                formats=frozenset({MediaFormat.MP4, MediaFormat.MOV}),
+                min_duration_ms=1_000,
+                max_duration_ms=15_000,
+                max_bytes=100_000_000,
+            ),
+            # first_frame / last_frame / reference_image: JPEG, JPG, PNG, BMP, WEBP (the
+            # library holds png/jpeg/webp), <= 20 MB each (Wan 3.0 API reference). Decimal
+            # 20 MB, the conservative reading. Side length (240-8000 px) and aspect ratio
+            # (<= 8:1) are not checked locally: ResolvedSourceMedia has no dimensions.
+            input_image=InputImageConstraints(
+                formats=frozenset({MediaFormat.PNG, MediaFormat.JPEG, MediaFormat.WEBP}),
+                max_bytes=20_000_000,
+            ),
+            max_combined_duration=30,
+            bills_input_video_seconds=True,
+        ),
+        # Upstream: "-1 or [0, 2147483647]". -1 means random, which we spell null/omitted.
+        seed_range=SeedRange(0, 2_147_483_647),
+        rate_limit=None,  # upstream quotas unknown; Throttling maps to RATE_LIMITED
+        requires_age_verification=False,
     ),
 }
 

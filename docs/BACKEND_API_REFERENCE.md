@@ -704,6 +704,8 @@ Note:     Revokes ALL refresh tokens, plus all live access tokens and the conten
 
 Single endpoint for all generation types and providers.
 
+> **Async video (Wan, Grok):** a `500` after the provider has already accepted the task is reconciled server-side (the task is cancelled or left to finish); the user is **not** charged and the client contract is unchanged. See `docs/contracts/wan-video-contract.md` §8.
+
 ```
 Request: {
   prompt: string (1–4096 chars),
@@ -721,8 +723,10 @@ Request: {
   name?: string,                  // auto-generated from prompt[:50] if omitted
 
   // --- Video-only (ignored for image generation) ---
-  duration?: int (1–15, default 5),
-  resolution?: VideoResolution (default "720p"),
+  duration?: int (1–30, default 5),    // per-model bounds: GET /v1/providers → video.min_duration/max_duration
+  resolution?: VideoResolution (default "720p"),  // "480p" | "720p" | "1080p"; per-model: video.resolutions
+  audio?: bool | null,            // wan3.0-video only (video.supported_parameters); null ⇒ model default
+  prompt_extend?: bool | null,    // wan3.0-video only; null ⇒ model default (provider LLM-rewrites the prompt)
 
   // --- Aisha image sizing (image models only). Tier XOR explicit width+height. ---
   image_resolution?: Resolution,  // quality tier: "draft" | "standard" | "high" | "ultra"
@@ -732,7 +736,7 @@ Request: {
   height?: int (256–4096),        // explicit height; MUST be paired with width
 
   // --- Aisha sampler overrides (image models only). Omit ⇒ per-model bundle default. ---
-  seed?: int,                     // reproducibility seed; auto-generated if omitted
+  seed?: int,                     // reproducibility seed; Aisha (auto-generated if omitted) and Wan; ignored by Grok. Wan: 0-2147483647 (`ModelInfo.seed_range`), -1 rejected; omit for random
   steps?: int (1–150),            // inference steps; bundle clamps per-model max
   cfg?: float (0.0–30.0),         // CFG scale
   sampler?: Sampler,              // ComfyUI sampler name (see §17 Sampler)
@@ -745,8 +749,14 @@ Errors:   400 (model_disabled | validation_error | generation_failed | not_imple
 Headers:  Idempotency-Key: <string> (required, max 64 chars)
 Note:     source_media is storage-reference based; clients send upload/output asset references,
           not public URLs. Lineage is recorded from the first output-typed item in list order.
-          Tokens charged scale as (token_cost + input_token_cost × k) × n, where k is the
-          source-media count: `source_media.length` (or 0 when it is omitted).
+          Tokens charged scale as (token_cost + input_token_cost × k + per_second_token_cost × s) × n,
+          where k is the source-media count (`source_media.length`, or 0 when omitted) and s is the
+          billed video seconds: `duration`, plus the input video's length (rounded up) for models
+          that bill it (wan3.0-video v2v). s is 0 for images.
+          Video requests are validated against the model's registry constraints before billing:
+          duration, resolution, aspect ratio, and the optional `audio`/`prompt_extend` (an undeclared
+          parameter sent as non-null ⇒ 422 `unsupported_generation_parameter` naming it). See
+          [`contracts/wan-video-contract.md`](contracts/wan-video-contract.md) for `wan3.0-video`.
           Idempotency-Key prevents duplicate jobs on network retries — supply a UUIDv4 per submission attempt.
           Aisha (ComfyUI) models require an active GPU session — start one via
           POST /v1/sessions before submitting an Aisha generation, otherwise 409 no_active_gpu_session is returned.
@@ -880,6 +890,7 @@ ModelInfo: {
                                      //   confirmation before starting a (billable) GPU session.
   image: ImageConstraints | null,    // null for video-only models
   video: VideoConstraints | null,    // null for image-only models
+  seed_range: { min: int, max: int } | null,   // accepted `seed` bounds; null = no model-specific bound (only Wan declares one)
   session_state: string | null       // per-user readiness; only populated for authenticated requests
                                      //   on on_demand provider models. Values: ModelSessionState.
                                      //   null when unauthenticated or for always_on providers.
@@ -907,8 +918,22 @@ ImageConstraints: {
 }
 
 VideoConstraints: {
+  min_duration: int,                 // minimum video duration in seconds
   max_duration: int,                 // maximum video duration in seconds
-  resolutions: string[]              // e.g. ["480p", "720p"]
+  resolutions: string[],             // e.g. ["480p", "720p", "1080p"]
+  supported_parameters: string[],    // sorted; optional video params the model honours, e.g. ["audio", "prompt_extend"]
+  input_video: {                         // v2v source limits; null = the model accepts no video source
+    formats: string[],                   //   sorted accepted containers, e.g. ["mov", "mp4"] (Wan); filter the library picker by these
+    min_duration_ms: int,                //   shortest accepted clip; 0 = no minimum
+    max_duration_ms: int | null,         //   longest accepted clip; null = no model-specific cap
+    max_bytes: int | null                //   largest accepted file in bytes; null = no model-specific cap
+  } | null,
+  input_image: {                         // i2v/flf2v/r2v source limits; null = the model accepts no image source
+    formats: string[],                   //   sorted accepted image formats, e.g. ["jpeg", "png", "webp"]
+    max_bytes: int | null                //   largest accepted file in bytes (Wan: 20000000); null = no model-specific cap
+  } | null,
+  max_combined_duration: int | null,     // v2v: input seconds + requested duration must not exceed this; null = no rule
+  input_anchored_modes: string[]         // sorted generation modes whose output ratio follows the input ⇒ omit aspect_ratio there; other modes accept it (Wan: ["flf2v","i2v","v2v"]; others: [])
 }
 
 UserContext: {
@@ -1009,7 +1034,14 @@ Note:     For queued/running Grok video jobs this is poll-on-read. It also enfor
 
 ```
 Response: 204 No Content
-Note:     Soft-hide from history
+Errors:   404 (not found / not yours)
+          409 job_in_progress — the job is still pending, queued or running
+Note:     Soft-hide a FINISHED job from history (idempotent). An in-flight job has already
+          been charged and its upstream work cannot be stopped, so it cannot be deleted:
+          "This job is still running and has already been charged. It can't be stopped.
+          You can delete it once it finishes." Hide/disable the action for in-flight jobs;
+          the output arrives as usual and the finished job can then be deleted.
+          Enforced in the database by ck_generation_jobs_not_deleted_in_flight.
 ```
 
 ### UnifiedJobResponse Schema
@@ -1887,6 +1919,8 @@ PricingRuleResponse: {
   model: string | null,
   token_cost: int,               // per-output token cost
   input_token_cost: int,         // per input image, charged per output sample
+  per_second_token_cost: int,    // per billed video second, charged per output sample (0 for flat rules)
+  video_resolution: string | null,   // "480p" | "720p" | "1080p"; null ⇒ applies to any resolution (and all images)
   is_active: bool,
   effective_from: datetime,
   effective_until: datetime | null,
@@ -1894,8 +1928,11 @@ PricingRuleResponse: {
 }
 ```
 
-Total generation charge is `(token_cost + input_token_cost × k) × n`, where `n` is the
-requested output count and `k` is `source_media.length` (or `0` when it is omitted).
+Total generation charge is `(token_cost + input_token_cost × k + per_second_token_cost × s) × n`,
+where `n` is the requested output count, `k` is `source_media.length` (or `0` when it is omitted)
+and `s` is the billed video seconds (`0` for images). Lookup picks the most specific active rule:
+(model + resolution) → (model) → (resolution only) → (wildcard); image jobs never match a rule that
+carries a `video_resolution`.
 
 #### `GET /v1/billing/topup/options`
 
@@ -2302,23 +2339,46 @@ Response: PricingRuleResponse[]
 #### `POST /v1/admin/pricing`
 
 ```
-Request:  { provider: string, generation_type: string, model?: string | null, token_cost: int, input_token_cost?: int, notes?: string | null }
+Request:  { provider: string, generation_type: string, model?: string | null, token_cost: int, input_token_cost?: int, per_second_token_cost?: int, video_resolution?: "480p" | "720p" | "1080p" | null, notes?: string | null }
 Response: PricingRuleResponse
 Status:   201 Created
 ```
 
-`token_cost` is the per-output cost. `input_token_cost` defaults to `0` and is charged per
-input image per output sample.
+`token_cost` is the flat per-output cost. `input_token_cost` defaults to `0` and is charged per
+input image per output sample. `per_second_token_cost` defaults to `0` and is charged per billed
+video second per output sample. A rule must cost something: `token_cost > 0` or
+`per_second_token_cost > 0` (`token_cost` may be `0` only for a per-second rule).
+`video_resolution` is part of the rule's identity (it cannot be patched).
+
+**Validation (`422 invalid_pricing_rule`).** The resulting rule must satisfy: costs are
+non-negative; `token_cost > 0` or `per_second_token_cost > 0`; `generation_type` is a known
+generation type; and `per_second_token_cost > 0` or a `video_resolution` is only allowed on a
+**video-output** type (`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) — otherwise every image generation for
+that model would fail at quote time. Violations never reach the database; negative values in a
+body are a `400 validation_error`.
+
+**Enabling `wan3.0-video`:** the model row is seeded disabled and with no prices. There is no
+`generation_type` wildcard, so create one rule for **each of the 15 combinations** — 5 modes
+(`t2v`, `i2v`, `v2v`, `flf2v`, `r2v`) × 3 resolutions (`480p`, `720p`, `1080p`) — with
+`provider: "alibaba"`, `model: "wan3.0-video"`, `video_resolution` and `per_second_token_cost`
+taken from the Model Studio console prices, **then** enable the model via
+`PATCH /v1/admin/models/wan3.0-video`. Enabling first (or leaving a combination out) makes the
+affected requests fail with `price_not_found` (fail-loud).
 
 #### `PATCH /v1/admin/pricing/{rule_id}`
 
 ```
-Request:  { token_cost?: int, input_token_cost?: int, is_active?: bool, effective_until?: datetime | null, notes?: string | null }
+Request:  { token_cost?: int, input_token_cost?: int, per_second_token_cost?: int, is_active?: bool, effective_until?: datetime | null, notes?: string | null }
 Response: PricingRuleResponse
 ```
 
 Patch fields are optional. Omitted nullable fields are left unchanged; explicit `null` clears
 `effective_until` or `notes`.
+
+The invariants above are checked against the rule **as it would be after the patch** (e.g.
+`{"per_second_token_cost": 0}` on a per-second-only rule is `422 invalid_pricing_rule`). A patch
+that does not touch a cost (notably `{"is_active": false}`) is never blocked by the rule's current
+state, so a broken rule can always be deactivated.
 
 #### `DELETE /v1/admin/pricing/{rule_id}`
 
@@ -3076,8 +3136,10 @@ Backend-driven **operational alerting for admins/superadmins**, delivered as Tel
 | `token_revocation.failed` | platform | A bulk access-token revocation (Redis write) failed while Redis is otherwise configured — the affected user's existing access tokens/content cookies remain valid until they expire |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup (`delete_all_for_user`) failed — the affected user's devices that should have been unsubscribed may still receive push notifications |
 | `feedback.submitted` | product | A user submitted an in-product problem report (§12b). The message carries the report id, user id, category and optional job id only — never the text |
+| `video_task.orphaned` | product | An async video task (Wan/Grok) was accepted upstream but its request failed before commit. It was `cancelled` or left to finish (`absorbed`); the user was **not** charged. IDs and enums only. An absorbed task may still bill the provider account — audit it by task id |
+| `video_task.receipt_unrecorded` | product | A video task was accepted upstream but its receipt could not be written. The task id is in the alert — cancel or audit it by hand |
 
-- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`, `feedback.submitted`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
+- **Product-scoped** classes (`user.registered`, `generation.created`, `gpu_node.started`, `generation.failed`, `feedback.submitted`, `video_task.orphaned`, `video_task.receipt_unrecorded`) are delivered only to admins whose own account product matches the event's product — a `synthara` admin never sees a `vex` registration.
 - **Platform-scoped** classes (`provider_authentication.failed`, `health.*`, `token_revocation.failed`, `push_subscriptions.cleanup_failed`) are delivered to every subscribed admin/superadmin regardless of product, since these describe the health/safety of the whole platform rather than any single product.
 - `token_revocation.failed` ships with a one-time seed (migration `029`); `push_subscriptions.cleanup_failed` ships with the same treatment (migration `032`); `provider_authentication.failed` ships the same way in migration `034` (kept separate from the `033` migration that introduced the class's schema/mapping, because Alembic never re-runs an already-applied revision — appending the seed to `033` would silently skip any environment already at `033`) — every admin who already has a Telegram link gets a subscription automatically, so existing installs don't start blind. It's still an ordinary preference row after that — a subsequent full-set `PUT /v1/admin/notifications/preferences` that omits it un-subscribes the admin, same as any other class. Unlike `token_revocation.failed`, `push_subscriptions.cleanup_failed` and `provider_authentication.failed` have no second, preference-independent channel (no health checker watches them), which is why seeding — not just a release note — was judged necessary there.
 - Subscription is **row-presence**, not a flag: `PUT /v1/admin/notifications/preferences` is a full-set replace — a class omitted from the request body is unsubscribed.
@@ -3210,12 +3272,14 @@ Values: `"sfw"`, `"permissive"`
 | `grok-imagine-video` | grok | | | ✓ | ✓ | ✓ | | 1 | |
 | `aisha-image` | aisha | ✓ | ✓ | | | | | 4 | ✓ |
 | `aisha-video` | aisha | | | ✓ | ✓ | | ✓ | 1 | ✓ |
+| `wan3.0-video` | alibaba | | | ✓ | ✓ | ✓ | ✓ (+ `r2v`) | 1 | |
 
 **Age-gated** = `requires_age_verification=true` (exposed on `GET /v1/providers` → `ModelInfo`). The user must be age-verified via `PATCH /v1/users/me` before `POST /v1/generate` will accept the model; otherwise `403 age_verification_required`. The flag is per-model and authoritative regardless of the product's `age_gate` policy.
 
 **Capability corrections vs. the previous revision of this doc:**
 - `grok-imagine-video` does **not** support `flf2v` (Grok has no first-last-frame mode). Max video duration 15 s.
 - `aisha-video` does **not** support `v2v` yet. It supports `t2v`, `i2v`, `flf2v`; max duration 10 s; aspect ratios limited to `1:1`, `16:9`, `9:16`.
+- `wan3.0-video` (provider `alibaba`) supports `t2v`, `i2v`, `v2v`, `flf2v` and the new `r2v`; duration 2–30 s, 480p/720p/1080p, `audio` and `prompt_extend` parameters. Contract: [`contracts/wan-video-contract.md`](contracts/wan-video-contract.md).
 - `aisha-image` exposes quality tiers (`draft`/`standard`/`high`/`ultra`, default `standard`) plus explicit `width`/`height`; `min_height` 256, `max_height` 2048, `default_height` 1024.
 
 **Seeded enablement (default `is_enabled`; admins toggle via `PATCH /v1/admin/models/{model_key}`):**
@@ -3227,6 +3291,7 @@ Values: `"sfw"`, `"permissive"`
 | `grok-2-image-1212` | `false` | EOL after Grok Imagine Image; kept for reference/fallback |
 | `aisha-image` | `false` | Seeded off; enable once the GPU image workflow is signed off |
 | `aisha-video` | `false` | Seeded off until the video workflow is production-ready |
+| `wan3.0-video` | `false` | Seeded off with no pricing rules; create the rules, then enable |
 
 > `GET /v1/providers` reflects the **live** `is_enabled` value (not the seed), filtered by product.
 
@@ -3240,6 +3305,7 @@ Values: `"sfw"`, `"permissive"`
 | `i2v` | Image → Video | Yes | No | Yes |
 | `v2v` | Video → Video | No | Yes (via `source_media`) | Yes |
 | `flf2v` | First-Last Frame → Video | Yes | No | Yes |
+| `r2v` | Reference images → Video (1–8 images) | Yes | No | Yes |
 
 ### JobStatus
 
@@ -3385,6 +3451,8 @@ Values: `"billing_adjust"`
 | `token_revocation.failed` | platform | A bulk access-token revocation failed to write to Redis |
 | `push_subscriptions.cleanup_failed` | platform | A bulk-revocation event's push-subscription cleanup failed |
 | `feedback.submitted` | product | A user submitted an in-product problem report |
+| `video_task.orphaned` | product | A video task accepted upstream has no job (request failed after acceptance); cancelled or absorbed, user not charged |
+| `video_task.receipt_unrecorded` | product | A video task was accepted upstream but its receipt could not be written (task id in the alert) |
 
 > Admin ops-notification subscription classes — see [§15c Admin Ops Notifications (Telegram)](#15c-admin-ops-notifications-telegram) for the full subscribe/throttle/delivery model.
 

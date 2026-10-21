@@ -68,6 +68,7 @@ from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
     InsufficientBalanceError,
+    InvalidPricingRuleError,
     ModerationError,
     OrganizationBalanceError,
     OrganizationPermissionError,
@@ -88,6 +89,7 @@ from src.api.services.legal.errors import (
 from src.api.services.library import LibraryBulkTagCapError
 from src.api.services.library_project import LibraryProjectNameConflictError
 from src.api.services.library_tag import LibraryTagNameConflictError
+from src.api.services.unified_jobs import JobInProgressError
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 from src.core.product_registry import PRODUCT_REGISTRY
@@ -196,6 +198,14 @@ def price_not_found_handler(
 ) -> Response[Any]:
     _log_handler_event("billing.price_not_found", request, HTTP_404_NOT_FOUND)
     return _error("price_not_found", str(exc), HTTP_404_NOT_FOUND)
+
+
+def invalid_pricing_rule_handler(
+    request: Request[Any, Any, Any],
+    exc: InvalidPricingRuleError,
+) -> Response[Any]:
+    _log_handler_event("billing.invalid_pricing_rule", request, HTTP_422_UNPROCESSABLE_ENTITY)
+    return _error("invalid_pricing_rule", str(exc), HTTP_422_UNPROCESSABLE_ENTITY)
 
 
 def moderation_error_handler(
@@ -307,6 +317,21 @@ def library_tag_name_conflict_handler(
 ) -> Response[Any]:
     _log_handler_event("library.tag_name_conflict", request, HTTP_409_CONFLICT, name=exc.name)
     return _error("tag_name_conflict", str(exc), HTTP_409_CONFLICT)
+
+
+def job_in_progress_handler(
+    request: Request[Any, Any, Any],
+    exc: JobInProgressError,
+) -> Response[Any]:
+    _log_handler_event(
+        "job.delete_refused_in_flight",
+        request,
+        HTTP_409_CONFLICT,
+        job_id=str(exc.job_id),
+        user_id=str(exc.user_id),
+        job_status=exc.status,
+    )
+    return _error("job_in_progress", str(exc), HTTP_409_CONFLICT)
 
 
 def library_bulk_tag_cap_handler(
@@ -574,6 +599,7 @@ def create_app() -> Litestar:
             AccountInactiveError: account_inactive_handler,
             RefundNotEligibleError: refund_not_eligible_handler,
             PriceNotFoundError: price_not_found_handler,
+            InvalidPricingRuleError: invalid_pricing_rule_handler,
             ModerationError: moderation_error_handler,
             PaymentVerificationError: payment_verification_handler,
             PaymentProviderDisabledError: payment_provider_disabled_handler,
@@ -583,6 +609,7 @@ def create_app() -> Litestar:
             LibraryProjectNameConflictError: library_project_name_conflict_handler,
             LibraryTagNameConflictError: library_tag_name_conflict_handler,
             LibraryBulkTagCapError: library_bulk_tag_cap_handler,
+            JobInProgressError: job_in_progress_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
             LegalDocumentNotFoundError: legal_document_not_found_handler,
             LegalSubmissionIncompleteError: legal_submission_incomplete_handler,

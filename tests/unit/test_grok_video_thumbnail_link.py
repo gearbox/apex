@@ -75,7 +75,7 @@ def _prepared_video() -> PreparedVideo:
 
 async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
     """Both poster-frame rows must have parent_output_id set and output_index != -1."""
-    from src.api.services.grok.job_service import GrokJobService
+    from tests.grok_support import make_grok_job_service, streaming_http_client
 
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.mp4")
@@ -84,7 +84,7 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
     grok_client = MagicMock()
     media_ingestor = MagicMock()
     media_ingestor.prepare_video = AsyncMock(return_value=_prepared_video())
-    svc = GrokJobService(
+    svc = make_grok_job_service(
         grok_client=grok_client,
         storage=storage,
         retention_days=7,
@@ -92,12 +92,7 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
     )
 
     video_data = b"\x00\x01video-private-metadata-canary"
-    http_mock = AsyncMock()
-    response_mock = MagicMock()
-    response_mock.raise_for_status = MagicMock()
-    response_mock.content = video_data
-    http_mock.get = AsyncMock(return_value=response_mock)
-    svc._http_client = http_mock
+    svc._http_client = streaming_http_client(video_data)
 
     video_output_id = uuid4()
     sm_thumb_id = uuid4()
@@ -107,22 +102,22 @@ async def test_video_poster_frame_uses_parent_output_id_not_sentinel() -> None:
 
     with (
         patch(
-            "src.api.services.grok.job_service.new_id",
+            "src.api.services.video_jobs.materializer.new_id",
             side_effect=[video_output_id, sm_thumb_id, md_thumb_id],
         ),
         patch(
-            "src.api.services.grok.job_service.extract_video_thumbnail",
+            "src.api.services.video_jobs.materializer.extract_video_thumbnail",
             new=AsyncMock(return_value=jpeg_bytes),
         ),
         patch(
-            "src.api.services.grok.job_service.make_image_thumbnails",
+            "src.api.services.video_jobs.materializer.make_image_thumbnails",
             new=AsyncMock(return_value=_make_thumbnails()),
         ),
     ):
         result_mock = MagicMock()
         result_mock.url = "https://cdn.xai.com/video.mp4"
 
-        materialized = await svc._materialize_video_result(
+        materialized = await svc._materializer._materialize_video_result(
             user_id=uuid4(),
             job_id=uuid4(),
             result=result_mock,  # type: ignore[arg-type]
@@ -160,7 +155,7 @@ async def test_grok_video_storage_receives_remuxed_bytes_without_descriptive_tag
     tmp_path: Path,
     media_ingestor: MediaIngestService,
 ) -> None:
-    from src.api.services.grok.job_service import GrokJobService
+    from tests.grok_support import make_grok_job_service, streaming_http_client
 
     ffmpeg = shutil.which("ffmpeg")
     if ffmpeg is None:
@@ -197,15 +192,13 @@ async def test_grok_video_storage_receives_remuxed_bytes_without_descriptive_tag
     storage = MagicMock()
     storage.build_storage_key.return_value = "test/grok/private.mp4"
     storage.put_raw = AsyncMock()
-    service = GrokJobService(MagicMock(), storage, media_ingestor=media_ingestor)
-    response = MagicMock(content=source.read_bytes())
-    response.raise_for_status = MagicMock()
-    service._http_client = MagicMock(get=AsyncMock(return_value=response))
+    service = make_grok_job_service(MagicMock(), storage, media_ingestor=media_ingestor)
+    service._http_client = streaming_http_client(source.read_bytes())
     with patch(
-        "src.api.services.grok.job_service.extract_video_thumbnail",
+        "src.api.services.video_jobs.materializer.extract_video_thumbnail",
         new=AsyncMock(return_value=None),
     ):
-        materialized = await service._materialize_video_result(
+        materialized = await service._materializer._materialize_video_result(
             user_id=uuid4(),
             job_id=uuid4(),
             result=MagicMock(url="https://provider.invalid/private.mp4"),
@@ -221,7 +214,7 @@ async def test_grok_video_storage_receives_remuxed_bytes_without_descriptive_tag
 
 async def test_no_poster_frames_when_extract_fails() -> None:
     """If extract_video_thumbnail returns None, only the video row is created."""
-    from src.api.services.grok.job_service import GrokJobService
+    from tests.grok_support import make_grok_job_service, streaming_http_client
 
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.mp4")
@@ -230,7 +223,7 @@ async def test_no_poster_frames_when_extract_fails() -> None:
     grok_client = MagicMock()
     media_ingestor = MagicMock()
     media_ingestor.prepare_video = AsyncMock(return_value=_prepared_video())
-    svc = GrokJobService(
+    svc = make_grok_job_service(
         grok_client=grok_client,
         storage=storage,
         retention_days=7,
@@ -238,24 +231,19 @@ async def test_no_poster_frames_when_extract_fails() -> None:
     )
 
     video_data = b"\x00\x01video"
-    http_mock = AsyncMock()
-    response_mock = MagicMock()
-    response_mock.raise_for_status = MagicMock()
-    response_mock.content = video_data
-    http_mock.get = AsyncMock(return_value=response_mock)
-    svc._http_client = http_mock
+    svc._http_client = streaming_http_client(video_data)
 
     with (
-        patch("src.api.services.grok.job_service.new_id", return_value=uuid4()),
+        patch("src.api.services.video_jobs.materializer.new_id", return_value=uuid4()),
         patch(
-            "src.api.services.grok.job_service.extract_video_thumbnail",
+            "src.api.services.video_jobs.materializer.extract_video_thumbnail",
             new=AsyncMock(return_value=None),  # extract fails
         ),
     ):
         result_mock = MagicMock()
         result_mock.url = "https://cdn.xai.com/video.mp4"
 
-        materialized = await svc._materialize_video_result(
+        materialized = await svc._materializer._materialize_video_result(
             user_id=uuid4(),
             job_id=uuid4(),
             result=result_mock,  # type: ignore[arg-type]
@@ -270,24 +258,20 @@ async def test_grok_video_profile_is_logged_for_the_stored_original(
     video_profile_events: list[dict[str, Any]],
 ) -> None:
     """I13 — ``media.video_profile`` carries origin, job and the original's ``output:`` ref."""
-    from src.api.services.grok.job_service import GrokJobService
+    from tests.grok_support import make_grok_job_service, streaming_http_client
 
     storage = MagicMock()
     storage.build_storage_key = MagicMock(return_value="users/u/outputs/j/f.mp4")
     storage.put_raw = AsyncMock()
     media_ingestor = MagicMock()
     media_ingestor.prepare_video = AsyncMock(return_value=_prepared_video())
-    svc = GrokJobService(
+    svc = make_grok_job_service(
         grok_client=MagicMock(),
         storage=storage,
         retention_days=7,
         media_ingestor=media_ingestor,
     )
-    response = MagicMock()
-    response.content = b"video"
-    http = AsyncMock()
-    http.get = AsyncMock(return_value=response)
-    svc._http_client = http
+    svc._http_client = streaming_http_client(b"video")
     job_id = uuid4()
     video_output_id = uuid4()
     result = MagicMock()
@@ -295,26 +279,26 @@ async def test_grok_video_profile_is_logged_for_the_stored_original(
 
     with (
         patch(
-            "src.api.services.grok.job_service.new_id",
+            "src.api.services.video_jobs.materializer.new_id",
             side_effect=[video_output_id, uuid4(), uuid4()],
         ),
         patch(
-            "src.api.services.grok.job_service.extract_video_thumbnail",
+            "src.api.services.video_jobs.materializer.extract_video_thumbnail",
             new=AsyncMock(return_value=b"\xff\xd8\xff\xe0jpeg"),
         ),
         patch(
-            "src.api.services.grok.job_service.make_image_thumbnails",
+            "src.api.services.video_jobs.materializer.make_image_thumbnails",
             new=AsyncMock(return_value=_make_thumbnails()),
         ),
     ):
-        materialized = await svc._materialize_video_result(
+        materialized = await svc._materializer._materialize_video_result(
             user_id=uuid4(),
             job_id=job_id,
             result=result,  # type: ignore[arg-type]
             product_id="vex",
         )
 
-    GrokJobService._log_video_profile(job_id, materialized)
+    svc._materializer._log_video_profile(job_id, materialized)
 
     (event,) = [e for e in video_profile_events if e["event"] == "media.video_profile"]
     assert event["origin"] == "grok_output"

@@ -9,15 +9,17 @@ from uuid import uuid4
 import pytest
 
 from src.api.services.grok import GrokImageResult
-from src.api.services.grok.job_service import GrokJobService
 from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
 from src.api.services.media_ingest import PreparedImage
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet, PdqHash
 from src.core.thumbnails import ThumbnailSpec
+from tests.grok_support import make_grok_job_service
 
 if TYPE_CHECKING:
     from collections.abc import Iterator
+
+    from src.api.services.grok.job_service import GrokJobService
 
 pytestmark = pytest.mark.unit
 
@@ -85,7 +87,7 @@ def _make_service() -> tuple[GrokJobService, MagicMock]:
     grok_client = MagicMock()
     media_ingestor = MagicMock()
     media_ingestor.prepare_image = AsyncMock(return_value=_prepared_image())
-    svc = GrokJobService(
+    svc = make_grok_job_service(
         grok_client=grok_client,
         storage=storage,
         retention_days=7,

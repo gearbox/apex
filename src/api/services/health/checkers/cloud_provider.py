@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import abc
 from typing import TYPE_CHECKING
+from uuid import uuid4
 
 import structlog
 
@@ -174,4 +175,43 @@ class GrokChecker(CloudProviderChecker):
             (f"{self._api_base_url}/v1/models", auth_headers),
             # Fallback: API root (may return 404 but proves reachability)
             (f"{self._api_base_url}/v1/api-key", auth_headers),
+        ]
+
+
+class ModelStudioChecker(CloudProviderChecker):
+    """Health checker for Alibaba Model Studio (Wan).
+
+    Probe: ``GET {base_url}/api/v1/tasks/{uuid4()}``. Model Studio answers a task
+    that does not exist with a 2xx and ``task_status: UNKNOWN``, which proves
+    reachability and (via 401/403) key validity without creating or billing a
+    task. The id is a fresh UUID per probe, never a fixed one.
+    """
+
+    def __init__(
+        self,
+        *,
+        http_client: httpx.AsyncClient,
+        base_url: str,
+        api_key: str,
+        product_id: str,
+    ) -> None:
+        super().__init__(http_client)
+        self._base_url = base_url.rstrip("/")
+        self._api_key = api_key
+        self._product_id = product_id
+
+    @property
+    def name(self) -> str:
+        return "alibaba"
+
+    @property
+    def product_id(self) -> str:
+        return self._product_id
+
+    def _get_probe_chain(self) -> list[tuple[str, dict[str, str]]]:
+        return [
+            (
+                f"{self._base_url}/api/v1/tasks/{uuid4()}",
+                {"Authorization": f"Bearer {self._api_key}"},
+            )
         ]

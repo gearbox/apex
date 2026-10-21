@@ -21,6 +21,8 @@ from src.api.schemas.ops_events import (
     PushSubscriptionsCleanupFailedOpsPayload,
     TokenRevocationFailedOpsPayload,
     UserRegisteredOpsPayload,
+    VideoTaskOrphanedOpsPayload,
+    VideoTaskReceiptUnrecordedOpsPayload,
 )
 from src.api.services.generation.provider_failures import ProviderFailure, ProviderFailureKind
 from src.api.services.telegram.html import escape
@@ -63,6 +65,10 @@ def map_ops_event(envelope: OpsEventEnvelope) -> OpsNotification | None:
         return _map_push_subscriptions_cleanup_failed(envelope)
     if envelope.event_type is OpsEventType.FEEDBACK_SUBMITTED:
         return _map_feedback_submitted(envelope)
+    if envelope.event_type is OpsEventType.VIDEO_TASK_ORPHANED:
+        return _map_video_task_orphaned(envelope)
+    if envelope.event_type is OpsEventType.VIDEO_TASK_RECEIPT_UNRECORDED:
+        return _map_video_task_receipt_unrecorded(envelope)
     return None
 
 
@@ -198,6 +204,51 @@ def _map_feedback_submitted(envelope: OpsEventEnvelope) -> OpsNotification:
     )
     return OpsNotification(
         notification_class=NotificationClass.FEEDBACK_SUBMITTED,
+        product_id=envelope.product_id,
+        text=text,
+    )
+
+
+def _map_video_task_orphaned(envelope: OpsEventEnvelope) -> OpsNotification:
+    payload = msgspec.json.decode(envelope.payload, type=VideoTaskOrphanedOpsPayload)
+    cancelled = payload.resolution == "cancelled"
+    outcome = (
+        "task was cancelled upstream"
+        if cancelled
+        else "task could not be cancelled and may still bill the provider account — "
+        "audit it in the provider console"
+    )
+    status_line = (
+        ""
+        if payload.upstream_status is None
+        else f" · upstream: <code>{escape(payload.upstream_status)}</code>"
+    )
+    text = (
+        f"{_tag(envelope.product_id)} {'🧹' if cancelled else '⚠️'} <b>Orphaned video task</b>\n"
+        f"{escape(payload.provider)} task <code>{escape(payload.external_task_id)}</code>"
+        f"{status_line}\n"
+        f"job <code>{escape(str(payload.job_id))}</code> · "
+        f"user <code>{escape(str(payload.user_id))}</code>\n"
+        f"{outcome}; the user was not charged"
+    )
+    return OpsNotification(
+        notification_class=NotificationClass.VIDEO_TASK_ORPHANED,
+        product_id=envelope.product_id,
+        text=text,
+    )
+
+
+def _map_video_task_receipt_unrecorded(envelope: OpsEventEnvelope) -> OpsNotification:
+    payload = msgspec.json.decode(envelope.payload, type=VideoTaskReceiptUnrecordedOpsPayload)
+    text = (
+        f"{_tag(envelope.product_id)} 🚨 <b>Video task receipt not recorded</b>\n"
+        f"{escape(payload.provider)} task <code>{escape(payload.external_task_id)}</code>\n"
+        f"job <code>{escape(str(payload.job_id))}</code> · "
+        f"user <code>{escape(str(payload.user_id))}</code>\n"
+        f"the task is accepted upstream but untracked — cancel or audit it by hand"
+    )
+    return OpsNotification(
+        notification_class=NotificationClass.VIDEO_TASK_RECEIPT_UNRECORDED,
         product_id=envelope.product_id,
         text=text,
     )

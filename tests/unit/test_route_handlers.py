@@ -24,6 +24,7 @@ from litestar.exceptions import (
 from litestar.response import Response, ServerSentEvent, Stream
 from litestar.status_codes import HTTP_200_OK, HTTP_400_BAD_REQUEST, HTTP_404_NOT_FOUND
 
+from src.core.enums import SoftDeleteOutcome
 from tests.legal_support import TEST_REQUEST_CONTEXT
 
 if TYPE_CHECKING:
@@ -91,13 +92,12 @@ class TestJobRouteHandlers:
     async def test_delete_job_succeeds(self) -> None:
         from src.api.routes.jobs import UnifiedJobController
 
-        mock_job = MagicMock()
         session = AsyncMock()
         session.commit = AsyncMock()
 
         with patch("src.db.repositories.job.JobRepository") as repo_cls:
             repo = MagicMock()
-            repo.soft_delete = AsyncMock(return_value=mock_job)
+            repo.soft_delete = AsyncMock(return_value=SoftDeleteOutcome.DELETED)
             repo_cls.return_value = repo
 
             await UnifiedJobController.delete_job.fn(  # type: ignore[attr-defined]
@@ -116,7 +116,7 @@ class TestJobRouteHandlers:
 
         with patch("src.db.repositories.job.JobRepository") as repo_cls:
             repo = MagicMock()
-            repo.soft_delete = AsyncMock(return_value=None)
+            repo.soft_delete = AsyncMock(return_value=SoftDeleteOutcome.NOT_FOUND)
             repo_cls.return_value = repo
 
             with pytest.raises(NotFoundException):
@@ -126,6 +126,46 @@ class TestJobRouteHandlers:
                     job_id=uuid4(),
                     session=session,
                 )
+
+    async def test_delete_job_refuses_an_in_flight_job(self) -> None:
+        from src.api.routes.jobs import UnifiedJobController
+        from src.api.services.unified_jobs import JobInProgressError
+
+        session = AsyncMock()
+
+        with patch("src.db.repositories.job.JobRepository") as repo_cls:
+            repo = MagicMock()
+            repo.soft_delete = AsyncMock(return_value=SoftDeleteOutcome.IN_FLIGHT)
+            repo.get = AsyncMock(return_value=MagicMock(status="running"))
+            repo_cls.return_value = repo
+
+            with pytest.raises(JobInProgressError) as exc_info:
+                await UnifiedJobController.delete_job.fn(  # type: ignore[attr-defined]
+                    MagicMock(),
+                    current_user_id=uuid4(),
+                    job_id=uuid4(),
+                    session=session,
+                )
+
+        assert exc_info.value.status == "running"
+        session.commit.assert_not_awaited()
+
+    async def test_job_in_progress_maps_to_a_409_envelope(self) -> None:
+        from src.api.app import job_in_progress_handler
+        from src.api.services.unified_jobs import JOB_IN_PROGRESS_MESSAGE, JobInProgressError
+
+        request = MagicMock()
+        request.url.path = "/v1/jobs/x"
+        request.method = "DELETE"
+
+        response = job_in_progress_handler(
+            request, JobInProgressError(job_id=uuid4(), user_id=uuid4(), status="queued")
+        )
+
+        assert response.status_code == 409
+        body = msgspec.to_builtins(response.content)
+        assert body["error"] == "job_in_progress"
+        assert body["message"] == JOB_IN_PROGRESS_MESSAGE
 
 
 # ---------------------------------------------------------------------------

@@ -45,6 +45,7 @@ class Provider(StrEnum):
 
     AISHA = "aisha"
     GROK = "grok"
+    ALIBABA = "alibaba"
 
     @property
     def provisioning_mode(self) -> ProvisioningMode:
@@ -68,6 +69,7 @@ class ProvisioningMode(StrEnum):
 _PROVISIONING_MODE_BY_PROVIDER: dict[Provider, ProvisioningMode] = {
     Provider.AISHA: ProvisioningMode.ON_DEMAND,
     Provider.GROK: ProvisioningMode.ALWAYS_ON,
+    Provider.ALIBABA: ProvisioningMode.ALWAYS_ON,
 }
 
 
@@ -82,6 +84,9 @@ class ModelType(StrEnum):
     GROK_IMAGINE_IMAGE = "grok-imagine-image"  # T2I, I2I (editing)
     GROK_2_IMAGE = "grok-2-image-1212"  # T2I only (older, different pricing)
     GROK_IMAGINE_VIDEO = "grok-imagine-video"  # T2V, I2V, V2V, FLF2V
+
+    # Alibaba Model Studio models
+    WAN_3_VIDEO = "wan3.0-video"  # T2V, I2V, FLF2V, V2V, R2V
 
     @property
     def provider(self) -> Provider:
@@ -128,7 +133,7 @@ class ModelType(StrEnum):
 
 
 class GenerationType(StrEnum):
-    """Generation type - text-to-image or image-to-image."""
+    """Generation type: what a request takes as input and emits as output."""
 
     T2I = "t2i"
     I2I = "i2i"
@@ -136,6 +141,7 @@ class GenerationType(StrEnum):
     I2V = "i2v"
     V2V = "v2v"  # Video-to-video (editing)
     FLF2V = "flf2v"  # First-last-frame to video
+    R2V = "r2v"  # Reference images to video
 
     @property
     def input_kinds(self) -> frozenset[MediaKind]:
@@ -149,7 +155,7 @@ class GenerationType(StrEnum):
 
 
 class VideoPollStatus(StrEnum):
-    """Observed outcome of one xAI video-job poll.
+    """Observed outcome of one provider video-job poll.
 
     Distinct from JobStatus: this describes what the provider reported for a
     single poll, not the GenerationJob's persisted status. The caller (worker
@@ -173,6 +179,24 @@ class JobStatus(StrEnum):
     CANCELLED = "cancelled"
     MODERATED = "moderated"
 
+    @classmethod
+    def in_flight(cls) -> tuple[JobStatus, ...]:
+        """Statuses whose upstream work is accepted but not yet settled.
+
+        A job in one of these cannot be soft-deleted (Z1): enforced by the
+        ``ck_generation_jobs_not_deleted_in_flight`` CHECK constraint.
+        """
+        return (cls.PENDING, cls.QUEUED, cls.RUNNING)
+
+
+class SoftDeleteOutcome(StrEnum):
+    """Result of ``JobRepository.soft_delete``."""
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    IN_FLIGHT = "in_flight"
+    """The job is still running (already charged, cannot be stopped); delete it once it finishes."""
+
 
 class AspectRatio(StrEnum):
     """Supported aspect ratios."""
@@ -192,10 +216,18 @@ class AspectRatio(StrEnum):
 
 
 class VideoResolution(StrEnum):
-    """Supported video resolutions for Grok."""
+    """Supported video resolutions; each model narrows via ``VideoMeta.resolutions``."""
 
     RES_480P = "480p"
     RES_720P = "720p"
+    RES_1080P = "1080p"
+
+
+class VideoParameter(StrEnum):
+    """Optional video request parameters a model may declare support for."""
+
+    AUDIO = "audio"
+    PROMPT_EXTEND = "prompt_extend"
 
 
 class Resolution(StrEnum):
@@ -312,6 +344,11 @@ class MediaFormat(StrEnum):
         """Check if this is a video format."""
         return self in (MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV)
 
+    @property
+    def is_image(self) -> bool:
+        """Check if this is an image format."""
+        return not self.is_video
+
 
 class MediaKind(StrEnum):
     """Supported owned-library media kinds."""
@@ -344,6 +381,7 @@ _GENERATION_TYPE_MEDIA: Final[Mapping[GenerationType, tuple[frozenset[MediaKind]
     GenerationType.I2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
     GenerationType.FLF2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
     GenerationType.V2V: (frozenset({MediaKind.VIDEO}), MediaKind.VIDEO),
+    GenerationType.R2V: (frozenset({MediaKind.IMAGE}), MediaKind.VIDEO),
 }
 
 _META_BY_MEDIA: Final[Mapping[MediaKind, str]] = {
@@ -837,6 +875,8 @@ class NotificationClass(StrEnum):
     TOKEN_REVOCATION_FAILED = "token_revocation.failed"  # noqa: S105
     PUSH_SUBSCRIPTIONS_CLEANUP_FAILED = "push_subscriptions.cleanup_failed"
     FEEDBACK_SUBMITTED = "feedback.submitted"
+    VIDEO_TASK_ORPHANED = "video_task.orphaned"
+    VIDEO_TASK_RECEIPT_UNRECORDED = "video_task.receipt_unrecorded"
 
 
 # Platform-scoped classes are delivered to every subscribed admin/superadmin
@@ -854,6 +894,18 @@ PLATFORM_SCOPED_NOTIFICATION_CLASSES: Final[frozenset[NotificationClass]] = froz
         NotificationClass.PUSH_SUBSCRIPTIONS_CLEANUP_FAILED,
     }
 )
+
+
+class AcceptedTaskReceiptStatus(StrEnum):
+    """Lifecycle of an ``accepted_task_receipts`` row (an upstream task no job references)."""
+
+    PENDING = "pending"
+    """Recorded; either an in-flight request still holds the row lock, or it is an orphan
+    the reconciler has not resolved yet."""
+    CANCELLED = "cancelled"
+    """The upstream task was cancelled (immediately, or by the reconciler)."""
+    ABSORBED = "absorbed"
+    """The upstream task could not be cancelled and is left to finish; never charged to the user."""
 
 
 class OAuthResult(StrEnum):

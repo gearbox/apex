@@ -65,6 +65,14 @@ _CATALOG_DESCRIPTIONS: dict[NotificationClass, str] = {
     NotificationClass.FEEDBACK_SUBMITTED: (
         "A user submitted a feedback / problem report on your product."
     ),
+    NotificationClass.VIDEO_TASK_ORPHANED: (
+        "A video task accepted by a provider has no job row (the request failed after "
+        "acceptance). It was cancelled or left to finish; the user was not charged."
+    ),
+    NotificationClass.VIDEO_TASK_RECEIPT_UNRECORDED: (
+        "A video task was accepted by a provider but its receipt could not be written — "
+        "cancel or audit it by hand using the task id in the alert."
+    ),
 }
 # Fail at import time, not at GET /v1/admin/notifications/classes request
 # time: get_class_catalog() indexes this dict by every NotificationClass

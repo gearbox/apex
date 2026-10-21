@@ -242,6 +242,7 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 | `GROK_VIDEO_POLL_INTERVAL` | `5` | `int (1–60)` | Seconds between polls when the Grok video worker checks async job status. Lower reduces latency; higher reduces API call volume. |
 | `GROK_VIDEO_MAX_POLL_TIME` | `600` | `int (60–1800)` | Maximum total seconds the video worker polls before marking a job as timed out. |
 | `GROK_VIDEO_FINALIZATION_LEASE_SECONDS` | `120` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. Expiry permits a new claimant, but does not invalidate the current token by itself. |
+| `GROK_VIDEO_WORKER_IN_PROCESS` | `true` | `bool` | Run the `grok_video_poller` worker in the API process. Opt-out: set `false` only when a standalone `python -m src.workers.grok_video` runs the poller (shared leader lease). The receipt reconciler runs in-process regardless of this flag. |
 | `GROK_MODERATION_BILLING_POLICY` | `charge` | `charge` \| `refund` | Whether an accepted xAI moderation rejection retains the debit or receives a refund. This is applied by both in-process and standalone video workers. |
 
 > **Materialization migration and operations:** migration 033 adds product-scoped durable
@@ -253,12 +254,63 @@ the `GrokClient` raises at construction and all Grok-backed endpoints are unavai
 
 ---
 
+### Alibaba Model Studio (Wan 3.0 video)
+
+Serves `wan3.0-video` (T2V, I2V, FLF2V, V2V, R2V) over Model Studio's REST API. The provider is
+enabled when both `MODEL_STUDIO_BASE_URL` and `MODEL_STUDIO_API_KEY` are set. The model row is
+seeded **disabled** with **no prices**: create one pricing rule per resolution from the console
+prices, then enable the model in admin. Frontend contract: `docs/contracts/wan-video-contract.md`.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `MODEL_STUDIO_BASE_URL` | *(empty)* | `str` | Workspace host, e.g. `https://<workspace>.ap-southeast-1.maas.aliyuncs.com`. Must be `https` with no path or trailing slash; startup fails otherwise. |
+| `MODEL_STUDIO_API_KEY` | *(unset)* | `secret` | Primary `sk-` key. Never logged. |
+| `MODEL_STUDIO_TIMEOUT_SECONDS` | `60` | `int (10–300)` | Timeout for each HTTP call. |
+| `WAN_VIDEO_POLL_INTERVAL` | `15` | `int (5–60)` | Seconds between status polls (upstream recommends ~15). |
+| `WAN_VIDEO_MAX_POLL_TIME` | `1800` | `int (300–7200)` | Seconds from acceptance before a job times out. Upstream `task_id` and `video_url` expire after 24 h. |
+| `WAN_VIDEO_FINALIZATION_LEASE_SECONDS` | `180` | `int (30–900)` | PostgreSQL-time takeover lease for completed-video materialization. `MEDIA_INGEST_VIDEO_DEADLINE_SECONDS` must be ≤ 75 % of this (and of the Grok lease). |
+| `WAN_VIDEO_WORKER_IN_PROCESS` | `true` | `bool` | Run the `alibaba_video_poller` worker in the API process. Opt-out: set `false` only when a standalone `python -m src.workers.wan_video` runs the poller (both share one leader lease, so running both is safe). Without any poller, jobs settle only when their owner reads them. The receipt reconciler runs in-process regardless of this flag. |
+| `WAN_VIDEO_MAX_CONCURRENT_POLLS` | `8` | `int (1–64)` | Maximum concurrent status polls per worker tick. |
+| `WAN_INPUT_URL_TTL_SECONDS` | `3600` | `int (300–86400)` | Lifetime of the presigned R2 URLs passed to Model Studio as inputs. |
+| `WAN_MODERATION_BILLING_POLICY` | `refund` | `charge` \| `refund` | Model Studio bills successful tasks only, so a moderation rejection refunds by default. |
+| `WAN_UNDELIVERED_OUTPUT_BILLING_POLICY` | `charge` | `charge` \| `refund` | The task succeeded upstream (we were billed) but our download failed. |
+
+Wan and Grok poll independently: each has its own worker (`alibaba_video_poller` /
+`grok_video_poller`), leader lease, interval and concurrency limit.
+
+#### Accepted-task receipts (Wan + Grok video)
+
+A video task a provider accepted whose request later failed is recorded on its own small
+connection pool and cancelled or absorbed (never charged) by a per-provider reconciler
+(`alibaba_video_receipts` / `grok_video_receipts`). See `docs/contracts/wan-video-contract.md` §8.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `VIDEO_TASK_RECEIPT_GRACE_SECONDS` | `60` | `int (10–3600)` | Minimum receipt age before the reconciler touches it. Only covers the commit→`DELETE` gap; the row lock protects slow requests. |
+| `VIDEO_TASK_RECEIPT_RECONCILE_INTERVAL_SECONDS` | `30` | `int (5–3600)` | Seconds between reconciler ticks, per provider. |
+| `VIDEO_TASK_RECEIPT_RECORD_ATTEMPTS` | `3` | `int (1–5)` | Tries to write a receipt before the `video_task.receipt_unrecorded` ops alert. |
+| `VIDEO_TASK_RECEIPT_DB_POOL_SIZE` | `2` | `int (1–10)` | Dedicated receipt pool; separate from `DB_POOL_SIZE`. Counts against PostgreSQL `max_connections` per process. |
+| `VIDEO_TASK_RECEIPT_DB_MAX_OVERFLOW` | `2` | `int (0–10)` | Overflow connections for the receipt pool. |
+| `VIDEO_TASK_RECEIPT_DB_POOL_TIMEOUT_SECONDS` | `2` | `int (1–30)` | Wait for a receipt-pool connection before retrying. |
+
+**Runbook — `video_task.receipt_unrecorded`:** the alert carries the provider and task id of a
+task that is accepted upstream but has no receipt (the database was unreachable on the receipt
+pool). Nothing will reconcile it. Cancel it by hand (Model Studio console → task → cancel, only
+possible while `PENDING`) or audit its cost by task id; the user was not charged.
+**`video_task.orphaned` with `resolution=absorbed`:** the task could not be cancelled and may
+still bill the provider account — look up its cost by task id in the provider console.
+The reconciler that raises this alert runs in-process in every API deployment with workers
+enabled (independently of `*_VIDEO_WORKER_IN_PROCESS`); a standalone worker is optional.
+
+---
+
 ### Content & Upload Limits
 
 | Variable | Default | Range | Description |
 |----------|---------|-------|-------------|
 | `RETENTION_DAYS` | `7` | `1–90` | Days before user content is eligible for automatic cleanup. Applied to both R2 objects and database records. |
 | `MAX_UPLOAD_SIZE_MB` | `20` | `1–100` | Hard limit on individual upload size in megabytes. Requests exceeding this are rejected with `413` before reading the full body. |
+| `MEDIA_INGEST_PROVIDER_VIDEO_MAX_MB` | `200` | `20–1000` (≥ `MAX_UPLOAD_SIZE_MB`) | Byte budget for videos *generated by remote providers* (Grok, Wan). Applied while the result streams from the provider CDN (abort above the cap, before buffering) and by the provider-output ingest service. Deliberately separate from `MAX_UPLOAD_SIZE_MB`: a 30 s 1080p Wan output is routinely > 20 MB. An output over the cap settles as `provider_output_not_delivered` and is billed per the provider's undelivered-output policy; watch for the `video_job.output_too_large` log event. |
 
 ---
 

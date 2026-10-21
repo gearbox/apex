@@ -6,7 +6,17 @@ from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
-from src.core.enums import GenerationType, GpuSessionStatus, JobStatus, Provider
+import pytest
+from sqlalchemy.exc import IntegrityError
+
+from src.core.enums import (
+    GenerationType,
+    GpuSessionStatus,
+    JobStatus,
+    MediaKind,
+    Provider,
+    SoftDeleteOutcome,
+)
 
 if TYPE_CHECKING:
     from src.db.repositories.job import JobRepository
@@ -224,7 +234,7 @@ async def test_list_pending_video_jobs_returns_matching(
         external_request_id=None,
     )
 
-    jobs = await job_repo.list_pending_video_jobs()
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
     job_ids = {j.id for j in jobs}
 
     assert matching_t2v.id in job_ids
@@ -260,7 +270,7 @@ async def test_list_pending_video_jobs_empty_when_no_matches(
         external_request_id=None,
     )
 
-    jobs = await job_repo.list_pending_video_jobs()
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
     assert not list(jobs)
 
 
@@ -274,8 +284,8 @@ async def test_list_by_user_excludes_soft_deleted_jobs(
 ) -> None:
     """list_by_user excludes jobs with is_deleted=True."""
     user = await make_user(email=f"deleted-{uuid4().hex[:6]}@example.com")
-    visible = await make_job(user=user)
-    deleted = await make_job(user=user)
+    visible = await make_job(user=user, status="completed")
+    deleted = await make_job(user=user, status="completed")
 
     await job_repo.soft_delete(deleted.id, user_id=user.id)
 
@@ -291,7 +301,7 @@ async def test_get_with_user_id_excludes_soft_deleted_job(
 ) -> None:
     """get() with user_id returns None for a soft-deleted job."""
     user = await make_user(email=f"getdel-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
+    job = await make_job(user=user, status="completed")
 
     await job_repo.soft_delete(job.id, user_id=user.id)
 
@@ -304,7 +314,7 @@ async def test_get_without_user_id_includes_soft_deleted_job(
 ) -> None:
     """get() without user_id (internal) returns soft-deleted jobs."""
     user = await make_user(email=f"getdelint-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
+    job = await make_job(user=user, status="completed")
 
     await job_repo.soft_delete(job.id, user_id=user.id)
 
@@ -316,12 +326,14 @@ async def test_get_without_user_id_includes_soft_deleted_job(
 async def test_soft_delete_sets_is_deleted(job_repo: JobRepository, make_user, make_job) -> None:
     """soft_delete sets is_deleted=True on the job."""
     user = await make_user(email=f"softdel-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
+    job = await make_job(user=user, status="completed")
 
     result = await job_repo.soft_delete(job.id, user_id=user.id)
 
-    assert result is not None
-    assert result.is_deleted is True
+    assert result is SoftDeleteOutcome.DELETED
+    job_after = await job_repo.get(job.id)
+    assert job_after is not None
+    assert job_after.is_deleted is True
 
 
 async def test_soft_delete_preserves_error_message(
@@ -335,40 +347,42 @@ async def test_soft_delete_preserves_error_message(
 
     result = await job_repo.soft_delete(job.id, user_id=user.id)
 
-    assert result is not None
-    assert result.is_deleted is True
-    assert result.error_message == "GPU OOM"
+    assert result is SoftDeleteOutcome.DELETED
+    job_after = await job_repo.get(job.id)
+    assert job_after is not None
+    assert job_after.is_deleted is True
+    assert job_after.error_message == "GPU OOM"
 
 
-async def test_soft_delete_wrong_user_returns_none(
+async def test_soft_delete_wrong_user_is_not_found(
     job_repo: JobRepository, make_user, make_job
 ) -> None:
-    """soft_delete returns None when user doesn't own the job."""
+    """soft_delete reports NOT_FOUND when the user doesn't own the job."""
     user = await make_user(email=f"softdelowner-{uuid4().hex[:6]}@example.com")
     other = await make_user(email=f"softdelother-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
+    job = await make_job(user=user, status="completed")
 
     result = await job_repo.soft_delete(job.id, user_id=other.id)
 
-    assert result is None
+    assert result is SoftDeleteOutcome.NOT_FOUND
 
 
-async def test_soft_delete_unknown_returns_none(job_repo: JobRepository) -> None:
-    """soft_delete returns None for unknown job ID."""
-    assert await job_repo.soft_delete(uuid4(), user_id=uuid4()) is None
+async def test_soft_delete_unknown_is_not_found(job_repo: JobRepository) -> None:
+    """soft_delete reports NOT_FOUND for unknown job ID."""
+    outcome = await job_repo.soft_delete(uuid4(), user_id=uuid4())
+    assert outcome is SoftDeleteOutcome.NOT_FOUND
 
 
 async def test_soft_delete_idempotent(job_repo: JobRepository, make_user, make_job) -> None:
     """soft_delete on already-deleted job succeeds (idempotent)."""
     user = await make_user(email=f"softdelidem-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
+    job = await make_job(user=user, status="completed")
 
     first = await job_repo.soft_delete(job.id, user_id=user.id)
     second = await job_repo.soft_delete(job.id, user_id=user.id)
 
-    assert first is not None
-    assert second is not None
-    assert second.is_deleted is True
+    assert first is SoftDeleteOutcome.DELETED
+    assert second is SoftDeleteOutcome.DELETED
 
 
 # -------------------------------------------------------------------------
@@ -415,14 +429,6 @@ async def test_list_aisha_jobs_for_polling_filters_correctly(
         provider=Provider.AISHA.value,
         status=JobStatus.QUEUED.value,
         gpu_session_id=stopping.id,
-    )
-    # Non-matching: soft-deleted
-    await make_job(
-        user=user,
-        provider=Provider.AISHA.value,
-        status=JobStatus.QUEUED.value,
-        gpu_session_id=active.id,
-        is_deleted=True,
     )
     # Non-matching: Grok job (no gpu_session)
     await make_job(
@@ -563,23 +569,23 @@ async def test_list_pending_video_jobs_includes_v2v(
     assert v2v_job.id in job_ids
 
 
-async def test_list_pending_video_jobs_excludes_soft_deleted(
-    job_repo: JobRepository, make_user, make_job
+@pytest.mark.parametrize("status", ["pending", "queued", "running"])
+async def test_an_in_flight_job_cannot_be_stored_as_deleted(
+    make_user, make_job, db_session, status: str
 ) -> None:
-    """A pending job that has been soft-deleted must not be polled."""
+    """Z1: a deleted in-flight job would be invisible to every poller, so it cannot exist."""
     user = await make_user(email=f"vidpoll-del-{uuid4().hex[:6]}@example.com")
 
-    await make_job(
-        user=user,
-        status="queued",
-        generation_type="t2v",
-        provider=Provider.GROK.value,
-        external_request_id="grok-deleted-001",
-        is_deleted=True,
-    )
-
-    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
-    assert not list(jobs)
+    with pytest.raises(IntegrityError, match="ck_generation_jobs_not_deleted_in_flight"):
+        async with db_session.begin_nested():
+            await make_job(
+                user=user,
+                status=status,
+                generation_type="t2v",
+                provider=Provider.GROK.value,
+                external_request_id="grok-deleted-001",
+                is_deleted=True,
+            )
 
 
 async def test_count_in_flight_for_session_and_model_filters_by_model(
@@ -609,7 +615,7 @@ async def test_count_in_flight_for_session_and_model_filters_by_model(
     assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image-lite") == 0
 
 
-async def test_count_in_flight_for_session_and_model_excludes_terminal_and_deleted(
+async def test_count_in_flight_for_session_and_model_excludes_terminal(
     job_repo: JobRepository, make_user, make_job, make_gpu_session
 ) -> None:
     user = await make_user(email=f"inflight-term-{uuid4().hex[:6]}@example.com")
@@ -621,13 +627,78 @@ async def test_count_in_flight_for_session_and_model_excludes_terminal_and_delet
         model="aisha-image",
         gpu_session_id=session_id,
     )
-    await make_job(
-        user=user,
-        status="running",
-        provider="aisha",
-        model="aisha-image",
-        gpu_session_id=session_id,
-        is_deleted=True,
-    )
 
     assert await job_repo.count_in_flight_for_session_and_model(session_id, "aisha-image") == 0
+
+
+async def test_c4_list_pending_video_jobs_includes_every_video_generation_type(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """The polled set follows ``GenerationType.output_kind``, not a hand-written list."""
+    user = await make_user(email=f"vidpoll-all-{uuid4().hex[:6]}@example.com")
+    video_types = [gt for gt in GenerationType if gt.output_kind is MediaKind.VIDEO]
+    assert {
+        GenerationType.T2V,
+        GenerationType.I2V,
+        GenerationType.V2V,
+        GenerationType.FLF2V,
+    } <= set(video_types)
+    expected = set()
+    for gen_type in video_types:
+        job = await make_job(
+            user=user,
+            status="running",
+            generation_type=gen_type.value,
+            provider=Provider.GROK.value,
+            external_request_id=f"req-{gen_type.value}",
+        )
+        expected.add(job.id)
+    image_job = await make_job(
+        user=user,
+        status="running",
+        generation_type=GenerationType.T2I.value,
+        provider=Provider.GROK.value,
+        external_request_id="req-image",
+    )
+
+    jobs = await job_repo.list_pending_video_jobs(provider=Provider.GROK)
+    job_ids = {j.id for j in jobs}
+
+    assert expected <= job_ids
+    assert image_job.id not in job_ids
+
+
+async def test_c4_provider_is_a_required_keyword(job_repo: JobRepository) -> None:
+    with pytest.raises(TypeError):
+        await job_repo.list_pending_video_jobs()  # type: ignore[call-arg]
+
+
+async def test_c3_each_provider_worker_lists_only_its_own_pending_jobs(
+    job_repo: JobRepository, make_user, make_job
+) -> None:
+    """Grok and Wan jobs are both pending; neither provider's poll sees the other's."""
+    user = await make_user(email=f"vidpoll-c3-{uuid4().hex[:6]}@example.com")
+    grok = await make_job(
+        user=user,
+        status="running",
+        generation_type="t2v",
+        provider=Provider.GROK.value,
+        external_request_id="grok-req",
+    )
+    wan_ids = set()
+    for gen_type in ("t2v", "i2v", "flf2v", "v2v", "r2v"):
+        wan = await make_job(
+            user=user,
+            status="queued",
+            generation_type=gen_type,
+            provider=Provider.ALIBABA.value,
+            external_request_id=f"wan-{gen_type}",
+        )
+        wan_ids.add(wan.id)
+
+    grok_ids = {j.id for j in await job_repo.list_pending_video_jobs(provider=Provider.GROK)}
+    wan_listed = {j.id for j in await job_repo.list_pending_video_jobs(provider=Provider.ALIBABA)}
+
+    assert grok.id in grok_ids
+    assert grok_ids.isdisjoint(wan_ids)
+    assert wan_listed == wan_ids

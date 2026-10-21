@@ -22,11 +22,11 @@ import pytest
 import structlog.testing
 from sqlalchemy import insert, select
 
-from src.api.services.grok.job_service import GrokJobService
 from src.api.services.image_thumbnail import GeneratedThumbnail, ThumbnailResult
 from src.api.services.storage.r2 import R2StorageService, R2StorageSettings
 from src.core.thumbnails import ThumbnailSpec
 from src.db.models.storage import GenerationOutput
+from tests.grok_support import make_grok_job_service
 from tests.media_ingest_support import make_media_ingestor
 
 if TYPE_CHECKING:
@@ -128,7 +128,7 @@ async def test_thumbnail_insert_failure_isolated_by_savepoint(
 
     md_thumb_id = uuid4()
 
-    svc = GrokJobService(
+    svc = make_grok_job_service(
         grok_client=MagicMock(),
         storage=noop_storage,
         retention_days=7,

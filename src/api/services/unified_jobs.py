@@ -34,6 +34,26 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+JOB_IN_PROGRESS_MESSAGE = (
+    "This job is still running and has already been charged. It can't be stopped. "
+    "You can delete it once it finishes."
+)
+
+
+class JobInProgressError(Exception):
+    """A delete was refused because the job is still in flight (409 ``job_in_progress``)."""
+
+    def __init__(self, *, job_id: UUID, user_id: UUID, status: str | None) -> None:
+        """Args:
+        job_id: The job the caller tried to delete.
+        user_id: The caller.
+        status: The job's current status, for the log.
+        """
+        super().__init__(JOB_IN_PROGRESS_MESSAGE)
+        self.job_id = job_id
+        self.user_id = user_id
+        self.status = status
+
 
 class UnifiedJobService:
     """Read-side service for the cross-provider jobs API.

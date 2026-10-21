@@ -95,6 +95,10 @@ class GrokDeferredTerminalError(GrokAPIError):
     """
 
 
+class GrokDeferredExpiredError(GrokAPIError):
+    """A deferred request that expired upstream before completing (or is unknown)."""
+
+
 class GrokRateLimitError(GrokAPIError):
     """Raised when rate limited by xAI API."""
 
@@ -666,7 +670,7 @@ class GrokClient:
                     provider_request_accepted=True,
                     provider_request_id=request_id,
                 )
-                raise GrokAPIError(
+                raise GrokDeferredExpiredError(
                     "Deferred video request expired before completion", failure=failure
                 )
 

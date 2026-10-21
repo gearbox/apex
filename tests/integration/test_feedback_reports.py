@@ -246,7 +246,7 @@ class TestSubmit:
         job = await make_job(user=owner)
         image = await make_user_image(user=owner)
         output = await _output(db_session, owner, job.id)
-        deleted_own_job = await make_job(user=caller, is_deleted=True)
+        deleted_own_job = await make_job(user=caller, status="completed", is_deleted=True)
 
         cases: Sequence[tuple[dict[str, str], dict[str, str]]] = [
             ({"job_id": str(job.id)}, {"job_id": str(uuid4())}),

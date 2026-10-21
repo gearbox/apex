@@ -118,7 +118,12 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=False,
             aspect_ratios=["1:1", "16:9"],
-            video=VideoConstraints(max_duration=15, resolutions=["480p", "720p"]),
+            video=VideoConstraints(
+                min_duration=1,
+                max_duration=15,
+                resolutions=["480p", "720p"],
+                supported_parameters=[],
+            ),
         )
         assert info.video is not None
         assert info.video.max_duration == 15
@@ -134,7 +139,12 @@ class TestModelInfoSchema:
             max_prompt_length=4096,
             supports_negative_prompt=False,
             aspect_ratios=["1:1"],
-            video=VideoConstraints(max_duration=15, resolutions=["480p", "720p"]),
+            video=VideoConstraints(
+                min_duration=1,
+                max_duration=15,
+                resolutions=["480p", "720p"],
+                supported_parameters=[],
+            ),
         )
         encoded = msgspec.json.encode(info)
         decoded = msgspec.json.decode(encoded, type=ModelInfo)
@@ -222,6 +232,99 @@ class TestModelInfoSchema:
         )
 
         assert info.provisioning is None
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            (
+                ModelType.WAN_3_VIDEO,
+                {
+                    "formats": ["mov", "mp4"],
+                    "min_duration_ms": 1000,
+                    "max_duration_ms": 15000,
+                    "max_bytes": 100000000,
+                },
+            ),
+            (
+                ModelType.GROK_IMAGINE_VIDEO,
+                {
+                    "formats": ["mov", "mp4", "webm"],
+                    "min_duration_ms": 0,
+                    "max_duration_ms": None,
+                    "max_bytes": None,
+                },
+            ),
+            (ModelType.AISHA_VIDEO, None),
+        ],
+    )
+    def test_video_input_constraints_are_discoverable(
+        self, model_type: ModelType, expected: dict[str, object] | None
+    ) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=aisha_video_capabilities()
+            if model_type is ModelType.AISHA_VIDEO
+            else None,
+        )
+
+        assert info.video is not None
+        assert msgspec.to_builtins(info.video.input_video) == expected
+        # Hard cutover: the single-seconds-cap field is gone, not kept beside ``input_video``.
+        assert set(msgspec.to_builtins(info.video)) == {
+            "min_duration",
+            "max_duration",
+            "resolutions",
+            "supported_parameters",
+            "input_video",
+            "input_image",
+            "max_combined_duration",
+            "input_anchored_modes",
+        }
+
+    @pytest.mark.parametrize(
+        ("model_type", "expected"),
+        [
+            (
+                ModelType.WAN_3_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": 20000000},
+            ),
+            (
+                ModelType.GROK_IMAGINE_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": None},
+            ),
+            (
+                ModelType.AISHA_VIDEO,
+                {"formats": ["jpeg", "png", "webp"], "max_bytes": None},
+            ),
+        ],
+    )
+    def test_image_input_constraints_are_discoverable(
+        self, model_type: ModelType, expected: dict[str, object]
+    ) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+            capabilities=aisha_video_capabilities()
+            if model_type is ModelType.AISHA_VIDEO
+            else None,
+        )
+
+        assert info.video is not None
+        assert msgspec.to_builtins(info.video.input_image) == expected
+
+    @pytest.mark.parametrize("model_type", ModelType)
+    def test_seed_range_is_discoverable_only_where_declared(self, model_type: ModelType) -> None:
+        info = _build_model_info(
+            model_type,
+            SimpleNamespace(name="Test", description="", is_enabled=True),
+            runtime=None,
+        )
+
+        expected = {"min": 0, "max": 2147483647} if model_type is ModelType.WAN_3_VIDEO else None
+        assert msgspec.to_builtins(info.seed_range) == expected
 
     @pytest.mark.parametrize("model_type", ModelType)
     def test_generation_modes_are_the_only_discovery_input_contract(

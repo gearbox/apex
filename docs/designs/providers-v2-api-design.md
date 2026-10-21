@@ -141,6 +141,11 @@ Same structure, but `user_context` key is **omitted entirely** (not `null`).
 
 ## 3. `msgspec.Struct` definitions
 
+> **Update (Wan 3.0 arc):** `VideoConstraints` gained `min_duration`, `supported_parameters`,
+> `input_video` (replaces an unreleased single per-clip seconds cap), `max_combined_duration` and `input_anchored_modes`
+> (additive wire fields; they mirror `VideoMeta` in `src/core/model_registry.py`). The sketch
+> below shows the current shape. See `docs/contracts/wan-video-contract.md`.
+
 ```python
 # src/api/schemas/providers.py
 """Provider discovery response schemas (v2)."""
@@ -150,14 +155,52 @@ from __future__ import annotations
 import msgspec
 
 
+class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
+    """What the model accepts as a video source (v2v)."""
+
+    formats: list[str]
+    """Sorted accepted containers, e.g. ["mov", "mp4"]."""
+
+    min_duration_ms: int
+    max_duration_ms: int | None = None
+    max_bytes: int | None = None
+
+
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
+
+    min_duration: int
+    """Minimum video duration in seconds."""
 
     max_duration: int
     """Maximum video duration in seconds."""
 
     resolutions: list[str]
-    """Supported video resolutions, e.g. ["480p", "720p"]."""
+    """Supported video resolutions, e.g. ["480p", "720p", "1080p"]."""
+
+    supported_parameters: list[str]
+    """Sorted optional request parameters the model honours, e.g. ["audio", "prompt_extend"]."""
+
+    input_video: InputVideoConstraintsInfo | None = None
+    """v2v source limits (formats, min/max duration in ms, max bytes). None = the model
+    accepts no video source."""
+
+    input_image: InputImageConstraintsInfo | None = None
+    """i2v/flf2v/r2v source limits (formats, max bytes). None = the model accepts no image source."""
+
+    max_combined_duration: int | None = None
+    """v2v: input seconds + requested duration must not exceed this. None = no rule."""
+
+    input_anchored_modes: list[str] = msgspec.field(default_factory=list)
+    """Sorted generation modes whose output ratio follows the input media:
+    aspect_ratio must be omitted for them. Other modes accept it."""
+
+
+class SeedRangeInfo(msgspec.Struct, kw_only=True):
+    """Inclusive ``seed`` bounds a model accepts (``ModelInfo.seed_range``; None = no bound)."""
+
+    min: int
+    max: int
 
 
 class ModelInfo(msgspec.Struct, kw_only=True):

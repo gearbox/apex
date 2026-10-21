@@ -186,6 +186,7 @@ class _WriteAndSucceedProvider:
         db_job.debit_transaction_id = reserve_result.txn.id
         await session.flush()
         return ProviderSubmitResult(
+            receipt_held=False,
             job=db_job,
             balance_after=reserve_result.txn.balance_after,
             balance_event=reserve_result.event,

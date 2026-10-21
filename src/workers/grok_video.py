@@ -18,24 +18,22 @@ from typing import NoReturn
 
 import structlog
 
-from src.api.services.billing import BillingService
-from src.api.services.event_bus import EventBus
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.grok import GrokClient
+from src.api.services.grok.factory import build_grok_job_service
 from src.api.services.grok.job_service import GrokJobService
-from src.api.services.grok.video_worker import GrokVideoWorker
-from src.api.services.media_ingest.factory import build_media_ingest_service
-from src.api.services.ops_event_bus import OpsEventBus
-from src.api.services.storage import R2StorageService, R2StorageSettings
+from src.api.services.grok.orphan_compensator import GrokOrphanCompensator
+from src.api.services.video_jobs.cli import BuiltVideoService, VideoWorkerDeps, run_video_worker
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
-from src.core.redis import get_operational_redis_client
-from src.db import init_db
 
 logger = structlog.get_logger(__name__)
 
+WORKER_NAME = GrokJobService.VIDEO_POLLER_NAME
+"""Feeds the leader-lease key; defined once on the job service (shared with the in-process worker)."""
 
-class GrokVideoWorkerCLI:
+
+class GrokVideoPollerCLI:
     """CLI runner for the Grok video polling worker."""
 
     def __init__(self, settings: Settings) -> None:
@@ -45,134 +43,55 @@ class GrokVideoWorkerCLI:
             settings: Application settings.
         """
         self._settings = settings
-        self._worker: GrokVideoWorker | None = None
         self._shutdown_event = asyncio.Event()
 
     async def run(self) -> None:
         """Run the video worker until shutdown signal."""
-        logger.info("grok_worker.starting")
-
-        # Validate configuration
-        if not self._settings.grok_configured:
-            logger.error("grok_worker.missing_api_key")
-            sys.exit(1)
-
-        if not self._settings.r2_configured:
-            logger.error("grok_worker.r2_not_configured")
-            sys.exit(1)
-
-        # Initialize database
-        db_manager = init_db(
-            self._settings.database_url,
-            pool_size=self._settings.db_pool_size,
-            max_overflow=self._settings.db_max_overflow,
-            echo=self._settings.db_echo,
+        await run_video_worker(
+            self._settings,
+            shutdown_event=self._shutdown_event,
+            build_job_service=self._build_job_service,
+            worker_name=WORKER_NAME,
+            interval_seconds=self._settings.grok_video_poll_interval,
+            max_concurrent_polls=self._settings.grok_video_max_concurrent_polls,
+            required=lambda settings: settings.grok_configured,
         )
-        logger.info("grok_worker.db_initialized")
 
-        # The shared pool remains necessary for EventBus/OpsEventBus publish;
-        # the operational pool is dedicated to this worker's leader lease.
-        if self._settings.redis_url:
-            from src.core.redis import init_operational_redis_pool, init_redis_pool
-
-            init_redis_pool(
-                self._settings.redis_url,
-                socket_connect_timeout=self._settings.redis_socket_connect_timeout_seconds,
-                socket_timeout=self._settings.redis_socket_timeout_seconds,
-                health_check_interval=self._settings.redis_health_check_interval_seconds,
-                max_connections=self._settings.redis_max_connections,
-            )
-            init_operational_redis_pool(
-                self._settings.redis_url,
-                socket_connect_timeout=self._settings.redis_operational_socket_connect_timeout_seconds,
-                socket_timeout=self._settings.redis_operational_socket_timeout_seconds,
-                health_check_interval=self._settings.redis_health_check_interval_seconds,
-                max_connections=self._settings.redis_operational_max_connections,
-            )
-            logger.info("grok_worker.redis_initialized")
-
-        # Initialize R2 storage
-        r2_settings = R2StorageSettings(
-            account_id=self._settings.r2_account_id,
-            access_key_id=self._settings.r2_access_key_id,
-            secret_access_key=self._settings.r2_secret_access_key,
-            bucket_name=self._settings.r2_bucket_name,
-            retention_days=self._settings.retention_days,
-        )
-        r2_storage = R2StorageService(r2_settings)
-        logger.info("grok_worker.r2_initialized", bucket=self._settings.r2_bucket_name)
-
-        # Initialize Grok client
-        grok_client = GrokClient(self._settings)
+    @staticmethod
+    async def _build_job_service(deps: VideoWorkerDeps) -> BuiltVideoService:
+        """Connect the Grok client and job service this process polls with."""
+        settings = deps.settings
+        grok_client = GrokClient(settings)
         await grok_client.connect()
         logger.info("grok_worker.client_initialized")
 
-        # Billing service is stateless — see src.api.services.billing docstring.
-        billing_service = BillingService()
-        # Match the in-process topology.  Disabled instances are intentional
-        # no-ops, so standalone polling remains safe without Redis.
-        event_bus = EventBus(enabled=self._settings.redis_url is not None)
-        ops_event_bus = OpsEventBus(enabled=self._settings.redis_url is not None)
-
-        # Initialize job service
-        media_ingestor = build_media_ingest_service(self._settings)
-        job_service = GrokJobService(
+        job_service: GrokJobService = build_grok_job_service(
             grok_client=grok_client,
-            storage=r2_storage,
-            retention_days=self._settings.retention_days,
-            billing_service=billing_service,
-            event_bus=event_bus,
-            ops_event_bus=ops_event_bus,
-            max_poll_time=self._settings.grok_video_max_poll_time,
-            finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
-            media_ingestor=media_ingestor,
-            billing_policy=ProviderBillingPolicyRegistry.with_grok_moderation_policy(
-                self._settings.grok_moderation_billing_policy,
-                self._settings.grok_undelivered_output_billing_policy,
-            ),
+            storage=deps.storage,
+            media_ingestor=deps.media_ingestor,
+            provider_video_ingestor=deps.provider_video_ingestor,
+            max_output_bytes=settings.media_ingest_provider_video_max_bytes,
+            billing_service=deps.billing_service,
+            event_bus=deps.event_bus,
+            ops_event_bus=deps.ops_event_bus,
+            billing_policy=ProviderBillingPolicyRegistry.from_settings(settings),
+            retention_days=settings.retention_days,
+            max_poll_time=settings.grok_video_max_poll_time,
+            finalization_lease_seconds=settings.grok_video_finalization_lease_seconds,
+            receipts=deps.receipts,
         )
         await job_service.connect()
-        logger.info("grok_worker.job_service_initialized")
 
-        # Create and start worker. redis_enabled lets this standalone process
-        # share the same leader lease key as any in-process worker, so
-        # running both simultaneously is safe (only one actually ticks).
-        self._worker = GrokVideoWorker(
-            db_manager=db_manager,
-            job_service=job_service,
-            billing_service=billing_service,
-            settings=self._settings,
-            event_bus=event_bus,
-            ops_event_bus=ops_event_bus,
-            redis_enabled=self._settings.redis_url is not None,
-            redis_client_factory=get_operational_redis_client,
+        async def close() -> None:
+            await job_service.close()
+            await grok_client.close()
+
+        return BuiltVideoService(
+            service=job_service,
+            close=close,
+            compensator=GrokOrphanCompensator(grok_client),
+            receipt_reconciler_name=GrokJobService.RECEIPT_RECONCILER_NAME,
         )
-        await self._worker.start()
-
-        logger.info(
-            "grok_worker.running",
-            poll_interval=self._settings.grok_video_poll_interval,
-            max_poll_time=self._settings.grok_video_max_poll_time,
-            finalization_lease_seconds=self._settings.grok_video_finalization_lease_seconds,
-            moderation_billing_policy=self._settings.grok_moderation_billing_policy,
-        )
-        logger.info("grok_worker.ready", hint="Press Ctrl+C to stop")
-
-        # Wait for shutdown signal
-        await self._shutdown_event.wait()
-
-        # Cleanup
-        logger.info("grok_worker.shutting_down")
-        await self._worker.stop()
-        await job_service.close()
-        await grok_client.close()
-        await r2_storage.close()
-        await db_manager.close()
-        if self._settings.redis_url:
-            from src.core.redis import close_redis_pool
-
-            await close_redis_pool()
-        logger.info("grok_worker.stopped")
 
     def handle_signal(self) -> None:
         """Handle shutdown signal."""
@@ -215,7 +134,7 @@ Environment variables:
         logging.getLogger().setLevel(logging.DEBUG)
 
     # Create runner
-    runner = GrokVideoWorkerCLI(settings)
+    runner = GrokVideoPollerCLI(settings)
 
     # Setup signal handlers
     loop = asyncio.new_event_loop()
