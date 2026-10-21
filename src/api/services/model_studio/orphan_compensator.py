@@ -24,6 +24,7 @@ class ModelStudioOrphanCompensator:
 
     provider: ClassVar[Provider] = Provider.ALIBABA
     transient_errors: ClassVar[tuple[type[Exception], ...]] = (ModelStudioTransientError,)
+    permanent_errors: ClassVar[tuple[type[Exception], ...]] = (ModelStudioAPIError,)
 
     def __init__(self, client: ModelStudioClient) -> None:
         self._client = client

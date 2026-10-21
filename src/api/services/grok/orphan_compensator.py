@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING, ClassVar
 
 from src.api.services.grok import (
     GrokAPIError,
+    GrokClientError,
     GrokConnectionError,
     GrokDeferredExpiredError,
     GrokDeferredTerminalError,
@@ -43,6 +44,7 @@ class GrokOrphanCompensator:
         # invalid-id answers are mapped inside ``observe`` and never reach here.
         GrokAPIError,
     )
+    permanent_errors: ClassVar[tuple[type[Exception], ...]] = (GrokClientError,)
 
     def __init__(self, grok_client: GrokClient) -> None:
         self._grok = grok_client

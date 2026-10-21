@@ -351,6 +351,19 @@ async def test_grok_observe_lets_transient_errors_propagate(error: Exception) ->
     assert isinstance(error, GrokOrphanCompensator.transient_errors)
 
 
+def test_each_compensator_declares_its_permanent_errors() -> None:
+    from src.api.services.grok import GrokClientError
+    from src.api.services.model_studio.errors import ModelStudioAPIError
+    from src.api.services.model_studio.orphan_compensator import ModelStudioOrphanCompensator
+
+    assert ModelStudioOrphanCompensator.permanent_errors == (ModelStudioAPIError,)
+    assert GrokOrphanCompensator.permanent_errors == (GrokClientError,)
+    # A programming error is neither transient nor permanent for either provider.
+    for compensator in (ModelStudioOrphanCompensator, GrokOrphanCompensator):
+        classified = compensator.transient_errors + compensator.permanent_errors
+        assert not issubclass(AttributeError, classified)
+
+
 # ---- wiring invariants ------------------------------------------------------------------
 
 

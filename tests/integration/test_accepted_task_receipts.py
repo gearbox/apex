@@ -77,6 +77,10 @@ class _Transient(Exception):
     pass
 
 
+class _Permanent(Exception):
+    pass
+
+
 def _fake_compensator(
     *,
     observe: OrphanObservation | None = None,
@@ -88,6 +92,7 @@ def _fake_compensator(
     return SimpleNamespace(
         provider=provider,
         transient_errors=(_Transient,),
+        permanent_errors=(_Permanent,),
         cancel=AsyncMock(return_value=cancel),
         observe=AsyncMock(side_effect=observe_error)
         if observe_error
@@ -836,7 +841,7 @@ async def test_a_permanent_compensation_error_is_absorbed_for_manual_audit(
     ops_bus: MagicMock,
 ) -> None:
     user, account = await _seed(db_engine)
-    compensator = _fake_compensator(observe_error=RuntimeError("malformed"))
+    compensator = _fake_compensator(observe_error=_Permanent("malformed"))
     reconciler = AcceptedTaskReconciler(receipt_db, compensator, ops_bus, grace_seconds=0)
     try:
         await receipts.record(_accepted(user))
@@ -845,6 +850,37 @@ async def test_a_permanent_compensation_error_is_absorbed_for_manual_audit(
 
         (row,) = await _receipt_rows(db_engine, user.id)
         assert (row.status, row.upstream_status) == ("absorbed", "unknown")
+    finally:
+        await _cleanup(db_engine, user.id, account.id)
+
+
+async def test_a_programming_error_leaves_the_receipt_pending_for_a_retry(
+    db_engine: AsyncEngine,
+    receipts: AcceptedTaskReceipts,
+    receipt_db: DatabaseManager,
+    ops_bus: MagicMock,
+) -> None:
+    """A bug (here an ``AttributeError``) must not file every orphan as absorbed forever."""
+    user, account = await _seed(db_engine)
+    compensator = _fake_compensator(observe_error=AttributeError("renamed attribute"))
+    reconciler = AcceptedTaskReconciler(receipt_db, compensator, ops_bus, grace_seconds=0)
+    try:
+        await receipts.record(_accepted(user))
+
+        assert await reconciler.run_once() == 0
+
+        (row,) = await _receipt_rows(db_engine, user.id)
+        assert (row.status, row.resolved_at) == ("pending", None)
+        ops_bus.publish.assert_not_awaited()
+
+        # After the hotfix the same receipt is still cancellable.
+        fixed = _fake_compensator()
+        assert (
+            await AcceptedTaskReconciler(receipt_db, fixed, ops_bus, grace_seconds=0).run_once()
+            == 1
+        )
+        (resolved,) = await _receipt_rows(db_engine, user.id)
+        assert resolved.status == "cancelled"
     finally:
         await _cleanup(db_engine, user.id, account.id)
 

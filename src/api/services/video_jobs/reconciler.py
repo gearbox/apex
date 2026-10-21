@@ -119,9 +119,10 @@ class AcceptedTaskReconciler:
                     provider=receipt.provider, external_task_id=receipt.external_task_id
                 )
             return False
-        except Exception:
-            # Permanent: retrying forever would only repeat it. The ops alert
-            # carries the task id for a manual audit.
+        except self._compensator.permanent_errors:
+            # A provider answer retrying cannot change. The ops alert carries the task
+            # id for a manual audit. Any other exception is a bug: it propagates to
+            # ``run_once``, the receipt stays pending, and it is retried once fixed.
             logger.exception(
                 "video_receipt.reconcile_permanent_failure", **self._log_fields(receipt)
             )

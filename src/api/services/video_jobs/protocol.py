@@ -85,11 +85,16 @@ class OrphanTaskCompensator(Protocol):
 
     Both methods raise one of ``transient_errors`` when the provider could not be
     reached or throttled the call, so the next tick retries; neither ever returns
-    a fabricated value. Any other exception is a permanent failure to compensate.
+    a fabricated value. A ``permanent_errors`` exception is a provider answer that
+    retrying cannot change. Anything else is a bug: it is not classified, so the
+    receipt stays pending and is retried (loudly) once the bug is fixed.
     """
 
     provider: ClassVar[Provider]
     transient_errors: ClassVar[tuple[type[Exception], ...]]
+    permanent_errors: ClassVar[tuple[type[Exception], ...]]
+    """Provider errors that mean "this task cannot be compensated automatically" (absorbed
+    for a manual audit). Checked after ``transient_errors``."""
 
     async def cancel(self, external_task_id: str) -> OrphanCancelOutcome:
         """Ask the provider to cancel the task."""
