@@ -370,6 +370,10 @@ class GenerationJob(Base):
             "(provider != 'aisha') OR (gpu_session_id IS NOT NULL)",
             name="ck_generation_jobs_aisha_has_session",
         ),
+        CheckConstraint(
+            "NOT (is_deleted AND status IN ('pending', 'queued', 'running'))",
+            name="ck_generation_jobs_not_deleted_in_flight",
+        ),
         Index(
             "ix_generation_jobs_gpu_session_id_status",
             "gpu_session_id",
