@@ -918,6 +918,7 @@ ImageConstraints: {
 }
 
 VideoConstraints: {
+  bills_input_video_seconds: bool,      // required; v2v source seconds are rounded up per clip and billed in addition to duration
   min_duration: int,                 // minimum video duration in seconds
   max_duration: int,                 // maximum video duration in seconds
   resolutions: string[],             // e.g. ["480p", "720p", "1080p"]

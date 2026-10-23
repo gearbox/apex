@@ -169,6 +169,7 @@ def _build_model_info(
         ),
         video=(
             VideoConstraints(
+                bills_input_video_seconds=meta.video.bills_input_video_seconds,
                 min_duration=meta.video.min_duration,
                 max_duration=meta.video.max_duration,
                 resolutions=[r.value for r in meta.video.resolutions],

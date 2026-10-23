@@ -37,6 +37,7 @@ The `alibaba` provider appears with `provisioning_mode: "always_on"`. Its model:
     "r2v":   { "source_media": { "min": 1, "max": 8, "media_types": ["image"], "roles": null } }
   },
   "video": {
+    "bills_input_video_seconds": true,
     "min_duration": 2,
     "max_duration": 30,
     "resolutions": ["480p", "720p", "1080p"],
@@ -60,7 +61,7 @@ The `alibaba` provider appears with `provisioning_mode: "always_on"`. Its model:
 
 `seed_range` (`{min, max}` or `null`) is a new field on the model itself, additive for every model: only Wan declares one today.
 
-New wire fields on `video` (additive for every model): `min_duration`, `supported_parameters`, `input_video`, `input_image`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits. `input_video` replaces an earlier single per-clip seconds cap that was never released (hard cutover: there is no compatibility field); it is `null` for a model that takes no video source (Aisha video), and Grok reports all three library containers with no duration or size limit. `input_image` is the same for image sources: Wan accepts **jpeg, png, webp** at most **20 000 000 bytes** (decimal 20 MB, per the Wan 3.0 API reference: "JPEG, JPG, PNG (transparent channel not supported), BMP, WEBP", "no more than 20MB"); Grok and Aisha video list every library image format with `max_bytes: null`; it is `null` for a model that takes no image source.
+New wire fields on `video` (additive for every model): `bills_input_video_seconds` (required; Wan `true`, Grok and Aisha `false`), `min_duration`, `supported_parameters`, `input_video`, `input_image`, `max_combined_duration`, `input_anchored_modes`. Other video models report `supported_parameters: []`, `input_anchored_modes: []` and `null` limits. `input_video` replaces an earlier single per-clip seconds cap that was never released (hard cutover: there is no compatibility field); it is `null` for a model that takes no video source (Aisha video), and Grok reports all three library containers with no duration or size limit. `input_image` is the same for image sources: Wan accepts **jpeg, png, webp** at most **20 000 000 bytes** (decimal 20 MB, per the Wan 3.0 API reference: "JPEG, JPG, PNG (transparent channel not supported), BMP, WEBP", "no more than 20MB"); Grok and Aisha video list every library image format with `max_bytes: null`; it is `null` for a model that takes no image source.
 
 `input_anchored_modes` (sorted generation-mode keys) lists the modes whose output ratio **follows the input**: send no `aspect_ratio` for them. Every other mode accepts one even when `source_media` is present. It replaces an earlier per-model boolean that was never released (hard cutover: there is no compatibility field).
 
@@ -168,7 +169,7 @@ An authentication or permission failure while *checking* an accepted job (rotate
 
 ## 7. Cost
 
-`tokens = (token_cost + input_token_cost × k + per_second_token_cost × s) × n`. For Wan, `n` is `1`, and `s` is `duration` — plus, for `v2v`, the source video's length rounded up to whole seconds (Wan bills the input as well). Prices are per resolution. `GET /v1/billing/pricing` lists the rules (`per_second_token_cost`, `video_resolution`).
+`tokens = (token_cost + input_token_cost × k + per_second_token_cost × s) × n`. For Wan, `n` is `1`, and `s` is `duration` plus, for `v2v` when `video.bills_input_video_seconds` is true, the sum of each source video's duration rounded up to whole seconds. Prices are per resolution. `GET /v1/billing/pricing` lists the rules (`per_second_token_cost`, `video_resolution`).
 
 The quote assumes the requested `duration`. An edit can finish near the source length, so the provider's billed seconds can differ from the quote; the backend only records this for now — there is no automatic extra charge or refund yet.
 
