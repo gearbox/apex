@@ -23,6 +23,7 @@ from src.api.services.gpu_session.command_payload import (
     build_envelope,
     build_payload,
 )
+from src.api.utils.redaction import known_secrets_from_settings, redact_identifier
 from src.core.enums import TERMINAL_GPU_SESSION_STATUSES, OperationKind
 from src.core.uid import new_id
 from src.db.repositories.gpu_session import GpuSessionRepository
@@ -86,6 +87,7 @@ class GpuSessionCommandService:
     ) -> None:
         self._session_factory = session_factory
         self._settings = settings
+        self._known_secrets = known_secrets_from_settings(settings)
 
     async def enqueue(
         self,
@@ -201,6 +203,11 @@ class GpuSessionCommandService:
         Returns (status, envelope_or_None) mapped directly onto the HTTP response.
         Never raises for a normal-path outcome (D29 — the endpoint must never 5xx).
         """
+        # SECURITY: node-supplied; redact once at the trust boundary so neither the
+        # stored agent_id nor any log field can carry a credential. The claim UPDATE
+        # matches on agent_id equality, so the value written and the value compared
+        # must be this same redacted string.
+        agent_id = redact_identifier(agent_id, self._known_secrets)
         try:
             async with self._session_factory() as db, db.begin():
                 session_repo = GpuSessionRepository(db)

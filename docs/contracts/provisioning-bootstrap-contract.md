@@ -177,7 +177,7 @@ also land in argv and `.git/config`.
 ## Trust boundary for node-supplied free text (S1 round-2, T1/T8 round-3 remediation)
 
 **No node-supplied string is persisted, published, or billed against without
-passing through `redact_secrets`/`redact_secrets_mapping`/`redact_known_secrets`
+passing through `redact_secrets`/`redact_secrets_mapping`/`redact_identifier`
 (`src/api/utils/redaction.py`) first.** This rule is enforced once, at each
 receiver's trust boundary, not re-derived per call site — see each redaction
 function's module docstring.
@@ -187,7 +187,7 @@ D3 put the callback token into the node's own environment
 `CF_TUNNEL_TOKEN`/`ACS_GITHUB_TOKEN`/`ACS_HF_TOKEN`/`ACS_CIVITAI_API_TOKEN` as
 bare env vars), so any node-side code path that echoes a failing command, a
 curl error, or an env dump into free-text telemetry can otherwise leak a
-secret straight into a database row or the client's event stream. Two
+secret straight into a database row or the client's event stream. Three
 receivers apply this today:
 
 - **`POST /v1/provisioning/webhook/{session_id}`** (above): `error` and
@@ -202,11 +202,15 @@ receivers apply this today:
   `GpuSessionCommandRepository.mark_terminal` — persisted to
   `gpu_session_operations`/`gpu_session_commands.error` and published over
   SSE. `event.event_id` and `event.target.bundle_version` are also routed
-  through `redact_known_secrets` (cheap — they're structurally simple, not
-  free text, but an exact known-secret match must still never survive). This
+  through `redact_identifier` (cheap — they're structurally simple, not
+  free text, but a credential must still never survive). This
   was the gap closed in round 2: round 1 fixed the webhook call site only,
   but D3's env-var change exposed the token on every path a node can reach,
   and telemetry events are the node's most-used path.
+- **Command claim** (`GpuSessionCommandService.claim`,
+  `src/api/services/gpu_session/command_service.py`): the node-supplied
+  `agent_id` is redacted once at entry, before the repository write and every
+  log field.
 
 ### What redaction guarantees, and what it does not (T1/T8, round-3 remediation)
 
@@ -236,6 +240,11 @@ known-secret set can hold them. `redact_secrets` therefore also masks GitHub's t
 formats (`gh[pousr]_…` and `github_pat_…`, 20+ token characters, on word boundaries)
 wherever they appear in free text, after Layer 1 and before truncation. It is a fixed-format
 scan (no regex, linear time), so unlike Layers 2/3 it has no key-name heuristics to miss.
+
+Node-supplied identifiers (`event_id`, `target.bundle_version`, the claim's `agent_id`) go
+through `redact_identifier`: exact known secrets plus the GitHub token pass, with no tokenizer
+and no truncation. A redacted id is still stable for the same producer value, so duplicate
+detection and agent re-claims are unaffected.
 
 **The per-session callback token is the one secret Layer 1 can never cover.**
 Apex stores only `callback_token_hash` — the plaintext never exists anywhere
@@ -289,7 +298,7 @@ bracketed IPv6 in a container/Cloudflare context). A URL this module cannot
 parse is redacted **wholesale** to `[REDACTED]` rather than left as the
 unparsed (possibly secret-bearing) original or allowed to raise. This is a
 module-wide invariant, not specific to URLs: `redact_secrets`,
-`redact_secrets_mapping`, and `redact_known_secrets` must never raise for any
+`redact_secrets_mapping`, and `redact_identifier` must never raise for any
 `str` input, because each is the trust boundary for untrusted node text on a
 hot path (a webhook, a per-tick telemetry POST) — an exception escaping the
 redactor turns one malformed field into a 500 for the whole request, exactly

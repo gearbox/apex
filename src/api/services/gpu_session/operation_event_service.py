@@ -23,8 +23,8 @@ callback token or tunnel token — apex only ever stores the callback token's ha
 and the tunnel token is never persisted at all, so neither is in scope here (see
 T8 in the round-3 remediation notes; this is a documented limitation, not an
 oversight). ``event.event_id`` and ``event.target.bundle_version`` are also routed
-through Layer 1 (cheap — a ``str.replace`` pass) even though they are structurally
-simple, not free text.
+through ``redact_identifier`` (Layer 1 plus the GitHub token pass — cheap linear scans)
+even though they are structurally simple, not free text.
 """
 
 from __future__ import annotations
@@ -39,7 +39,7 @@ from src.api.security.callback_token import validate_callback_token
 from src.api.services.gpu_session.failure_reasons import MAX_GPU_SESSION_FAILURE_REASON_LENGTH
 from src.api.utils.redaction import (
     known_secrets_from_settings,
-    redact_known_secrets,
+    redact_identifier,
     redact_secrets,
     redact_secrets_mapping,
 )
@@ -180,9 +180,10 @@ class OperationEventService:
             max_length=MAX_GPU_SESSION_FAILURE_REASON_LENGTH,
             known_secrets=self._known_secrets,
         )
-        # T11: not free text, but still routed through the cheap Layer-1-only
-        # pass — an exact known-secret match must never survive even here.
-        redacted_event_id = redact_known_secrets(event.event_id, self._known_secrets)
+        # T11: not free text, but still routed through the cheap identifier pass
+        # (Layer 1 + GitHub token pattern) — a credential must never survive into
+        # last_event_id, and an App installation token fits in its String(64).
+        redacted_event_id = redact_identifier(event.event_id, self._known_secrets)
 
         outcome = await operation_repo.apply_event(
             operation_id=event.operation_id,
@@ -199,7 +200,7 @@ class OperationEventService:
             summary=redacted_summary,
             error=redacted_error,
             target_bundle_version=(
-                redact_known_secrets(event.target.bundle_version, self._known_secrets)
+                redact_identifier(event.target.bundle_version, self._known_secrets)
                 if event.target is not None and event.target.bundle_version is not None
                 else None
             ),

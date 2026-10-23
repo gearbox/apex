@@ -18,7 +18,7 @@ from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.routes.internal_gpu_session import InternalGpuSessionController
-from src.api.schemas.gpu_session import OperationEventBody
+from src.api.schemas.gpu_session import OperationEventBody, OperationTargetBody
 from src.api.services.gpu_session.operation_event_service import OperationEventService
 from src.core.enums import GpuSessionStatus, OperationKind, OperationStatus
 from src.core.uid import new_id
@@ -272,6 +272,155 @@ async def test_a_github_app_token_in_node_text_is_redacted_on_disk(
 
         event_bus.publish.assert_awaited_once()
         assert _ROTATING_APP_TOKEN not in str(event_bus.publish.await_args.kwargs["payload"])
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
+
+
+async def _seed_operation(session_factory):  # type: ignore[no-untyped-def]
+    """Committed user + provisioning session + one bare operation, for service-level tests."""
+    user = User(
+        id=uuid4(),
+        email=f"operation-redaction-identifier-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(_CALLBACK_TOKEN.encode()).hexdigest(),
+    )
+    operation_id = new_id()
+    async with session_factory() as db, db.begin():
+        db.add(user)
+        await db.flush()
+        db.add(gpu_session)
+        await db.flush()
+        await GpuSessionOperationRepository(db).create(
+            id=operation_id,
+            session_id=gpu_session.id,
+            user_id=user.id,
+            product_id=gpu_session.product_id,
+            kind=OperationKind.bundle_provision,
+        )
+    return user, gpu_session, operation_id
+
+
+def _identifier_event(  # type: ignore[no-untyped-def]
+    *, session_id, operation_id, event_id: str, bundle_version: str | None = None
+) -> OperationEventBody:
+    now = datetime.now(UTC)
+    return OperationEventBody(
+        schema_version=2,
+        event_id=event_id,
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_kind=OperationKind.bundle_provision,
+        batch=None,
+        sequence=0,
+        target=(
+            OperationTargetBody(bundle="qwen_rapid_aio", bundle_version=bundle_version, mode="full")
+            if bundle_version is not None
+            else None
+        ),
+        status=OperationStatus.running,
+        phase=None,
+        started_at=now,
+        ts=now,
+        elapsed_seconds=1.0,
+        phase_elapsed_seconds=None,
+        progress=None,
+        plan=None,
+        summary=None,
+        message="tick",
+        error=None,
+    )
+
+
+def _settings_with(*, hf_token: str = "") -> MagicMock:
+    settings = MagicMock()
+    settings.github_content_token = ""
+    settings.hf_token = hf_token
+    settings.civitai_api_token = ""
+    return settings
+
+
+async def test_a_github_app_token_in_event_id_is_redacted_and_still_deduplicates(
+    db_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """F1, review r2: ``event_id`` is node-supplied and persisted verbatim as
+    ``last_event_id`` (String(64)), and a 40-char installation token fits. It must be
+    masked on disk, and — because redaction is deterministic — re-sending the identical
+    event must still classify as a ``duplicate``, not a ``sequence_collision``."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    user, gpu_session, operation_id = await _seed_operation(session_factory)
+    event_id = f"evt-{_ROTATING_APP_TOKEN}"
+    receiver = OperationEventService(settings=_settings_with())
+
+    try:
+        outcomes = []
+        for _ in range(2):
+            async with session_factory() as db, db.begin():
+                result = await receiver.handle_event(
+                    session_id=gpu_session.id,
+                    bearer_token=_CALLBACK_TOKEN,
+                    event=_identifier_event(
+                        session_id=gpu_session.id, operation_id=operation_id, event_id=event_id
+                    ),
+                    db=db,
+                )
+            assert result.outcome is not None
+            outcomes.append(result.outcome)
+
+        assert outcomes[0].applied is True
+        assert (outcomes[1].applied, outcomes[1].reason) == (False, "duplicate")
+
+        async with session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
+            assert operation is not None
+            assert _ROTATING_APP_TOKEN not in (operation.last_event_id or "")
+            assert "[REDACTED]" in (operation.last_event_id or "")
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
+
+
+async def test_a_known_secret_in_target_bundle_version_is_redacted_on_disk(
+    db_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """``target.bundle_version`` takes the same identifier path as ``event_id``; its
+    ``String(20)`` column is too short for a GitHub token but not for a configured secret."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    user, gpu_session, operation_id = await _seed_operation(session_factory)
+    known_secret = "hf_k4secret"
+    receiver = OperationEventService(settings=_settings_with(hf_token=known_secret))
+
+    try:
+        async with session_factory() as db, db.begin():
+            result = await receiver.handle_event(
+                session_id=gpu_session.id,
+                bearer_token=_CALLBACK_TOKEN,
+                event=_identifier_event(
+                    session_id=gpu_session.id,
+                    operation_id=operation_id,
+                    event_id="bundle-version-event",
+                    bundle_version=f"260101-{known_secret}",
+                ),
+                db=db,
+            )
+        assert result.outcome is not None
+        assert result.outcome.applied is True
+
+        async with session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
+            assert operation is not None
+            assert operation.target_bundle_version == "260101-[REDACTED]"
     finally:
         async with session_factory() as db:
             await db.execute(delete(User).where(User.id == user.id))

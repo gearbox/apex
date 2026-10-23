@@ -46,13 +46,21 @@ to catch. Do not represent redaction as a complete defence for that value.
 
 **GitHub token pattern pass.** GitHub App installation tokens rotate hourly and are
 minted by whichever apex process a node happened to call, so no static known-secret
-set can hold them. ``redact_secrets`` therefore runs one regex over the text, right
+set can hold them. ``redact_secrets`` therefore runs one pass over the text, right
 after Layer 1 and before Layer 3, that masks GitHub's documented token formats
-(``gh[pousr]_…`` and ``github_pat_…``) wherever they appear. The formats are
+(``gh[pousr]_…`` and ``github_pat_…``) wherever they appear; ``redact_identifier``
+runs the same pass (after Layer 1) for node-supplied identifiers. The formats are
 unambiguous (a fixed prefix plus 20+ token characters), so unlike Layer 3's key
 heuristics this pass has no key-name guessing. It is a ``str.find`` scan, not a regex,
 like the rest of this module (see ``test_no_regex_module_used``): it is linear in the
 input and can never backtrack.
+
+**Identifiers (T11, r2 F1/N1).** Structurally simple node-supplied values — an
+operation event's ``event_id`` and ``target.bundle_version``, the command claim's
+``agent_id`` — go through ``redact_identifier``: Layer 1 plus the GitHub token pass,
+with no tokenizer and no truncation. They are persisted and compared for equality
+(duplicate-event detection, an agent re-claiming its own command), and redaction is
+deterministic, so a redacted id is still stable for the same producer value.
 
 **Layer 2 vs Layer 3 key matching are deliberately different tests (U3, round-4).**
 Layer 2 (a mapping key, tested in the dict walker) uses a broad, lowercase
@@ -91,7 +99,7 @@ entries get replaced.
 
 **Invariant: this module's public entry points never raise for any ``str``
 input.** ``redact_secrets``, ``redact_secrets_mapping``, and
-``redact_known_secrets`` are the trust boundary for untrusted node text on hot
+``redact_identifier`` are the trust boundary for untrusted node text on hot
 paths (a webhook, a per-tick telemetry POST) — an input that crashes the
 redactor crashes the boundary, not just the field being redacted (U2, round-4:
 ``urlsplit`` raises ``ValueError`` on inputs like ``"http://["``, which ordinary
@@ -721,14 +729,15 @@ def known_secrets_from_settings(settings: Settings) -> frozenset[str]:
     )
 
 
-def redact_known_secrets(text: str, known_secrets: frozenset[str]) -> str:
-    """Layer-1-only redaction for structurally simple fields (T11).
+def redact_identifier(text: str, known_secrets: frozenset[str]) -> str:
+    """Redaction for structurally simple node identifiers (event id, bundle version, agent id).
 
-    For values like an event id or a bundle version — not free text, so the full
-    tokenizer pass is unneeded overhead — but an exact known-secret match must
-    still never survive into a persisted row.
+    Layer 1 (exact known secrets) plus the GitHub token pass, both linear scans. Skips the
+    free-text tokenizer (identifiers are not ``key=value`` prose) and never truncates, so
+    an unchanged input maps to an unchanged output and equality comparisons on the
+    redacted value still hold for the same producer value.
     """
-    return _apply_known_secrets(text, known_secrets)
+    return _redact_github_tokens(_apply_known_secrets(text, known_secrets))
 
 
 def redact_secrets(

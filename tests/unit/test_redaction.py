@@ -15,7 +15,7 @@ import pytest
 
 from src.api.utils.redaction import (
     known_secrets_from_settings,
-    redact_known_secrets,
+    redact_identifier,
     redact_secrets,
     redact_secrets_mapping,
 )
@@ -439,7 +439,7 @@ class TestU2MalformedUrlNeverRaises:
 
 
 class TestNoRaiseInvariant:
-    """U2: redact_secrets / redact_secrets_mapping / redact_known_secrets must
+    """U2: redact_secrets / redact_secrets_mapping / redact_identifier must
     never raise for any str input — a property test over a corpus of hostile
     strings, standing in for the property-based test the finding asks for
     (this repo has no hypothesis dependency to reach for)."""
@@ -484,8 +484,8 @@ class TestNoRaiseInvariant:
         )
 
     @pytest.mark.parametrize("hostile", _HOSTILE_STRINGS)
-    def test_redact_known_secrets_never_raises(self, hostile: str) -> None:
-        redact_known_secrets(hostile, frozenset({"ghp_someSecret123"}))
+    def test_redact_identifier_never_raises(self, hostile: str) -> None:
+        redact_identifier(hostile, frozenset({"ghp_someSecret123"}))
 
     def test_combinatorial_punctuation_corpus_never_raises(self) -> None:
         """Deeply mixed punctuation/quote/bracket combinations, generated
@@ -707,16 +707,6 @@ class TestKnownSecrets:
         text = f"value is {short} here"
         redacted = redact_secrets(text, max_length=500, known_secrets=frozenset({short}))
         assert redacted == text
-
-    def test_redact_known_secrets_only_does_layer_1(self) -> None:
-        secret = "ghp_exactSecretValue123"
-        result = redact_known_secrets(f"prefix-{secret}-suffix", frozenset({secret}))
-        assert secret not in result
-        assert "[REDACTED]" in result
-
-    def test_redact_known_secrets_leaves_unrelated_text_untouched(self) -> None:
-        result = redact_known_secrets("bundle_version=260101-01", frozenset({"unrelated-secret"}))
-        assert result == "bundle_version=260101-01"
 
 
 # ---------------------------------------------------------------------------
@@ -958,6 +948,64 @@ class TestGitHubTokenPatternPass:
         hostile = ("ghs_" + "a" * 19 + " ") * 20_000 + "g" * 100_000
 
         assert redact_secrets(hostile, max_length=10) == hostile[:10]
+
+
+class TestRedactIdentifier:
+    """K1: node-supplied identifiers get Layer 1 + the GitHub token pass, nothing else."""
+
+    _UUID = "3f2b8c1e-5d4a-4e7b-9a6c-1b2d3e4f5a6b"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_standing_alone(self, token: str) -> None:
+        assert redact_identifier(token, frozenset()) == "[REDACTED]"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_embedded_in_an_event_id(self, token: str) -> None:
+        assert redact_identifier(f"evt-{token}", frozenset()) == "evt-[REDACTED]"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_embedded_in_an_agent_id(self, token: str) -> None:
+        assert redact_identifier(f"{self._UUID}:{token}", frozenset()) == f"{self._UUID}:[REDACTED]"
+
+    def test_masks_an_exact_known_secret_that_matches_no_github_shape(self) -> None:
+        """Layer 1 runs first, so a configured secret is masked even without a GitHub shape."""
+        result = redact_identifier("evt-hunter2-static-pat-1", frozenset({"hunter2-static-pat"}))
+
+        assert result == "evt-[REDACTED]-1"
+
+    def test_composes_known_secret_and_github_token(self) -> None:
+        result = redact_identifier(
+            f"hunter2-static-pat:ghs_{_BODY_36}", frozenset({"hunter2-static-pat"})
+        )
+
+        assert result == "[REDACTED]:[REDACTED]"
+
+    @pytest.mark.parametrize(
+        "identifier",
+        [
+            pytest.param(_UUID, id="uuid"),
+            pytest.param("260101-01", id="bundle-version"),
+            pytest.param(f"{_UUID}:gpu-node-7.internal", id="session-and-hostname"),
+            pytest.param("ghs_short", id="short-github-lookalike"),
+            pytest.param("token=abc key:value", id="key-value-shaped-is-not-tokenized"),
+        ],
+    )
+    def test_leaves_ordinary_identifiers_unchanged(self, identifier: str) -> None:
+        assert redact_identifier(identifier, frozenset({"unrelated-secret"})) == identifier
+
+    def test_never_truncates(self) -> None:
+        identifier = "e" * 200
+
+        assert redact_identifier(identifier, frozenset()) == identifier
+
+    def test_is_deterministic_and_idempotent(self) -> None:
+        """Equality on the redacted value must still hold for the same producer value."""
+        identifier = f"evt-ghs_{_BODY_36}"
+
+        once = redact_identifier(identifier, frozenset())
+
+        assert redact_identifier(identifier, frozenset()) == once
+        assert redact_identifier(once, frozenset()) == once
 
 
 class TestKnownSecretsFromSettings:
