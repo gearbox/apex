@@ -14,12 +14,12 @@ import pytest
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
-from src.api.dependencies.common import build_github_token_provider
 from src.api.services.github.token_provider import (
     GitHubAppTokenProvider,
     GitHubToken,
     GitHubTokenUnavailableError,
     StaticGitHubTokenProvider,
+    build_github_token_provider,
 )
 from src.core.enums import GitHubAuthMode
 from tests.unit.helpers import hermetic_settings

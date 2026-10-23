@@ -309,6 +309,74 @@ class TestAuthModeAndRepositories:
             _ = settings.github_repositories
 
 
+_GPU_STACK_SHAPES = {
+    "callback-url-only": {"apex_callback_url": "https://apex.example.test"},
+    "ref-and-callback-url": {
+        "provisioning_script_ref": "v1.2.3",
+        "apex_callback_url": "https://apex.example.test",
+    },
+}
+
+
+class TestGpuStackRequiresACredential:
+    """R2: a deployment that provisions nodes must boot with a GitHub credential.
+
+    This replaces the compose-level ``:?`` guard on ``AI_BUNDLES_GITHUB_TOKEN`` (which
+    rejected App-only deployments), so it holds for every deployment.
+    """
+
+    @pytest.mark.parametrize("shape", list(_GPU_STACK_SHAPES))
+    def test_no_credential_fails_at_boot(self, monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
+        with pytest.raises(ValidationError) as excinfo:
+            _settings(monkeypatch, {}, **_GPU_STACK_SHAPES[shape])
+
+        message = str(excinfo.value)
+        assert "AI_BUNDLES_GITHUB_TOKEN" in message
+        for name in _APP_VARS:
+            assert name in message
+        assert "input_value" not in message
+        assert _JWT_SECRET not in message
+
+    def test_a_ref_without_a_callback_url_is_still_rejected_by_the_url_rule(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """The URL check runs first, so ref-only never reaches the credential check."""
+        with pytest.raises(ValidationError, match="apex_callback_url"):
+            _settings(monkeypatch, {}, provisioning_script_ref="v1.2.3")
+
+    @pytest.mark.parametrize("shape", list(_GPU_STACK_SHAPES))
+    def test_pat_satisfies_it(self, monkeypatch: pytest.MonkeyPatch, shape: str) -> None:
+        settings = _settings(
+            monkeypatch, {"AI_BUNDLES_GITHUB_TOKEN": "ghp_static_pat"}, **_GPU_STACK_SHAPES[shape]
+        )
+
+        assert settings.github_auth_mode is GitHubAuthMode.pat
+
+    @pytest.mark.parametrize("shape", list(_GPU_STACK_SHAPES))
+    def test_app_trio_satisfies_it(
+        self, monkeypatch: pytest.MonkeyPatch, rsa_b64: str, shape: str
+    ) -> None:
+        settings = _settings(monkeypatch, _app_env(rsa_b64), **_GPU_STACK_SHAPES[shape])
+
+        assert settings.github_auth_mode is GitHubAuthMode.app
+
+    def test_local_dev_without_a_gpu_stack_needs_no_credential(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        settings = _settings(monkeypatch, {}, provisioning_script_ref="", apex_callback_url="")
+
+        assert settings.github_auth_mode is GitHubAuthMode.none
+
+    def test_a_partial_app_config_keeps_its_own_message(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        """App id set → mode `app` → passes R2 → rejected by the all-or-none validator."""
+        with pytest.raises(ValidationError, match="GitHub App config is partial"):
+            _settings(
+                monkeypatch, {"GITHUB_APP_ID": "12345"}, **_GPU_STACK_SHAPES["ref-and-callback-url"]
+            )
+
+
 class TestParseGithubRepoUrl:
     @pytest.mark.parametrize(
         ("url", "expected"),

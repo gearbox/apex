@@ -571,6 +571,7 @@ def _make_gpu_session_service(
         billing_service=billing,
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=_make_provisioning_script_service(),
+        github_token_provider=None,
     )
 
 

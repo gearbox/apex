@@ -8,6 +8,8 @@ One ``GitHubTokenProvider`` per process, chosen from ``Settings.github_auth_mode
   expected (a token per process per hour is trivial for GitHub).
 - ``StaticGitHubTokenProvider`` (mode ``pat``) — the long-lived ``AI_BUNDLES_GITHUB_TOKEN``.
 
+``build_github_token_provider`` picks between them (``none`` → ``None``).
+
 Both serve apex's own fetches (bundle-index tarball, bootstrap script) and the node token
 endpoint, so a node and apex always hold the same kind of credential.
 
@@ -31,6 +33,8 @@ from src.core.enums import GitHubAuthMode
 
 if TYPE_CHECKING:
     from collections.abc import Callable, Sequence
+
+    from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
 
@@ -189,3 +193,41 @@ class GitHubAppTokenProvider:
 
 def _mint_failed(detail: str) -> GitHubTokenUnavailableError:
     return GitHubTokenUnavailableError(f"github app token mint failed: {detail}")
+
+
+def build_github_token_provider(
+    settings: Settings, *, http_client: httpx.AsyncClient
+) -> GitHubTokenProvider | None:
+    """Pick the GitHub credential provider for ``settings.github_auth_mode``.
+
+    ``None`` means auth mode ``none`` (no credential configured): consumers then send no
+    credential, and the session start / retry paths and the node token endpoint fail
+    closed. Call once per process — a per-consumer provider would defeat the token cache.
+
+    When both the App and a PAT are configured the App wins; a ``pat_ignored`` warning flags
+    the leftover PAT (no values logged).
+    """
+    match settings.github_auth_mode:
+        case GitHubAuthMode.app:
+            private_key_pem = settings.github_app_private_key_pem
+            if (
+                settings.github_app_id is None
+                or settings.github_app_installation_id is None
+                or private_key_pem is None
+            ):
+                # Unreachable: Settings validates the trio as all-or-none at boot.
+                raise ValueError("GitHub App settings are incomplete")
+            if settings.github_content_token:
+                logger.warning("github_token_provider.pat_ignored", reason="github_app_configured")
+            return GitHubAppTokenProvider(
+                app_id=settings.github_app_id,
+                installation_id=settings.github_app_installation_id,
+                private_key_pem=private_key_pem,
+                repositories=settings.github_repositories,
+                http_client=http_client,
+                refresh_margin=timedelta(seconds=settings.github_app_token_refresh_margin_seconds),
+            )
+        case GitHubAuthMode.pat:
+            return StaticGitHubTokenProvider(settings.github_content_token)
+        case GitHubAuthMode.none:
+            return None

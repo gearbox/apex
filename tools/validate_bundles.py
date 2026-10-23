@@ -17,8 +17,8 @@ from pathlib import Path
 import httpx
 import structlog
 
-from src.api.dependencies.common import build_github_token_provider
 from src.api.services.bundle_index import BundleIndexService
+from src.api.services.github.token_provider import build_github_token_provider
 from src.core.config import Settings, get_settings
 
 

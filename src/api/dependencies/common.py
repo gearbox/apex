@@ -5,7 +5,7 @@ from __future__ import annotations
 import asyncio
 from collections.abc import AsyncGenerator  # noqa: TC003
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
 import httpx
@@ -31,9 +31,8 @@ from src.api.services.feedback import FeedbackService
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.service import GenerationService
 from src.api.services.github.token_provider import (
-    GitHubAppTokenProvider,
     GitHubTokenProvider,
-    StaticGitHubTokenProvider,
+    build_github_token_provider,
 )
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
@@ -114,7 +113,7 @@ from src.api.services.video_jobs.transition import make_transition_service_facto
 from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
-from src.core.enums import GitHubAuthMode, Provider, WorkerMode
+from src.core.enums import Provider, WorkerMode
 from src.core.product import ProductConfig  # noqa: TC001
 from src.core.product_registry import PRODUCT_REGISTRY, get_product_config_by_slug
 from src.core.redis import get_redis_client
@@ -920,39 +919,6 @@ async def _start_video_lifecycle_workers(
     )
     await reconciler.start()
     return VideoLifecycleWorkers(poller=poller, reconciler=reconciler)
-
-
-def build_github_token_provider(
-    settings: Settings, *, http_client: httpx.AsyncClient
-) -> GitHubTokenProvider | None:
-    """Pick the GitHub credential provider for ``settings.github_auth_mode``.
-
-    ``None`` means auth mode ``none`` (no credential configured): consumers then send no
-    credential, and the session start / retry paths and the node token endpoint fail
-    closed. Call once per process — a per-consumer provider would defeat the token cache.
-    """
-    match settings.github_auth_mode:
-        case GitHubAuthMode.app:
-            private_key_pem = settings.github_app_private_key_pem
-            if (
-                settings.github_app_id is None
-                or settings.github_app_installation_id is None
-                or private_key_pem is None
-            ):
-                # Unreachable: Settings validates the trio as all-or-none at boot.
-                raise ValueError("GitHub App settings are incomplete")
-            return GitHubAppTokenProvider(
-                app_id=settings.github_app_id,
-                installation_id=settings.github_app_installation_id,
-                private_key_pem=private_key_pem,
-                repositories=settings.github_repositories,
-                http_client=http_client,
-                refresh_margin=timedelta(seconds=settings.github_app_token_refresh_margin_seconds),
-            )
-        case GitHubAuthMode.pat:
-            return StaticGitHubTokenProvider(settings.github_content_token)
-        case GitHubAuthMode.none:
-            return None
 
 
 async def init_services(settings: Settings) -> JWTService:

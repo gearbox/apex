@@ -307,6 +307,30 @@ def _make_service(
     return service, mocks
 
 
+class TestRequiredGitHubTokenProvider:
+    """R5: a forgotten wiring fails at construction, not as a runtime 503."""
+
+    def test_omitting_the_provider_raises_type_error(self) -> None:
+        mocks = _make_service()[1]
+
+        with pytest.raises(TypeError, match="github_token_provider"):
+            GpuSessionService(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+                vastai_client=mocks["vastai_client"],
+                cf_client=mocks["cf_client"],
+                bundle_index=mocks["bundle_index"],
+                session_factory=mocks["session_factory"],
+                settings=mocks["settings"],
+                billing_service=mocks["billing_service"],
+                cooldown_store=mocks["cooldown_store"],
+                provisioning_script_service=mocks["provisioning_script_service"],
+            )
+
+    def test_none_is_accepted_explicitly_for_mode_none(self) -> None:
+        service, _ = _make_service(github_token_provider=None)
+
+        assert service._github_tokens is None
+
+
 _TUNNEL_RESULT = ("tunnel-id-xyz", "tunnel-token-secret", "dns-id-xyz", "01abcdef.gpu.test")
 
 

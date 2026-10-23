@@ -250,6 +250,36 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
 
 
 # ---------------------------------------------------------------------------
+# TestRequiredGitHubTokenProvider
+# ---------------------------------------------------------------------------
+
+
+class TestRequiredGitHubTokenProvider:
+    """R5: a forgotten wiring fails at construction, not as a runtime `misconfigured`."""
+
+    def test_omitting_the_provider_raises_type_error(self) -> None:
+        mocks = _make_worker()[1]
+
+        with pytest.raises(TypeError, match="github_token_provider"):
+            GpuProvisioningWorker(  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+                session_factory=mocks["session_factory"],
+                vastai_client=mocks["vastai_client"],
+                cf_client=mocks["cf_client"],
+                bundle_index=mocks["bundle_index"],
+                http_client=mocks["http_client"],
+                settings=mocks["settings"],
+                cooldown_store=mocks["cooldown_store"],
+                provisioning_script_service=mocks["provisioning_script_service"],
+                redis_client_factory=mocks["redis_client_factory"],
+            )
+
+    def test_none_is_accepted_explicitly_for_mode_none(self) -> None:
+        worker, _ = _make_worker(github_token_provider=None)
+
+        assert worker._github_tokens is None
+
+
+# ---------------------------------------------------------------------------
 # Lifecycle (start/stop/tick-error-recovery) is covered generically by
 # tests/unit/test_periodic_worker.py — GpuProvisioningWorker has no lifecycle
 # overrides beyond PeriodicWorker, so no worker-specific lifecycle tests here.

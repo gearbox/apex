@@ -1846,6 +1846,10 @@ class Settings(BaseSettings):
         surfacing only much later via the runtime check in
         `GpuSessionService.start_session`. Local dev, where both fields
         legitimately default to empty, still skips both checks.
+
+        A GitHub credential is required in the same branch. This replaces the
+        compose-level ``:?`` guard on ``AI_BUNDLES_GITHUB_TOKEN`` (a PAT-only
+        check that rejected App-only deployments), so every deployment gets it.
         """
         if self.provisioning_script_dev_ref is not None:
             validate_dev_ref_is_route_safe(self.provisioning_script_dev_ref)
@@ -1873,6 +1877,14 @@ class Settings(BaseSettings):
                     "path, query, fragment, or userinfo"
                 )
             self.apex_callback_url = normalized_url
+
+            if self.github_auth_mode is GitHubAuthMode.none:
+                raise ValueError(
+                    "GPU provisioning is configured (provisioning_script_ref or "
+                    "apex_callback_url is set) but no GitHub credential is: set "
+                    "AI_BUNDLES_GITHUB_TOKEN, or GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID "
+                    "and GITHUB_APP_PRIVATE_KEY_B64"
+                )
 
         return self
 

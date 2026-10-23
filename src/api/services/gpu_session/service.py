@@ -212,7 +212,7 @@ class GpuSessionService:
         billing_service: BillingService,
         cooldown_store: NodeCooldownStore,
         provisioning_script_service: ProvisioningScriptService,
-        github_token_provider: GitHubTokenProvider | None = None,
+        github_token_provider: GitHubTokenProvider | None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -225,7 +225,8 @@ class GpuSessionService:
         self._billing_service = billing_service
         self._cooldown = cooldown_store
         self._provisioning_script = provisioning_script_service
-        # None fails closed: start_session refuses to run without a GitHub credential.
+        # None (mode `none`) fails closed: start_session refuses to run without a GitHub
+        # credential. Required, so a forgotten wiring fails at construction.
         self._github_tokens = github_token_provider
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
@@ -329,6 +330,8 @@ class GpuSessionService:
         # ahead of tunnel creation. Previously this guard ran after create_session_tunnel,
         # so a misconfigured deploy leaked a tunnel on every attempt (2026-09-13 staging
         # incident's root cause for the paired cloudflare.tunnel.delete_failed 400s).
+        # Defence in depth: Settings already refuses to boot a configured GPU stack without
+        # a GitHub credential, so this normally cannot fire.
         github_tokens = self._github_tokens
         if self._settings.github_auth_mode is GitHubAuthMode.none or github_tokens is None:
             logger.error(

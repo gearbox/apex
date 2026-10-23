@@ -11,7 +11,9 @@ import base64
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import httpx
 import pytest
+import structlog
 from cryptography.hazmat.primitives import serialization
 from cryptography.hazmat.primitives.asymmetric import rsa
 
@@ -19,6 +21,7 @@ from src.api.dependencies import common as common_module
 from src.api.services.github.token_provider import (
     GitHubAppTokenProvider,
     StaticGitHubTokenProvider,
+    build_github_token_provider,
 )
 from src.core.enums import GitHubAuthMode, WorkerMode
 from tests.unit.helpers import hermetic_settings
@@ -189,3 +192,61 @@ class TestOneProviderPerProcess:
             gpu_stack_patches["GpuSessionService"].call_args.kwargs["github_token_provider"]
             is provider
         )
+
+
+class TestPatIgnoredWarning:
+    """R3: App wins when both credentials are set; the leftover PAT is flagged, not logged."""
+
+    _PAT = "ghp_leftover_pat_value"
+
+    @staticmethod
+    def _app_env(monkeypatch: pytest.MonkeyPatch) -> tuple[str, str]:
+        pem = rsa.generate_private_key(public_exponent=65537, key_size=2048).private_bytes(
+            serialization.Encoding.PEM,
+            serialization.PrivateFormat.PKCS8,
+            serialization.NoEncryption(),
+        )
+        key_b64 = base64.b64encode(pem).decode()
+        monkeypatch.setenv("GITHUB_APP_ID", "12345")
+        monkeypatch.setenv("GITHUB_APP_INSTALLATION_ID", "678")
+        monkeypatch.setenv("GITHUB_APP_PRIVATE_KEY_B64", key_b64)
+        return key_b64, pem.decode()
+
+    async def test_app_with_a_leftover_pat_warns_once_and_logs_no_secret(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        key_b64, pem = self._app_env(monkeypatch)
+        monkeypatch.setenv("AI_BUNDLES_GITHUB_TOKEN", self._PAT)
+        settings = _settings(WorkerMode.api_only)
+
+        async with httpx.AsyncClient() as http_client:
+            with structlog.testing.capture_logs() as logs:
+                provider = build_github_token_provider(settings, http_client=http_client)
+
+        assert isinstance(provider, GitHubAppTokenProvider)
+        ignored = [log for log in logs if log["event"] == "github_token_provider.pat_ignored"]
+        assert len(ignored) == 1
+        assert ignored[0]["log_level"] == "warning"
+        rendered = repr(logs)
+        for secret in (self._PAT, key_b64, pem):
+            assert secret not in rendered
+
+    async def test_app_without_a_pat_does_not_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        self._app_env(monkeypatch)
+        settings = _settings(WorkerMode.api_only)
+
+        async with httpx.AsyncClient() as http_client:
+            with structlog.testing.capture_logs() as logs:
+                build_github_token_provider(settings, http_client=http_client)
+
+        assert not [log for log in logs if log["event"] == "github_token_provider.pat_ignored"]
+
+    async def test_pat_only_does_not_warn(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.setenv("AI_BUNDLES_GITHUB_TOKEN", self._PAT)
+        settings = _settings(WorkerMode.api_only)
+
+        async with httpx.AsyncClient() as http_client:
+            with structlog.testing.capture_logs() as logs:
+                build_github_token_provider(settings, http_client=http_client)
+
+        assert not [log for log in logs if log["event"] == "github_token_provider.pat_ignored"]

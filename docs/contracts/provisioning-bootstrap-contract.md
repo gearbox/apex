@@ -167,8 +167,12 @@ valid for 1 h; apex re-mints it once less than `GITHUB_APP_TOKEN_REFRESH_MARGIN_
 (default 600) of its lifetime remains, so a token served here always has at least that long
 left. The token is shared by every node of one apex process and is deliberately **not**
 revoked when a session stops (that would break the others; the 1 h expiry bounds exposure).
-Use it as `Authorization: Bearer <token>` against the GitHub REST API, or as the password
-of `https://x-access-token:<token>@github.com/…` for git.
+Use it as `Authorization: Bearer <token>` for the GitHub REST API. For git, send it as a
+header, `Authorization: Basic base64("x-access-token:<token>")`, via per-process config
+(`GIT_CONFIG_COUNT` / `GIT_CONFIG_KEY_n=http.https://github.com/.extraheader` /
+`GIT_CONFIG_VALUE_n`). **Never put it in the clone URL:** GitHub may redirect, and git drops
+URL credentials on redirect, then prompts or fails (2026-10-16 staging incident). It would
+also land in argv and `.git/config`.
 
 ## Trust boundary for node-supplied free text (S1 round-2, T1/T8 round-3 remediation)
 
@@ -329,7 +333,7 @@ unconfigured or fails to resolve (D6).
 |---|---|---|
 | `app` | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_B64` are all set (all-or-none, validated at boot) | A cached read-only installation token for the two repos, re-minted single-flight |
 | `pat` | only `AI_BUNDLES_GITHUB_TOKEN` is set | That static PAT |
-| `none` | neither | No provider; session start answers `503 provisioning_unavailable` |
+| `none` | neither | No provider. **Startup fails** when the GPU stack is configured (`provisioning_script_ref` or `apex_callback_url` set); otherwise (local dev) session start answers `503 provisioning_unavailable` |
 
 Apex's own fetches (bundle-index tarball, bootstrap script), the `ACS_GITHUB_TOKEN`
 below, and the `github-token` endpoint above all take their credential from that provider,

@@ -205,8 +205,9 @@ services:
       AISHA_CF_TUNNEL_DOMAIN: ${AISHA_CF_TUNNEL_DOMAIN:?AISHA_CF_TUNNEL_DOMAIN is required (e.g. your-gpu-domain.com)}
 
       # --- Aisha CLI runtime (forwarded to GPU nodes via vastai_client.create_instance) ---
-      AI_BUNDLES_GITHUB_TOKEN: ${AI_BUNDLES_GITHUB_TOKEN:?AI_BUNDLES_GITHUB_TOKEN is required (PAT for private gearbox/ai-bundles)}
-      # GitHub App credential (optional; replaces the PAT above when all three are set)
+      # GitHub credential: the PAT below OR the three GITHUB_APP_* (App wins when both are
+      # set). Settings fails startup when the GPU stack is configured with neither.
+      AI_BUNDLES_GITHUB_TOKEN: ${AI_BUNDLES_GITHUB_TOKEN:-}
       GITHUB_APP_ID: ${GITHUB_APP_ID:-}
       GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
       GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
