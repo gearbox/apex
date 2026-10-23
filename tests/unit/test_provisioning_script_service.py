@@ -10,13 +10,20 @@ from uuid import uuid4
 import httpx
 import pytest
 
+from src.api.services.github.token_provider import (
+    GitHubToken,
+    GitHubTokenUnavailableError,
+    StaticGitHubTokenProvider,
+)
 from src.api.services.provisioning_script import (
     ProvisioningScriptRefNotFoundError,
     ProvisioningScriptService,
     ProvisioningScriptUnavailableError,
     _cache_key,
 )
-from src.core.enums import ScriptVariant
+from src.core.enums import GitHubAuthMode, ScriptVariant
+
+_PROVIDER = StaticGitHubTokenProvider("ghp_test_token")
 
 
 class _FakePipeline:
@@ -67,7 +74,6 @@ class _FakeRedis:
 
 def _make_settings(**overrides: Any) -> MagicMock:
     settings = MagicMock()
-    settings.github_content_token = "ghp_test_token"
     settings.provisioning_script_ref = "v1.0.0"
     settings.provisioning_script_dev_ref = None
     settings.provisioning_script_cache_ttl_seconds = 86400
@@ -122,6 +128,7 @@ class TestResolve:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         with pytest.raises(ProvisioningScriptRefNotFoundError, match="not allowed"):
@@ -135,6 +142,7 @@ class TestResolve:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         assert service._cache_ttl_for(True) == 86400
@@ -149,6 +157,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -166,6 +175,66 @@ class TestResolve:
         )
         assert http.get.await_args.kwargs["params"] == {"ref": "v1.2.3"}
 
+    async def test_sends_the_providers_token_as_bearer(self) -> None:
+        http = AsyncMock(spec=httpx.AsyncClient)
+        http.get.return_value = _make_response(200, content=b"script body")
+
+        class _AppLikeProvider:
+            mode = GitHubAuthMode.app
+
+            async def get_token(self) -> GitHubToken:
+                return GitHubToken(value="ghs_installation_token", expires_at=None)
+
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+            token_provider=_AppLikeProvider(),
+        )
+
+        await service.resolve(ScriptVariant.comfyui, "v1.2.3")
+
+        headers = http.get.await_args.kwargs["headers"]
+        assert headers["Authorization"] == "Bearer ghs_installation_token"
+
+    async def test_no_provider_sends_no_authorization_header(self) -> None:
+        http = AsyncMock(spec=httpx.AsyncClient)
+        http.get.return_value = _make_response(200, content=b"script body")
+        service = ProvisioningScriptService(
+            http=http,
+            redis=None,
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+            token_provider=None,
+        )
+
+        await service.resolve(ScriptVariant.comfyui, "v1.2.3")
+
+        assert "Authorization" not in http.get.await_args.kwargs["headers"]
+
+    async def test_provider_error_raises_unavailable_without_calling_github(self) -> None:
+        """A token that cannot be minted is the same transient upstream failure as a 5xx."""
+        http = AsyncMock(spec=httpx.AsyncClient)
+        provider = AsyncMock()
+        provider.get_token.side_effect = GitHubTokenUnavailableError(
+            "github app token mint failed: status 502"
+        )
+        redis = _FakeRedis()
+        service = ProvisioningScriptService(
+            http=http,
+            redis=redis,  # type: ignore[arg-type]
+            settings=_make_settings(),
+            session_factory=_make_session_factory(),
+            token_provider=provider,
+        )
+
+        with pytest.raises(ProvisioningScriptUnavailableError):
+            await service.resolve(ScriptVariant.comfyui, "v1.2.3")
+
+        http.get.assert_not_awaited()
+        assert redis.store == {}  # failures are never cached
+
     async def test_second_call_is_a_cache_hit_with_zero_outbound_calls(self) -> None:
         http = AsyncMock(spec=httpx.AsyncClient)
         http.get.return_value = _make_response(200, content=b"script body")
@@ -175,6 +244,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         first = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -195,6 +265,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         with pytest.raises(ProvisioningScriptRefNotFoundError):
@@ -211,6 +282,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -227,6 +299,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -241,6 +314,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         with pytest.raises(ProvisioningScriptUnavailableError):
@@ -257,6 +331,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -274,6 +349,7 @@ class TestResolve:
             redis=redis,  # type: ignore[arg-type]
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -288,6 +364,7 @@ class TestResolve:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         await service.resolve(ScriptVariant.comfyui, "v1.2.3")
@@ -318,6 +395,7 @@ class TestServeForSession:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.serve_for_session(
@@ -338,6 +416,7 @@ class TestServeForSession:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.serve_for_session(
@@ -367,6 +446,7 @@ class TestServeForSession:
                 redis=None,
                 settings=settings,
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=session_id, token="tok", variant="comfyui", ref="my-test-branch"
@@ -407,6 +487,7 @@ class TestServeForSession:
             redis=None,
             settings=_make_settings(),
             session_factory=session_factory,
+            token_provider=_PROVIDER,
         )
         repo_patch_target = "src.api.services.provisioning_script.GpuSessionRepository"
 
@@ -433,6 +514,7 @@ class TestServeForSession:
             redis=None,
             settings=settings,
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         result = await service.serve_for_session(
@@ -448,6 +530,7 @@ class TestServeForSession:
             redis=None,
             settings=_make_settings(),
             session_factory=_make_session_factory(),
+            token_provider=_PROVIDER,
         )
 
         missing_session = await service.serve_for_session(
@@ -474,6 +557,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(),
@@ -498,6 +582,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(),
@@ -520,6 +605,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
@@ -543,6 +629,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
@@ -568,6 +655,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"
@@ -591,6 +679,7 @@ class TestServeForSession:
                 redis=None,
                 settings=_make_settings(),
                 session_factory=_make_session_factory(),
+                token_provider=_PROVIDER,
             )
             result = await service.serve_for_session(
                 session_id=uuid4(), token="tok", variant="comfyui", ref="v1.0.0"

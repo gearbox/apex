@@ -19,6 +19,7 @@ import httpx
 import structlog
 import yaml
 
+from src.api.services.github.token_provider import GitHubTokenUnavailableError
 from src.api.services.workflow.binder import bind_workflow
 from src.api.services.workflow.capabilities import derive_capabilities
 from src.api.services.workflow.contract import MODEL_TYPE_MEDIA, BoundWorkflow, BundleCapabilities
@@ -40,6 +41,7 @@ from src.core.generation_config import (
 if TYPE_CHECKING:
     from collections.abc import Callable
 
+    from src.api.services.github.token_provider import GitHubTokenProvider
     from src.core.config import Settings
 
 logger = structlog.get_logger()
@@ -115,7 +117,7 @@ class BundleIndexService:
     def __init__(
         self,
         repo_url: str,
-        github_token: str,
+        token_provider: GitHubTokenProvider | None,
         branch: str,
         sync_interval_minutes: int,
         cache_dir: Path | None = None,
@@ -143,7 +145,7 @@ class BundleIndexService:
                 raise ValueError(f"{name} must be a positive integer, got {val!r}")
         self._default_comfyui_port = default_comfyui_port
         self._owner, self._repo = _parse_github_url(repo_url)
-        self._github_token = github_token
+        self._token_provider = token_provider
         self._branch = branch
         self._sync_interval = sync_interval_minutes
         self._cache_dir = cache_dir or Path(tempfile.gettempdir()) / "apex-bundle-cache"
@@ -778,8 +780,15 @@ class BundleIndexService:
             "X-GitHub-Api-Version": "2022-11-28",
             "User-Agent": "apex-bundle-index/1.0",
         }
-        if self._github_token:
-            headers["Authorization"] = f"Bearer {self._github_token}"
+        github_token: str | None = None
+        if self._token_provider is not None:
+            try:
+                github_token = (await self._token_provider.get_token()).value
+            except GitHubTokenUnavailableError as exc:
+                # Same upstream-failure path as a bad status: sync() keeps the last good
+                # index and retries next interval; start() fails loudly.
+                raise RuntimeError(f"github token unavailable: {exc}") from exc
+            headers["Authorization"] = f"Bearer {github_token}"
         if self._etag is not None:
             headers["If-None-Match"] = self._etag
 
@@ -806,7 +815,7 @@ class BundleIndexService:
                     body = await response.aread()
                     raise RuntimeError(
                         f"github tarball fetch failed (status {response.status_code}): "
-                        f"{self._redact_token(body.decode('utf-8', errors='replace'))[:500]}"
+                        f"{self._redact_token(body.decode('utf-8', errors='replace'), github_token)[:500]}"
                     )
 
                 new_etag = response.headers.get("ETag")
@@ -1030,16 +1039,17 @@ class BundleIndexService:
             target.chmod(member.mode & 0o777)
         return written
 
-    def _redact_token(self, text: str) -> str:
-        """Replace any occurrence of the PAT in `text` with '***'.
+    @staticmethod
+    def _redact_token(text: str, token: str | None) -> str:
+        """Replace any occurrence of `token` (the credential just sent) in `text` with '***'.
 
         Defensive: GitHub's API does not echo the Authorization header
         in error bodies, but a misconfigured proxy or future API change
         could. Redact unconditionally before logging.
         """
-        if not text or not self._github_token:
+        if not text or not token:
             return text
-        return text.replace(self._github_token, "***")
+        return text.replace(token, "***")
 
     def _parse_index(self) -> None:
         """Parse bundle-index.yaml and build the in-memory index.

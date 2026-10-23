@@ -11,11 +11,11 @@ Three layers, applied in order (round-3 remediation, T1):
 
 1. **Exact known-value replacement** (``known_secrets``) — a plain ``str.replace``
    pass against every plaintext secret apex actually holds at call time
-   (``settings.github_content_token``/``hf_token``/``civitai_api_token``, and the
-   per-session ``tunnel_token`` where it is in scope). This is the only layer that
-   is a *guarantee*: it has no false negatives for those exact values regardless of
-   how they are quoted, prefixed, or embedded, because it never tries to recognize
-   a shape at all.
+   (``known_secrets_from_settings``: the static GitHub PAT, ``hf_token`` and
+   ``civitai_api_token``, plus the per-session ``tunnel_token`` where it is in
+   scope). This is the only layer that is a *guarantee*: it has no false negatives
+   for those exact values regardless of how they are quoted, prefixed, or embedded,
+   because it never tries to recognize a shape at all.
 2. **Key-based structural redaction** — in the mapping walker, a dict key is tested
    *before* its value is visited; a sensitive key's value is replaced wholesale
    (never descended into), so a secret hiding under an unanticipated key name is
@@ -43,6 +43,24 @@ Layers 2 and 3 are shape-matching and therefore best-effort — see T8 in the ro
 remediation notes: the per-session callback token is stored only as a hash, so
 Layer 1 can never cover it, and it is the one secret this module cannot guarantee
 to catch. Do not represent redaction as a complete defence for that value.
+
+**GitHub token pattern pass.** GitHub App installation tokens rotate hourly and are
+minted by whichever apex process a node happened to call, so no static known-secret
+set can hold them. ``redact_secrets`` therefore runs one pass over the text, right
+after Layer 1 and before Layer 3, that masks GitHub's documented token formats
+(``gh[pousr]_…`` and ``github_pat_…``) wherever they appear; ``redact_identifier``
+runs the same pass (after Layer 1) for node-supplied identifiers. The formats are
+unambiguous (a fixed prefix plus 20+ token characters), so unlike Layer 3's key
+heuristics this pass has no key-name guessing. It is a ``str.find`` scan, not a regex,
+like the rest of this module (see ``test_no_regex_module_used``): it is linear in the
+input and can never backtrack.
+
+**Identifiers (T11, r2 F1/N1).** Structurally simple node-supplied values — an
+operation event's ``event_id`` and ``target.bundle_version``, the command claim's
+``agent_id`` — go through ``redact_identifier``: Layer 1 plus the GitHub token pass,
+with no tokenizer and no truncation. They are persisted and compared for equality
+(duplicate-event detection, an agent re-claiming its own command), and redaction is
+deterministic, so a redacted id is still stable for the same producer value.
 
 **Layer 2 vs Layer 3 key matching are deliberately different tests (U3, round-4).**
 Layer 2 (a mapping key, tested in the dict walker) uses a broad, lowercase
@@ -81,7 +99,7 @@ entries get replaced.
 
 **Invariant: this module's public entry points never raise for any ``str``
 input.** ``redact_secrets``, ``redact_secrets_mapping``, and
-``redact_known_secrets`` are the trust boundary for untrusted node text on hot
+``redact_identifier`` are the trust boundary for untrusted node text on hot
 paths (a webhook, a per-tick telemetry POST) — an input that crashes the
 redactor crashes the boundary, not just the field being redacted (U2, round-4:
 ``urlsplit`` raises ``ValueError`` on inputs like ``"http://["``, which ordinary
@@ -95,10 +113,24 @@ output is the redaction marker, not the input.
 
 from __future__ import annotations
 
-from typing import Any, cast
+import string
+from typing import TYPE_CHECKING, Any, cast
 from urllib.parse import urlsplit, urlunsplit
 
+if TYPE_CHECKING:
+    from src.core.config import Settings
+
 _REDACTED = "[REDACTED]"
+
+# GitHub token formats: classic/OAuth/user/server/refresh (`ghp_`, `gho_`, `ghu_`, `ghs_`,
+# `ghr_` — `ghs_` is an App installation token; body is alphanumeric) and fine-grained PATs
+# (`github_pat_`; body also allows `_`). The 20-character floor leaves ordinary words such
+# as `ghs_short` alone, and a token must start and end on a word boundary.
+_GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")
+_GITHUB_FINE_GRAINED_PREFIX = "github_pat_"
+_ASCII_ALNUM = frozenset(string.ascii_letters + string.digits)
+_ASCII_ALNUM_UNDERSCORE = _ASCII_ALNUM | {"_"}
+_GITHUB_TOKEN_MIN_BODY_LENGTH = 20
 
 # Layer 2 (mapping-key) sensitivity test: a lowercase substring check,
 # deliberately broad — over-redacting a benign field costs nothing, missing a
@@ -631,6 +663,51 @@ def _redact_free_text(text: str) -> str:
     return "".join(out)
 
 
+def _is_word_char(char: str) -> bool:
+    return char.isalnum() or char == "_"
+
+
+def _github_token_end(text: str, start: int) -> int:
+    """End index of the GitHub token beginning at `start`, or -1 if none does."""
+    if text.startswith(_GITHUB_FINE_GRAINED_PREFIX, start):
+        body_start = start + len(_GITHUB_FINE_GRAINED_PREFIX)
+        body_chars = _ASCII_ALNUM_UNDERSCORE
+    elif text.startswith(_GITHUB_TOKEN_PREFIXES, start):
+        body_start = start + len("ghp_")
+        body_chars = _ASCII_ALNUM
+    else:
+        return -1
+    end = body_start
+    while end < len(text) and text[end] in body_chars:
+        end += 1
+    if end - body_start < _GITHUB_TOKEN_MIN_BODY_LENGTH:
+        return -1
+    # A word character right after the body (`_`/non-ASCII letter) means this is the
+    # middle of some longer identifier, not a token.
+    return -1 if end < len(text) and _is_word_char(text[end]) else end
+
+
+def _redact_github_tokens(text: str) -> str:
+    """Mask GitHub token formats (see the module docstring's pattern pass)."""
+    pieces: list[str] = []
+    copied_to = 0
+    i = text.find("g")
+    while i != -1:
+        end = -1
+        if i == 0 or not _is_word_char(text[i - 1]):
+            end = _github_token_end(text, i)
+        if end == -1:
+            i = text.find("g", i + 1)
+            continue
+        pieces.extend((text[copied_to:i], _REDACTED))
+        copied_to = end
+        i = text.find("g", end)
+    if not pieces:
+        return text
+    pieces.append(text[copied_to:])
+    return "".join(pieces)
+
+
 def _apply_known_secrets(text: str, known_secrets: frozenset[str]) -> str:
     """Layer 1: exact replacement of every plaintext secret apex currently holds."""
     for secret in known_secrets:
@@ -639,25 +716,40 @@ def _apply_known_secrets(text: str, known_secrets: frozenset[str]) -> str:
     return text
 
 
-def redact_known_secrets(text: str, known_secrets: frozenset[str]) -> str:
-    """Layer-1-only redaction for structurally simple fields (T11).
+def known_secrets_from_settings(settings: Settings) -> frozenset[str]:
+    """Layer 1 exact-match set: every plaintext secret apex holds at startup.
 
-    For values like an event id or a bundle version — not free text, so the full
-    tokenizer pass is unneeded overhead — but an exact known-secret match must
-    still never survive into a persisted row.
+    The GitHub App private key and installation tokens are deliberately absent: the key
+    never leaves apex, and installation tokens rotate (see the pattern pass above).
     """
-    return _apply_known_secrets(text, known_secrets)
+    return frozenset(
+        value
+        for value in (settings.github_content_token, settings.hf_token, settings.civitai_api_token)
+        if value
+    )
+
+
+def redact_identifier(text: str, known_secrets: frozenset[str]) -> str:
+    """Redaction for structurally simple node identifiers (event id, bundle version, agent id).
+
+    Layer 1 (exact known secrets) plus the GitHub token pass, both linear scans. Skips the
+    free-text tokenizer (identifiers are not ``key=value`` prose) and never truncates, so
+    an unchanged input maps to an unchanged output and equality comparisons on the
+    redacted value still hold for the same producer value.
+    """
+    return _redact_github_tokens(_apply_known_secrets(text, known_secrets))
 
 
 def redact_secrets(
     text: str, *, max_length: int, known_secrets: frozenset[str] = frozenset()
 ) -> str:
-    """Redact `text` through all three layers, then bound its length.
+    """Redact `text` through all three layers and the GitHub token pass, then bound its length.
 
     `known_secrets` should be every plaintext secret apex holds at the call site
     (see the module docstring's Layer 1). Values under 8 characters are ignored.
     """
     redacted = _apply_known_secrets(text, known_secrets)
+    redacted = _redact_github_tokens(redacted)
     redacted = _redact_free_text(redacted)
     return redacted[:max_length]
 

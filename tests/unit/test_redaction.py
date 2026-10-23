@@ -14,10 +14,13 @@ import msgspec
 import pytest
 
 from src.api.utils.redaction import (
-    redact_known_secrets,
+    known_secrets_from_settings,
+    redact_identifier,
     redact_secrets,
     redact_secrets_mapping,
 )
+from src.core.enums import GitHubAuthMode
+from tests.unit.helpers import hermetic_settings
 
 # ---------------------------------------------------------------------------
 # T1 table: every leak form the round-3 review demonstrated against the old
@@ -436,7 +439,7 @@ class TestU2MalformedUrlNeverRaises:
 
 
 class TestNoRaiseInvariant:
-    """U2: redact_secrets / redact_secrets_mapping / redact_known_secrets must
+    """U2: redact_secrets / redact_secrets_mapping / redact_identifier must
     never raise for any str input — a property test over a corpus of hostile
     strings, standing in for the property-based test the finding asks for
     (this repo has no hypothesis dependency to reach for)."""
@@ -481,8 +484,8 @@ class TestNoRaiseInvariant:
         )
 
     @pytest.mark.parametrize("hostile", _HOSTILE_STRINGS)
-    def test_redact_known_secrets_never_raises(self, hostile: str) -> None:
-        redact_known_secrets(hostile, frozenset({"ghp_someSecret123"}))
+    def test_redact_identifier_never_raises(self, hostile: str) -> None:
+        redact_identifier(hostile, frozenset({"ghp_someSecret123"}))
 
     def test_combinatorial_punctuation_corpus_never_raises(self) -> None:
         """Deeply mixed punctuation/quote/bracket combinations, generated
@@ -705,16 +708,6 @@ class TestKnownSecrets:
         redacted = redact_secrets(text, max_length=500, known_secrets=frozenset({short}))
         assert redacted == text
 
-    def test_redact_known_secrets_only_does_layer_1(self) -> None:
-        secret = "ghp_exactSecretValue123"
-        result = redact_known_secrets(f"prefix-{secret}-suffix", frozenset({secret}))
-        assert secret not in result
-        assert "[REDACTED]" in result
-
-    def test_redact_known_secrets_leaves_unrelated_text_untouched(self) -> None:
-        result = redact_known_secrets("bundle_version=260101-01", frozenset({"unrelated-secret"}))
-        assert result == "bundle_version=260101-01"
-
 
 # ---------------------------------------------------------------------------
 # redact_secrets_mapping() — Layer 2 (structural) + depth/node bounds (T2/T10).
@@ -861,3 +854,176 @@ class TestDepthAndNodeBounds:
         result = redact_secrets_mapping(payload, max_length=500, max_nodes=1000)
         assert result == payload
         assert "[TRUNCATED: max nodes]" not in str(result)
+
+
+# ---------------------------------------------------------------------------
+# GitHub token pattern pass: App installation tokens rotate hourly and are minted by
+# whichever apex process a node called, so no static known-secret set can hold them.
+# ---------------------------------------------------------------------------
+
+_BODY_36 = "A1b2C3d4E5f6G7h8I9j0K1l2M3n4O5p6Q7r8"
+_GITHUB_TOKENS = [
+    pytest.param(f"ghs_{_BODY_36}", id="installation-ghs"),
+    pytest.param(f"ghp_{_BODY_36}", id="classic-pat-ghp"),
+    pytest.param(f"gho_{_BODY_36}", id="oauth-gho"),
+    pytest.param(f"ghu_{_BODY_36}", id="user-to-server-ghu"),
+    pytest.param(f"ghr_{_BODY_36}", id="refresh-ghr"),
+    pytest.param(f"github_pat_{'11ABCDEFG0aBcDeFgHiJkL'}_{'x' * 59}", id="fine-grained-pat"),
+]
+
+
+class TestGitHubTokenPatternPass:
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_inside_free_text(self, token: str) -> None:
+        result = redact_secrets(
+            f"clone failed: remote rejected {token} for gearbox/aisha", max_length=500
+        )
+
+        assert token not in result
+        assert result == "clone failed: remote rejected [REDACTED] for gearbox/aisha"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_every_occurrence(self, token: str) -> None:
+        result = redact_secrets(f"{token} then again {token}.", max_length=500)
+
+        assert token not in result
+        assert result.count("[REDACTED]") == 2
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_under_a_key_layer_three_does_not_recognize(self, token: str) -> None:
+        """Layer 3 only sees sensitive-looking KEY names; the pattern needs no key."""
+        result = redact_secrets(f"debug: header_dump value={token} end", max_length=500)
+
+        assert token not in result
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_inside_a_mapping_at_depth(self, token: str) -> None:
+        payload = {"detail": {"last_error": f"git said {token}", "steps": [f"try {token}"]}}
+
+        result = redact_secrets_mapping(payload, max_length=500)
+
+        assert token not in json.dumps(result)
+
+    def test_leaves_short_lookalikes_and_ordinary_words_alone(self) -> None:
+        text = "ghs_short ghp_ 19chars:ghs_" + "a" * 19 + " ghost github ghx_" + "a" * 30
+        assert redact_secrets(text, max_length=500) == text
+
+    def test_body_length_floor_is_twenty(self) -> None:
+        assert redact_secrets("ghs_" + "a" * 20, max_length=500) == "[REDACTED]"
+        assert redact_secrets("ghs_" + "a" * 19, max_length=500) == "ghs_" + "a" * 19
+
+    def test_does_not_mask_inside_a_longer_identifier(self) -> None:
+        """A token must start and end on a word boundary — `my_ghs_...` is a name."""
+        text = "my_ghs_" + "a" * 30
+        assert redact_secrets(text, max_length=500) == text
+
+    def test_runs_before_truncation(self) -> None:
+        """A token straddling the length cap must not leak its prefix."""
+        text = "x" * 9 + " ghs_" + _BODY_36
+
+        result = redact_secrets(text, max_length=20)
+
+        # Truncating first would have kept "xxxxxxxxx ghs_A1b2C3d" — a live token prefix.
+        assert result == "x" * 9 + " [REDACTED]"
+        assert "ghs_" not in result
+
+    def test_is_idempotent(self) -> None:
+        once = redact_secrets(f"a ghs_{_BODY_36} b ACS_GITHUB_TOKEN=ghp_{_BODY_36}", max_length=500)
+
+        assert redact_secrets(once, max_length=500) == once
+        assert "ghs_" not in once
+        assert "ghp_" not in once
+
+    def test_composes_with_known_secrets(self) -> None:
+        result = redact_secrets(
+            f"static=hunter2-static-pat rotating=ghs_{_BODY_36}",
+            max_length=500,
+            known_secrets=frozenset({"hunter2-static-pat"}),
+        )
+
+        assert result == "static=[REDACTED] rotating=[REDACTED]"
+
+    def test_scan_stays_linear_on_adversarial_input(self) -> None:
+        """No backtracking: a long run of near-miss prefixes finishes instantly."""
+        hostile = ("ghs_" + "a" * 19 + " ") * 20_000 + "g" * 100_000
+
+        assert redact_secrets(hostile, max_length=10) == hostile[:10]
+
+
+class TestRedactIdentifier:
+    """K1: node-supplied identifiers get Layer 1 + the GitHub token pass, nothing else."""
+
+    _UUID = "3f2b8c1e-5d4a-4e7b-9a6c-1b2d3e4f5a6b"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_standing_alone(self, token: str) -> None:
+        assert redact_identifier(token, frozenset()) == "[REDACTED]"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_embedded_in_an_event_id(self, token: str) -> None:
+        assert redact_identifier(f"evt-{token}", frozenset()) == "evt-[REDACTED]"
+
+    @pytest.mark.parametrize("token", _GITHUB_TOKENS)
+    def test_masks_a_token_embedded_in_an_agent_id(self, token: str) -> None:
+        assert redact_identifier(f"{self._UUID}:{token}", frozenset()) == f"{self._UUID}:[REDACTED]"
+
+    def test_masks_an_exact_known_secret_that_matches_no_github_shape(self) -> None:
+        """Layer 1 runs first, so a configured secret is masked even without a GitHub shape."""
+        result = redact_identifier("evt-hunter2-static-pat-1", frozenset({"hunter2-static-pat"}))
+
+        assert result == "evt-[REDACTED]-1"
+
+    def test_composes_known_secret_and_github_token(self) -> None:
+        result = redact_identifier(
+            f"hunter2-static-pat:ghs_{_BODY_36}", frozenset({"hunter2-static-pat"})
+        )
+
+        assert result == "[REDACTED]:[REDACTED]"
+
+    @pytest.mark.parametrize(
+        "identifier",
+        [
+            pytest.param(_UUID, id="uuid"),
+            pytest.param("260101-01", id="bundle-version"),
+            pytest.param(f"{_UUID}:gpu-node-7.internal", id="session-and-hostname"),
+            pytest.param("ghs_short", id="short-github-lookalike"),
+            pytest.param("token=abc key:value", id="key-value-shaped-is-not-tokenized"),
+        ],
+    )
+    def test_leaves_ordinary_identifiers_unchanged(self, identifier: str) -> None:
+        assert redact_identifier(identifier, frozenset({"unrelated-secret"})) == identifier
+
+    def test_never_truncates(self) -> None:
+        identifier = "e" * 200
+
+        assert redact_identifier(identifier, frozenset()) == identifier
+
+    def test_is_deterministic_and_idempotent(self) -> None:
+        """Equality on the redacted value must still hold for the same producer value."""
+        identifier = f"evt-ghs_{_BODY_36}"
+
+        once = redact_identifier(identifier, frozenset())
+
+        assert redact_identifier(identifier, frozenset()) == once
+        assert redact_identifier(once, frozenset()) == once
+
+
+class TestKnownSecretsFromSettings:
+    def test_includes_the_static_pat_and_model_tokens(
+        self, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        monkeypatch.setenv("AI_BUNDLES_GITHUB_TOKEN", "ghp_the_static_pat_value")
+        settings = hermetic_settings(
+            jwt_secret_key="x" * 48, hf_token="hf_model_token", civitai_api_token=""
+        )
+
+        assert settings.github_auth_mode is GitHubAuthMode.pat
+        assert known_secrets_from_settings(settings) == frozenset(
+            {"ghp_the_static_pat_value", "hf_model_token"}
+        )
+
+    def test_is_empty_when_nothing_is_configured(self, monkeypatch: pytest.MonkeyPatch) -> None:
+        monkeypatch.delenv("AI_BUNDLES_GITHUB_TOKEN", raising=False)
+        settings = hermetic_settings(jwt_secret_key="x" * 48)
+
+        assert known_secrets_from_settings(settings) == frozenset()

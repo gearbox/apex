@@ -19,9 +19,10 @@ class ProvisioningUnavailableError(GpuSessionError):
     created any external resource (D6): no tunnel, no Vast.ai instance, no session row,
     no billing hold. Maps to 503 `provisioning_unavailable` at the route.
 
-    Raised for both an empty github_content_token and any
-    ProvisioningScriptError (ref-not-found or upstream-unavailable) from
-    ProvisioningScriptService.resolve() — from start_session's perspective both are
+    Raised for a missing GitHub credential (neither AI_BUNDLES_GITHUB_TOKEN nor
+    GITHUB_APP_* configured), a GitHub App token that cannot be minted right now, and
+    any ProvisioningScriptError (ref-not-found or upstream-unavailable) from
+    ProvisioningScriptService.resolve() — from start_session's perspective all are
     the same outcome: apex cannot hand a working node a script it can fetch.
     """
 

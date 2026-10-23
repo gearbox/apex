@@ -14,6 +14,7 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.security.callback_token import validate_callback_token
 from src.api.services.billing_errors import RefundNotEligibleError, RefundNotEligibleReason
+from src.api.services.github.token_provider import GitHubTokenUnavailableError
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import NoCapacityError
@@ -22,6 +23,7 @@ from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
     DeploymentStatus,
+    GitHubAuthMode,
     GpuSessionStatus,
     ModelType,
     OperationKind,
@@ -58,6 +60,7 @@ if TYPE_CHECKING:
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
+    from src.api.services.github.token_provider import GitHubTokenProvider
     from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.ops_event_bus import OpsEventBus
@@ -209,6 +212,7 @@ class GpuSessionService:
         billing_service: BillingService,
         cooldown_store: NodeCooldownStore,
         provisioning_script_service: ProvisioningScriptService,
+        github_token_provider: GitHubTokenProvider | None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
         ops_event_bus: OpsEventBus | None = None,
@@ -221,6 +225,9 @@ class GpuSessionService:
         self._billing_service = billing_service
         self._cooldown = cooldown_store
         self._provisioning_script = provisioning_script_service
+        # None (mode `none`) fails closed: start_session refuses to run without a GitHub
+        # credential. Required, so a forgotten wiring fails at construction.
+        self._github_tokens = github_token_provider
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
         self._ops_event_bus = ops_event_bus
@@ -245,7 +252,8 @@ class GpuSessionService:
         2. Pre-check uniqueness via GpuSessionDeploymentRepository.get_live_for_model (fast fail)
         3. Generate session_id (UUIDv7) and callback_token (token_urlsafe)
         1.5. Assert sufficient balance BEFORE creating any external resources
-        3.6. Validate config (github_content_token, provisioning_script_ref, apex_callback_url) — fail
+        3.6. Validate config (GitHub credential — App or PAT —, provisioning_script_ref,
+             apex_callback_url) and mint/fetch the GitHub token for the node env — fail
              fast with no cleanup needed, since nothing external exists yet
         3.7. Resolve the bootstrap script via ProvisioningScriptService.resolve() (D6) —
              proves the ref apex is about to hand this node actually resolves BEFORE
@@ -322,19 +330,24 @@ class GpuSessionService:
         # ahead of tunnel creation. Previously this guard ran after create_session_tunnel,
         # so a misconfigured deploy leaked a tunnel on every attempt (2026-09-13 staging
         # incident's root cause for the paired cloudflare.tunnel.delete_failed 400s).
-        if not self._settings.github_content_token:
+        # Defence in depth: Settings already refuses to boot a configured GPU stack without
+        # a GitHub credential, so this normally cannot fire.
+        github_tokens = self._github_tokens
+        if self._settings.github_auth_mode is GitHubAuthMode.none or github_tokens is None:
             logger.error(
                 "gpu_session.start.failed",
                 user_id=str(user_id),
                 model_type=model_type.value,
                 error_class="ConfigurationError",
                 phase="config_validation",
-                reason="github_content_token is empty; ai-bundles/aisha are private and CLI clone will fail",
+                reason="no GitHub credential configured; ai-bundles/aisha are private and CLI clone will fail",
             )
             raise ProvisioningUnavailableError(
-                "Apex is misconfigured: github_content_token is empty. "
-                "Set AI_BUNDLES_GITHUB_TOKEN (pydantic-settings maps this to the field automatically) "
-                "to a GitHub PAT with read access to BOTH gearbox/ai-bundles and gearbox/aisha."
+                "Apex is misconfigured: no GitHub credential is configured. "
+                "Set either AI_BUNDLES_GITHUB_TOKEN (a PAT with read access to BOTH "
+                "gearbox/ai-bundles and gearbox/aisha) or GITHUB_APP_ID, "
+                "GITHUB_APP_INSTALLATION_ID and GITHUB_APP_PRIVATE_KEY_B64 (a GitHub App "
+                "installed on both repos)."
             )
         if not self._settings.provisioning_script_ref:
             logger.error(
@@ -362,6 +375,20 @@ class GpuSessionService:
                 "Apex is misconfigured: apex_callback_url is invalid. "
                 "Set APEX_CALLBACK_URL to the public Apex http(s) origin."
             )
+
+        # Obtained here, before anything external exists, so a GitHub outage is a clean 503
+        # rather than a half-built session; consumed by build_acs_env below.
+        try:
+            github_token = await github_tokens.get_token()
+        except GitHubTokenUnavailableError as exc:
+            logger.exception(
+                "gpu_session.start.failed",
+                user_id=str(user_id),
+                model_type=model_type.value,
+                error_class=exc.__class__.__name__,
+                phase="github_token",
+            )
+            raise ProvisioningUnavailableError(f"GitHub credential unavailable: {exc}") from exc
 
         # Step 3.7: resolve the bootstrap script apex is about to hand this node (D6) —
         # warms the cache and proves the ref actually resolves before anything billable
@@ -451,6 +478,7 @@ class GpuSessionService:
             tunnel_token=tunnel_token,
             callback_token=callback_token,
             provision_script_sha256=resolved_script.sha256,
+            github_token=github_token.value,
         )
 
         # Step 6: create Vast.ai instance with retry loop

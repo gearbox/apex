@@ -188,6 +188,7 @@ def _make_service(
         billing_service=billing_service,  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=AsyncMock(),
+        github_token_provider=None,
     )
 
 

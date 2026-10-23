@@ -4,7 +4,8 @@ The builder is a pure function — no mocks needed. Tests cover:
 - all contract keys present
 - each key maps to the correct settings field
 - defaults and type coercions
-- port consistency invariant (ACS_COMFYUI_PORT == -p mapping port)
+- the GitHub token comes from the caller (the GitHubTokenProvider's), never from settings
+- no dead docker "-p" mapping and no ACS_COMFYUI_EXTRA_ARGS (D8)
 - closed contract (no unexpected keys)
 """
 
@@ -53,13 +54,11 @@ _EXPECTED_ACS_KEYS = {
     "ACS_CIVITAI_API_TOKEN",
     "ACS_COMFYUI_PORT",
     "ACS_COMFYUI_HOST",
-    "ACS_COMFYUI_EXTRA_ARGS",
 }
 
 
 def _make_settings(**overrides: object) -> MagicMock:
     s = MagicMock()
-    s.github_content_token = "ghp_test_token"
     s.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     s.ai_bundles_branch = "master"
     s.aisha_repo_url = "https://github.com/gearbox/aisha.git"
@@ -69,7 +68,6 @@ def _make_settings(**overrides: object) -> MagicMock:
     s.hf_token = "hf-test-token"
     s.civitai_api_token = "civitai-test-token"
     s.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
-    s.aisha_comfyui_extra_args = ""
     for k, v in overrides.items():
         setattr(s, k, v)
     return s
@@ -92,6 +90,7 @@ def _build(**overrides: object) -> dict[str, str]:
         provision_script_sha256=overrides.pop(  # type: ignore[arg-type]
             "provision_script_sha256", "a" * 64
         ),
+        github_token=overrides.pop("github_token", "ghp_test_token"),  # type: ignore[arg-type]
     )
 
 
@@ -106,10 +105,17 @@ def test_all_acs_keys_present() -> None:
         assert key in env, f"Missing required key: {key}"
 
 
-def test_acs_github_token_from_settings() -> None:
-    s = _make_settings(github_content_token="ghp_my_pat")
-    env = _build(settings=s)
-    assert env["ACS_GITHUB_TOKEN"] == "ghp_my_pat"
+def test_acs_github_token_is_the_token_passed_in() -> None:
+    env = _build(github_token="ghs_app_installation_token")
+    assert env["ACS_GITHUB_TOKEN"] == "ghs_app_installation_token"
+
+
+def test_acs_github_token_ignores_settings() -> None:
+    """The PAT on Settings must never leak into the env: the provider decides."""
+    s = _make_settings(github_content_token="ghp_settings_pat")
+    env = _build(settings=s, github_token="ghs_from_provider")
+    assert env["ACS_GITHUB_TOKEN"] == "ghs_from_provider"
+    assert "ghp_settings_pat" not in env.values()
 
 
 def test_acs_bundles_repo_from_settings() -> None:
@@ -125,10 +131,9 @@ def test_acs_branches_default_to_master() -> None:
     assert env["ACS_AISHA_BRANCH"] == "master"
 
 
-def test_acs_comfyui_port_matches_port_mapping() -> None:
+def test_acs_comfyui_port_from_hardware_port() -> None:
     env = _build(comfyui_port=12345)
     assert env["ACS_COMFYUI_PORT"] == "12345"
-    assert env["-p 12345:12345"] == "1"
 
 
 def test_acs_comfyui_host_default_is_0_0_0_0() -> None:
@@ -137,10 +142,12 @@ def test_acs_comfyui_host_default_is_0_0_0_0() -> None:
     assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
 
 
-def test_acs_comfyui_extra_args_default_is_empty() -> None:
-    s = _make_settings(aisha_comfyui_extra_args="")
-    env = _build(settings=s)
-    assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
+def test_no_dead_node_env() -> None:
+    """D8: aisha never reads ACS_COMFYUI_EXTRA_ARGS, and a published docker port can't serve
+    anything (ComfyUI binds 127.0.0.1; the tunnel ingress is http://localhost:{port})."""
+    env = _build(comfyui_port=12345)
+    assert "ACS_COMFYUI_EXTRA_ARGS" not in env
+    assert not [key for key in env if key.startswith("-p ")]
 
 
 def test_bundle_version_none_becomes_current() -> None:
@@ -156,11 +163,8 @@ def test_session_id_is_stringified() -> None:
 
 
 def test_dict_has_no_unexpected_keys() -> None:
-    port = _DEFAULT_COMFYUI_PORT
-    env = _build(comfyui_port=port)
-    port_key = f"-p {port}:{port}"
-    actual_keys = set(env.keys()) - {port_key}
-    assert actual_keys == _EXPECTED_ACS_KEYS
+    env = _build(comfyui_port=_DEFAULT_COMFYUI_PORT)
+    assert set(env) == _EXPECTED_ACS_KEYS
 
 
 def test_tunnel_token_and_callback_token_set_correctly() -> None:
@@ -175,12 +179,9 @@ def test_bundle_name_passed_through() -> None:
     assert env["ACS_BUNDLE_VERSION"] == "260201-01"
 
 
-def test_default_port_mapping_present() -> None:
-    port = _DEFAULT_COMFYUI_PORT
-    env = _build(comfyui_port=port)
-    assert env["ACS_COMFYUI_PORT"] == str(port)
-    assert f"-p {port}:{port}" in env
-    assert env[f"-p {port}:{port}"] == "1"
+def test_default_comfyui_port_present() -> None:
+    env = _build(comfyui_port=_DEFAULT_COMFYUI_PORT)
+    assert env["ACS_COMFYUI_PORT"] == str(_DEFAULT_COMFYUI_PORT)
 
 
 def test_cf_tunnel_token_present_and_unprefixed() -> None:

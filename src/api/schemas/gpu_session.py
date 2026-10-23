@@ -73,6 +73,13 @@ class ClaimCommandRequest(msgspec.Struct, kw_only=True):
     schema_version: int
 
 
+class GitHubTokenResponse(msgspec.Struct, kw_only=True):
+    """GitHub credential for a node; ``expires_at`` is ``None`` for a static PAT."""
+
+    token: str
+    expires_at: datetime | None
+
+
 class StartSessionRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     model: ModelType
     """The model to provision a GPU session for."""

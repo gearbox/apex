@@ -19,8 +19,14 @@ from src.api.services.bundle_index import (
     BundleNotFoundError,
     _parse_github_url,
 )
+from src.api.services.github.token_provider import (
+    GitHubToken,
+    GitHubTokenUnavailableError,
+    StaticGitHubTokenProvider,
+)
 from src.core.bundle_config import BundleMapping, HardwareRequirements, ReadinessMarker
 from src.core.config import Settings
+from src.core.enums import GitHubAuthMode
 
 _DEFAULT_COMFYUI_PORT: int = HardwareRequirements.__dataclass_fields__["comfyui_port"].default
 
@@ -51,7 +57,7 @@ _TEST_CAPS: dict[str, Any] = {
 def _make_service(cache_dir: Path, **kwargs: Any) -> BundleIndexService:
     defaults: dict[str, Any] = {
         "repo_url": "https://github.com/gearbox/ai-bundles.git",
-        "github_token": "ghp_test",
+        "token_provider": StaticGitHubTokenProvider("ghp_test"),
         "branch": "master",
         "sync_interval_minutes": 15,
         "cache_dir": cache_dir,
@@ -993,18 +999,19 @@ class TestSyncErrorBehavior:
         # Must not raise — background loop depends on this
         await svc.sync()
 
-    async def test_redact_token_removes_pat(self, tmp_path: Path) -> None:
-        """If the PAT appears in an error body, _redact_token must remove it."""
-        svc = _make_service(tmp_path, github_token="ghp_secret_abc")
-        redacted = svc._redact_token("fatal: unable to access 'https://ghp_secret_abc@github.com/'")
+    async def test_redact_token_removes_the_credential(self) -> None:
+        """If the token we sent appears in an error body, _redact_token must remove it."""
+        redacted = BundleIndexService._redact_token(
+            "fatal: unable to access 'https://ghp_secret_abc@github.com/'", "ghp_secret_abc"
+        )
         assert "ghp_secret_abc" not in redacted
         assert "***" in redacted
 
-    async def test_redact_token_handles_empty_or_missing_token(self, tmp_path: Path) -> None:
-        """Empty token or empty text must be a noop (no traceback)."""
-        svc = _make_service(tmp_path, github_token="")
-        assert svc._redact_token("any text") == "any text"
-        assert svc._redact_token("") == ""
+    async def test_redact_token_handles_empty_or_missing_token(self) -> None:
+        """Empty/absent token or empty text must be a noop (no traceback)."""
+        assert BundleIndexService._redact_token("any text", None) == "any text"
+        assert BundleIndexService._redact_token("any text", "") == "any text"
+        assert BundleIndexService._redact_token("", "ghp_secret_abc") == ""
 
 
 # ---------------------------------------------------------------------------
@@ -1055,6 +1062,70 @@ class TestFetchAndExtract:
         assert (tmp_path / "bundle-index.yaml").exists()
         assert svc._etag == '"v1"'
         assert received_headers.get("authorization") == "Bearer ghp_test"
+
+    async def test_sends_the_providers_current_token(self, tmp_path: Path) -> None:
+        """A rotating (App) token is read per fetch, not captured at construction."""
+
+        class _RotatingProvider:
+            mode = GitHubAuthMode.app
+
+            def __init__(self) -> None:
+                self.issued = 0
+
+            async def get_token(self) -> GitHubToken:
+                self.issued += 1
+                return GitHubToken(value=f"ghs_rotating_{self.issued}", expires_at=None)
+
+        provider = _RotatingProvider()
+        seen: list[str] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers["authorization"])
+            return httpx.Response(304)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        svc = _make_service(tmp_path, token_provider=provider, http_client=client)
+        await svc._fetch_and_extract()
+        await svc._fetch_and_extract()
+
+        assert seen == ["Bearer ghs_rotating_1", "Bearer ghs_rotating_2"]
+
+    async def test_no_provider_sends_no_authorization_header(self, tmp_path: Path) -> None:
+        seen: list[httpx.Headers] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append(request.headers)
+            return httpx.Response(304)
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        svc = _make_service(tmp_path, token_provider=None, http_client=client)
+        await svc._fetch_and_extract()
+
+        assert "authorization" not in seen[0]
+
+    async def test_provider_error_takes_the_upstream_failure_path(self, tmp_path: Path) -> None:
+        """No token -> no request; the failure surfaces like any other failed fetch."""
+
+        class _FailingProvider:
+            mode = GitHubAuthMode.app
+
+            async def get_token(self) -> GitHubToken:
+                raise GitHubTokenUnavailableError("github app token mint failed: status 502")
+
+        def handler(_request: httpx.Request) -> httpx.Response:  # pragma: no cover
+            raise AssertionError("no request may be made without a token")
+
+        client = httpx.AsyncClient(transport=httpx.MockTransport(handler))
+        svc = _make_service(tmp_path, token_provider=_FailingProvider(), http_client=client)
+
+        with pytest.raises(RuntimeError, match=r"github token unavailable.*status 502"):
+            await svc._fetch_and_extract()
+
+        # sync() keeps its background-safe contract: log, don't raise (last good index stays).
+        await svc.sync()
+        # start() fails loudly, like any failed initial fetch.
+        with pytest.raises(RuntimeError, match="github token unavailable"):
+            await svc.start()
 
     async def test_304_short_circuits_extraction(self, tmp_path: Path) -> None:
         """Second call with same ETag returns 304; cache_dir is untouched."""
@@ -1135,7 +1206,9 @@ class TestFetchAndExtract:
         transport = _make_mock_transport(401, body)
 
         client = httpx.AsyncClient(transport=transport)
-        svc = _make_service(tmp_path, github_token=token, http_client=client)
+        svc = _make_service(
+            tmp_path, token_provider=StaticGitHubTokenProvider(token), http_client=client
+        )
 
         with pytest.raises(RuntimeError) as exc_info:
             await svc._fetch_and_extract()
@@ -1468,7 +1541,7 @@ class TestTarballHardening:
         client = httpx.AsyncClient(transport=transport)
         svc = BundleIndexService(
             repo_url="https://github.com/gearbox/ai-bundles.git",
-            github_token="ghp_test",
+            token_provider=StaticGitHubTokenProvider("ghp_test"),
             branch="master",
             sync_interval_minutes=15,
             cache_dir=tmp_path,
@@ -1561,7 +1634,7 @@ class TestInitValidation:
         with pytest.raises(ValueError, match="sync_interval_minutes must be a positive"):
             BundleIndexService(
                 repo_url="https://github.com/x/y.git",
-                github_token="",
+                token_provider=None,
                 branch="master",
                 sync_interval_minutes=0,
                 cache_dir=tmp_path,
@@ -1573,7 +1646,7 @@ class TestInitValidation:
         with pytest.raises(ValueError, match="sync_interval_minutes must be a positive"):
             BundleIndexService(
                 repo_url="https://github.com/x/y.git",
-                github_token="",
+                token_provider=None,
                 branch="master",
                 sync_interval_minutes=-5,
                 cache_dir=tmp_path,
@@ -1585,7 +1658,7 @@ class TestInitValidation:
         with pytest.raises(TypeError):
             BundleIndexService(  # type: ignore[call-arg]
                 repo_url="https://github.com/x/y.git",
-                github_token="",
+                token_provider=None,
                 sync_interval_minutes=15,
                 cache_dir=tmp_path,
                 **_TEST_CAPS,
@@ -1596,7 +1669,7 @@ class TestInitValidation:
         with pytest.raises(ValueError, match="SSH form is no longer supported"):
             BundleIndexService(
                 repo_url="git@github.com:gearbox/ai-bundles.git",
-                github_token="",
+                token_provider=None,
                 branch="master",
                 sync_interval_minutes=15,
                 cache_dir=tmp_path,
@@ -1616,7 +1689,7 @@ class TestInitValidation:
             with pytest.raises(ValueError, match=bad_field):
                 BundleIndexService(
                     repo_url="https://github.com/x/y.git",
-                    github_token="",
+                    token_provider=None,
                     branch="master",
                     sync_interval_minutes=15,
                     cache_dir=tmp_path,

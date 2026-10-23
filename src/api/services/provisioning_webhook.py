@@ -17,7 +17,7 @@ import structlog
 from litestar.status_codes import HTTP_200_OK, HTTP_401_UNAUTHORIZED
 
 from src.api.security.callback_token import validate_callback_token
-from src.api.utils.redaction import redact_secrets
+from src.api.utils.redaction import known_secrets_from_settings, redact_secrets
 from src.core.enums import STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES
 from src.db.repositories.gpu_session import GpuSessionRepository
 
@@ -59,15 +59,7 @@ class ProvisioningWebhookService:
         # include the callback token (only its hash is stored) or the tunnel
         # token (never persisted) — see redaction.py's module docstring and T8
         # in the round-3 remediation notes.
-        self._known_secrets = frozenset(
-            value
-            for value in (
-                settings.github_content_token,
-                settings.hf_token,
-                settings.civitai_api_token,
-            )
-            if value
-        )
+        self._known_secrets = known_secrets_from_settings(settings)
 
     async def handle_failure(
         self,
