@@ -14,8 +14,10 @@ import logging
 import sys
 from pathlib import Path
 
+import httpx
 import structlog
 
+from src.api.dependencies.common import build_github_token_provider
 from src.api.services.bundle_index import BundleIndexService
 from src.core.config import Settings, get_settings
 
@@ -43,33 +45,39 @@ async def main() -> int:
     cache_dir = (Path.cwd() / ".cache" / "ai-bundles").resolve()
     cache_dir.parent.mkdir(parents=True, exist_ok=True)
 
-    svc = BundleIndexService(
-        repo_url=settings.ai_bundles_repo_url,
-        github_token=settings.github_content_token,
-        branch=settings.ai_bundles_branch,
-        default_comfyui_port=settings.comfyui_port,
-        max_download_bytes=50 * 1024 * 1024,  # 50 MiB should be more than enough for index parsing
-        max_member_count=100,  # sanity check to avoid OOM parsing malformed entries
-        max_member_size_bytes=10
-        * 1024
-        * 1024,  # 10 MiB per file should be more than enough for index parsing
-        max_uncompressed_bytes=100
-        * 1024
-        * 1024,  # 100 MiB total uncompressed size should be more than enough for index parsing
-        sync_interval_minutes=60,
-        cache_dir=cache_dir,
-    )
+    # PAT or GitHub App, whichever this environment is configured with; the App provider
+    # mints its installation token over HTTP, so it needs a client for the run's lifetime.
+    async with httpx.AsyncClient(timeout=10.0) as github_http:
+        token_provider = build_github_token_provider(settings, http_client=github_http)
+        svc = BundleIndexService(
+            repo_url=settings.ai_bundles_repo_url,
+            token_provider=token_provider,
+            branch=settings.ai_bundles_branch,
+            default_comfyui_port=settings.comfyui_port,
+            max_download_bytes=50
+            * 1024
+            * 1024,  # 50 MiB should be more than enough for index parsing
+            max_member_count=100,  # sanity check to avoid OOM parsing malformed entries
+            max_member_size_bytes=10
+            * 1024
+            * 1024,  # 10 MiB per file should be more than enough for index parsing
+            max_uncompressed_bytes=100
+            * 1024
+            * 1024,  # 100 MiB total uncompressed size should be more than enough for index parsing
+            sync_interval_minutes=60,
+            cache_dir=cache_dir,
+        )
 
-    log.info("validate_bundles.cache_dir", path=str(cache_dir))
+        log.info("validate_bundles.cache_dir", path=str(cache_dir))
 
-    # sync() runs the actual git clone/pull AND re-parses the index.
-    # Use start() if you want it to *raise* on the first sync; sync() logs
-    # and swallows. For a CLI validator we want the loud version:
-    try:
-        await svc._sync_once(raise_on_error=True)
-    except Exception:
-        log.exception("validate_bundles.sync_failed")
-        return 2
+        # sync() runs the actual git clone/pull AND re-parses the index.
+        # Use start() if you want it to *raise* on the first sync; sync() logs
+        # and swallows. For a CLI validator we want the loud version:
+        try:
+            await svc._sync_once(raise_on_error=True)
+        except Exception:
+            log.exception("validate_bundles.sync_failed")
+            return 2
 
     model_index = list(svc._model_index)
     bundle_index = list(svc._bundle_index)

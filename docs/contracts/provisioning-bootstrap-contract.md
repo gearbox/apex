@@ -132,6 +132,44 @@ things; see `fail_pre_active_session`'s docstring in
 check 2 entirely — its authorization is holding the worker's leader lease,
 not a callback token.
 
+## POST /v1/internal/gpu-sessions/{session_id}/github-token
+
+A node **pulls** the GitHub credential it needs for the private `gearbox/aisha` and
+`gearbox/ai-bundles` repos — at bootstrap, on resume, and before each ai-bundles registry
+sync — instead of relying on the token in its Vast env (fixed at instance creation, so a
+1 h App installation token in it would be dead long before a later resume or attach).
+
+```
+POST /v1/internal/gpu-sessions/{session_id}/github-token
+Authorization: Bearer {ACS_APEX_CALLBACK_TOKEN}
+```
+
+No request body. The route has no Litestar guard; the session's callback token is validated
+in the handler exactly like the operation-event and command-claim endpoints (SHA-256,
+constant time). The endpoint is read-only: no DB writes, no row lock.
+
+| Status | `error` | When | Node should |
+|---|---|---|---|
+| 200 | — | Valid callback token and the session is `pending`, `provisioning`, `active`, `stale` or `resuming` | Use `token` now; cache it until shortly before `expires_at` |
+| 401 | `unauthorized` | Missing/empty bearer, unknown session, or wrong token (indistinguishable on purpose) | Stop — the node was abandoned (e.g. a provisioning retry rotated the token) |
+| 409 | `session_not_eligible` | Session is `paused`, `stopping`, `stopped` or `failed` | Stop |
+| 503 | `github_token_unavailable` (+ `Retry-After: 30`) | GitHub could not issue a token right now, or apex has no GitHub credential configured | Retry after `Retry-After` |
+
+`200` body (always `Cache-Control: no-store`):
+
+```json
+{"token": "ghs_…", "expires_at": "2026-10-21T19:04:11Z"}
+```
+
+`expires_at` is `null` for a static PAT (`pat` mode). In `app` mode `token` is a read-only
+(`contents: read`) installation token limited to `gearbox/aisha` + `gearbox/ai-bundles`,
+valid for 1 h; apex re-mints it once less than `GITHUB_APP_TOKEN_REFRESH_MARGIN_SECONDS`
+(default 600) of its lifetime remains, so a token served here always has at least that long
+left. The token is shared by every node of one apex process and is deliberately **not**
+revoked when a session stops (that would break the others; the 1 h expiry bounds exposure).
+Use it as `Authorization: Bearer <token>` against the GitHub REST API, or as the password
+of `https://x-access-token:<token>@github.com/…` for git.
+
 ## Trust boundary for node-supplied free text (S1 round-2, T1/T8 round-3 remediation)
 
 **No node-supplied string is persisted, published, or billed against without
@@ -172,8 +210,9 @@ The redactor is three layers, applied in order (see the module docstring for
 the full design):
 
 1. **Exact known-value replacement** — a plain `str.replace` against every
-   plaintext secret apex holds at call time: `Settings.github_content_token`,
-   `hf_token`, `civitai_api_token`. **This is the only layer that is a
+   plaintext secret apex holds at call time: the static GitHub PAT
+   (`Settings.github_content_token`), `hf_token`, `civitai_api_token`
+   (`known_secrets_from_settings`). **This is the only layer that is a
    guarantee** — no false negatives for those exact values, regardless of how
    they're quoted, prefixed, or embedded.
 2. **Key-based structural redaction** — in `redact_secrets_mapping`'s dict
@@ -186,6 +225,13 @@ the full design):
    remediation prompt's T1 finding for the empirical table), and round 4
    found a further gap in Layer 3's URL handling (`KEY=<url>` shapes — U1,
    below).
+
+**GitHub App installation tokens are covered by a pattern pass, not by Layer 1.** They
+rotate hourly and are minted by whichever apex process a node called, so no static
+known-secret set can hold them. `redact_secrets` therefore also masks GitHub's token
+formats (`gh[pousr]_…` and `github_pat_…`, 20+ token characters, on word boundaries)
+wherever they appear in free text, after Layer 1 and before truncation. It is a fixed-format
+scan (no regex, linear time), so unlike Layers 2/3 it has no key-name heuristics to miss.
 
 **The per-session callback token is the one secret Layer 1 can never cover.**
 Apex stores only `callback_token_hash` — the plaintext never exists anywhere
@@ -263,6 +309,11 @@ Set on every `create_instance` call (initial start and provisioning retries):
 | `PROVISIONER_FAILURE_ACTION` | Provisioner setting override (unprefixed) | Always `"destroy"` — set in *addition* to the webhook, not instead of it, so a failure is never silent |
 | `ACS_PROVISION_SCRIPT_SHA256` | `ACS_*` (apex/aisha) | sha256 of the script apex resolved for this session; the aisha script should echo it back in `acs.provision.ready` so apex can detect drift (tracked as a separate aisha-side task) |
 
+There is deliberately no `ACS_COMFYUI_EXTRA_ARGS` (aisha never read it) and no docker
+`-p {port}:{port}` entry: the Cloudflare tunnel ingress is `http://localhost:{port}` from
+cloudflared inside the container, and ComfyUI binds `127.0.0.1`, so a published host port
+could not serve anything. `ACS_COMFYUI_PORT` (which aisha does read) stays.
+
 `PROVISIONING_SCRIPT`/`PROVISIONER_*` never get the `ACS_` prefix — that
 namespace is reserved for the apex/aisha-owned contract; these three are Vast
 provisioner concepts. The Vast template itself no longer sets
@@ -271,7 +322,24 @@ provisioner concepts. The Vast template itself no longer sets
 provisioning_unavailable` before creating any resource if that ref is
 unconfigured or fails to resolve (D6).
 
-**Token scope (S5, round-2 remediation):** `ACS_GITHUB_TOKEN` above, and the
+**GitHub credential (GitHub App rollout).** Apex has one `GitHubTokenProvider` per process
+(`src/api/services/github/token_provider.py`), chosen from `Settings.github_auth_mode`:
+
+| Mode | When | Credential |
+|---|---|---|
+| `app` | `GITHUB_APP_ID`, `GITHUB_APP_INSTALLATION_ID` and `GITHUB_APP_PRIVATE_KEY_B64` are all set (all-or-none, validated at boot) | A cached read-only installation token for the two repos, re-minted single-flight |
+| `pat` | only `AI_BUNDLES_GITHUB_TOKEN` is set | That static PAT |
+| `none` | neither | No provider; session start answers `503 provisioning_unavailable` |
+
+Apex's own fetches (bundle-index tarball, bootstrap script), the `ACS_GITHUB_TOKEN`
+below, and the `github-token` endpoint above all take their credential from that provider,
+so a node and apex always hold the same kind of token. **Phase A (current):** apex still
+sends `ACS_GITHUB_TOKEN` (the provider's token at instance-creation time) so aisha `v0.9.3`,
+which exits 2 without it, keeps working; in `app` mode that env token expires after an hour,
+so enable the App only once aisha `v0.10.0` (which pulls from the endpoint) is pinned.
+**Phase C (after that pin):** `ACS_GITHUB_TOKEN` is removed from this env.
+
+**Token scope (S5, round-2 remediation):** in `pat` mode, `ACS_GITHUB_TOKEN` above, and the
 token `ProvisioningScriptService._fetch_from_github` presents to GitHub to
 resolve the bootstrap script, are the same value: `Settings.github_content_token`
 (env `AI_BUNDLES_GITHUB_TOKEN` — kept via `validation_alias` so no deployment's
@@ -360,7 +428,7 @@ string containing `token=`/`session=` — logs should carry `session_id`,
 
 | Status | Code | When |
 |---|---|---|
-| 503 | `provisioning_unavailable` | `github_content_token`, `provisioning_script_ref`, or `apex_callback_url` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
+| 503 | `provisioning_unavailable` | No GitHub credential configured (neither `AI_BUNDLES_GITHUB_TOKEN` nor `GITHUB_APP_*`), a GitHub App token that cannot be minted right now, `provisioning_script_ref` or `apex_callback_url` unset, or the script ref fails to resolve (404/502 from GitHub) — no tunnel, no Vast.ai instance, no session row, no billing hold |
 
 ## gearbox/aisha coordination
 

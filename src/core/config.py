@@ -1,11 +1,16 @@
 """Application configuration using pydantic-settings."""
 
+import base64
+import binascii
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Literal
 from urllib.parse import urlparse
 
 from annotated_types import Le
+from cryptography.exceptions import UnsupportedAlgorithm
+from cryptography.hazmat.primitives.asymmetric import rsa
+from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import BaseModel, BeforeValidator, Field, SecretStr, computed_field, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
@@ -13,7 +18,7 @@ from src.core.constants import (
     PROVISIONING_REF_PATTERN,
     validate_dev_ref_is_route_safe,
 )
-from src.core.enums import WorkerMode
+from src.core.enums import GitHubAuthMode, WorkerMode
 from src.core.product_registry import PRODUCT_REGISTRY
 from src.core.topup_pricing import build_tiers
 
@@ -47,6 +52,47 @@ def _empty_string_to_none(value: object) -> object:
 
 
 OptionalNonBlankStr = Annotated[str | None, BeforeValidator(_empty_string_to_none)]
+# Compose passes unset optionals through as empty strings (`${VAR:-}`); these must read as unset.
+OptionalInt = Annotated[int | None, BeforeValidator(_empty_string_to_none)]
+OptionalSecretStr = Annotated[SecretStr | None, BeforeValidator(_empty_string_to_none)]
+
+
+def parse_github_repo_url(url: str) -> tuple[str, str] | None:
+    """Split ``https://github.com/{owner}/{repo}[.git]`` into ``(owner, repo)``.
+
+    Returns ``None`` for anything else (SSH forms, other hosts, extra path segments).
+    """
+    if not url.startswith("https://github.com/"):
+        return None
+    parts = url.removeprefix("https://github.com/").removesuffix(".git").strip("/").split("/")
+    return None if len(parts) != 2 or not all(parts) else (parts[0], parts[1])
+
+
+def _decode_github_app_private_key(raw_b64: str) -> bytes:
+    """Decode and validate the base64 ``.pem`` of a GitHub App private key.
+
+    Raises:
+        ValueError: not base64, not an unencrypted PEM key, or not an RSA key (GitHub Apps
+            sign RS256). Messages are fixed strings: neither the input nor the
+            underlying library's error text is ever echoed, so key material cannot
+            reach a startup traceback.
+    """
+    try:
+        pem = base64.b64decode("".join(raw_b64.split()), validate=True)
+    except (binascii.Error, ValueError):
+        raise ValueError("GITHUB_APP_PRIVATE_KEY_B64 is not valid base64") from None
+    try:
+        key = load_pem_private_key(pem, password=None)
+    except (ValueError, TypeError, UnsupportedAlgorithm):
+        raise ValueError(
+            "GITHUB_APP_PRIVATE_KEY_B64 does not decode to an unencrypted PEM private key"
+        ) from None
+    if not isinstance(key, rsa.RSAPrivateKey):
+        # ValueError, not TypeError: pydantic only turns ValueError into a ValidationError.
+        raise ValueError(  # noqa: TRY004
+            "GITHUB_APP_PRIVATE_KEY_B64 must be an RSA private key (GitHub Apps use RS256)"
+        )
+    return pem
 
 
 def normalize_apex_callback_url(value: str) -> str | None:
@@ -81,6 +127,9 @@ class Settings(BaseSettings):
         env_file_encoding="utf-8",
         case_sensitive=False,
         extra="ignore",
+        # A ValidationError otherwise echoes (a truncated repr of) the raw env input, which
+        # holds secrets such as GITHUB_APP_PRIVATE_KEY_B64 and JWT_SECRET_KEY.
+        hide_input_in_errors=True,
     )
 
     # -------------------------------------------------------------------------
@@ -155,15 +204,41 @@ class Settings(BaseSettings):
         default="",
         validation_alias="AI_BUNDLES_GITHUB_TOKEN",
         description=(
-            "GitHub PAT read by ProvisioningScriptService to fetch the bootstrap script "
-            "from the private gearbox/aisha repo, AND by BundleIndexService to clone the "
-            "private gearbox/ai-bundles repo. Requires read access to BOTH repos — an "
-            "ai-bundles-only-scoped token clones bundles fine but 404s on every session "
-            "start (S5: the field/env name predates the aisha-repo caller and named it "
-            "for ai-bundles alone, which no longer describes what it reads). The env var "
-            "name AI_BUNDLES_GITHUB_TOKEN is kept via validation_alias so no deployment's "
-            "env needs to change; this field name is the seam a future GitHub App "
-            "credential migration will replace."
+            "Static GitHub PAT (the `pat` auth mode, used when GITHUB_APP_* is unset). "
+            "Served by StaticGitHubTokenProvider to ProvisioningScriptService (bootstrap "
+            "script from the private gearbox/aisha repo), BundleIndexService (private "
+            "gearbox/ai-bundles repo) and GPU nodes (via the node token endpoint). "
+            "Requires read access to BOTH repos — an ai-bundles-only-scoped token clones "
+            "bundles fine but 404s on every session start. The env var name "
+            "AI_BUNDLES_GITHUB_TOKEN predates the aisha-repo caller and is kept via "
+            "validation_alias so no deployment's env needs to change. Read through "
+            "`github_auth_mode` / the GitHubTokenProvider, never directly."
+        ),
+    )
+    github_app_id: OptionalInt = Field(
+        default=None,
+        ge=1,
+        validation_alias="GITHUB_APP_ID",
+        description="GitHub App id. Set together with the installation id and private key.",
+    )
+    github_app_installation_id: OptionalInt = Field(
+        default=None,
+        ge=1,
+        validation_alias="GITHUB_APP_INSTALLATION_ID",
+        description="Installation id of the GitHub App on the owner of the two private repos.",
+    )
+    github_app_private_key_b64: OptionalSecretStr = Field(
+        default=None,
+        validation_alias="GITHUB_APP_PRIVATE_KEY_B64",
+        description="base64 of the GitHub App private key .pem (base64 -w0 key.pem).",
+    )
+    github_app_token_refresh_margin_seconds: int = Field(
+        default=600,
+        ge=60,
+        le=1800,
+        description=(
+            "An installation token is re-minted once less than this much of its 1 h "
+            "lifetime remains, so tokens handed to nodes stay usable for a full command."
         ),
     )
     ai_bundles_repo_url: str = Field(
@@ -235,16 +310,9 @@ class Settings(BaseSettings):
     aisha_comfyui_host: str = Field(
         default="0.0.0.0",  # noqa: S104
         description=(
-            "ComfyUI bind address on Aisha GPU nodes (forwarded as ACS_COMFYUI_HOST). "
-            "Must be 0.0.0.0 in production so cloudflared can reach ComfyUI; deviating "
-            "from this default will break the tunnel."
-        ),
-    )
-    aisha_comfyui_extra_args: str = Field(
-        default="",
-        description=(
-            "Extra args appended to ComfyUI launch on Aisha GPU nodes "
-            "(forwarded as ACS_COMFYUI_EXTRA_ARGS). Example: '--preview-method auto'."
+            "Host aisha's client uses to reach ComfyUI on the node (forwarded as "
+            "ACS_COMFYUI_HOST). Not a cloudflared requirement: the tunnel ingress is "
+            "http://localhost:{port} from inside the container."
         ),
     )
 
@@ -1809,6 +1877,44 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_github_app_settings(self) -> "Settings":
+        """GitHub App config is all-or-none; when set, key and repo URLs must be usable.
+
+        Error text names variables only — never a value (the private key included).
+        """
+        key = self.github_app_private_key_b64
+        app_vars = {
+            "GITHUB_APP_ID": self.github_app_id is not None,
+            "GITHUB_APP_INSTALLATION_ID": self.github_app_installation_id is not None,
+            "GITHUB_APP_PRIVATE_KEY_B64": key is not None,
+        }
+        if not any(app_vars.values()):
+            return self
+        missing = [name for name, is_set in app_vars.items() if not is_set]
+        if missing or key is None:  # `key is None` is implied by `missing`; it narrows for mypy
+            raise ValueError(
+                "GitHub App config is partial: GITHUB_APP_ID, GITHUB_APP_INSTALLATION_ID and "
+                f"GITHUB_APP_PRIVATE_KEY_B64 must be set together (missing: {', '.join(missing)})"
+            )
+
+        _decode_github_app_private_key(key.get_secret_value())
+
+        repos = [
+            parse_github_repo_url(url) for url in (self.aisha_repo_url, self.ai_bundles_repo_url)
+        ]
+        if None in repos:
+            raise ValueError(
+                "GitHub App mode requires aisha_repo_url and ai_bundles_repo_url to be "
+                "https://github.com/{owner}/{repo}[.git] URLs"
+            )
+        if len({repo[0] for repo in repos if repo is not None}) != 1:
+            raise ValueError(
+                "GitHub App mode requires aisha_repo_url and ai_bundles_repo_url to share one "
+                "owner (a single installation token covers one owner)"
+            )
+        return self
+
+    @model_validator(mode="after")
     def validate_credit_warning_thresholds(self) -> "Settings":
         """Assert critical threshold is strictly below warning threshold."""
         if self.gpu_session_credit_critical_minutes >= self.gpu_session_credit_warning_minutes:
@@ -2091,6 +2197,37 @@ class Settings(BaseSettings):
     def model_studio_configured(self) -> bool:
         """Check if Alibaba Model Studio (Wan) is configured."""
         return bool(self.model_studio_base_url and self.model_studio_api_key)
+
+    @property
+    def github_auth_mode(self) -> GitHubAuthMode:
+        """Which credential reaches the private aisha / ai-bundles repos."""
+        if self.github_app_id is not None:
+            return GitHubAuthMode.app
+        return GitHubAuthMode.pat if self.github_content_token else GitHubAuthMode.none
+
+    @property
+    def github_app_private_key_pem(self) -> bytes | None:
+        """Decoded App private key (validated at boot); ``None`` outside App mode."""
+        if self.github_app_private_key_b64 is None:
+            return None
+        return _decode_github_app_private_key(self.github_app_private_key_b64.get_secret_value())
+
+    @property
+    def github_repositories(self) -> tuple[str, str]:
+        """Bare repo names (``aisha``, ``ai-bundles``) an installation token is scoped to.
+
+        Derived from the repo URLs so the scope can never drift from what apex and
+        the nodes actually clone. Only meaningful in App mode, where the validator
+        guarantees both URLs parse.
+
+        Raises:
+            ValueError: a repo URL is not ``https://github.com/{owner}/{repo}[.git]``.
+        """
+        aisha = parse_github_repo_url(self.aisha_repo_url)
+        bundles = parse_github_repo_url(self.ai_bundles_repo_url)
+        if aisha is None or bundles is None:
+            raise ValueError("aisha_repo_url and ai_bundles_repo_url must be github.com repo URLs")
+        return aisha[1], bundles[1]
 
     @property
     def vastai_configured(self) -> bool:

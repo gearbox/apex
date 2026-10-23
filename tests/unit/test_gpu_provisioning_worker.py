@@ -16,6 +16,10 @@ import pytest
 from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
+from src.api.services.github.token_provider import (
+    GitHubTokenUnavailableError,
+    StaticGitHubTokenProvider,
+)
 from src.api.services.gpu_session.node_cooldown import NodeCooldownStore, NullNodeCooldownStore
 from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
@@ -35,6 +39,7 @@ from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     CommandStatus,
     DeploymentStatus,
+    GitHubAuthMode,
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
@@ -175,14 +180,13 @@ def _make_settings(**overrides: Any) -> MagicMock:
     settings.hf_token = "hf-tok"
     settings.civitai_api_token = "civitai-tok"
     settings.aisha_cf_tunnel_domain = "gpu-domain.com"
-    settings.github_content_token = "ghp_test_token"
+    settings.github_auth_mode = GitHubAuthMode.pat
     settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
     settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
     settings.aisha_branch = "master"
     settings.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
-    settings.aisha_comfyui_extra_args = ""
     for k, v in overrides.items():
         setattr(settings, k, v)
     return settings
@@ -221,6 +225,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         "settings": _make_settings(),
         "cooldown_store": NullNodeCooldownStore(),
         "provisioning_script_service": provisioning_script_service,
+        "github_token_provider": StaticGitHubTokenProvider("ghp_test_token"),
         "billing_service": None,
         "event_bus": None,
         "job_sweep_service": None,
@@ -235,6 +240,7 @@ def _make_worker(**overrides: Any) -> tuple[GpuProvisioningWorker, dict[str, Any
         settings=mocks["settings"],
         cooldown_store=mocks["cooldown_store"],
         provisioning_script_service=mocks["provisioning_script_service"],
+        github_token_provider=mocks["github_token_provider"],
         billing_service=mocks["billing_service"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
@@ -699,8 +705,8 @@ class TestAdvanceProvisioning:
         assert env["ACS_AISHA_BRANCH"] == "master"
         assert env["ACS_COMFYUI_PORT"] == str(_DEFAULT_COMFYUI_PORT)
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
-        assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
-        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
+        assert "ACS_COMFYUI_EXTRA_ARGS" not in env
+        assert not [key for key in env if key.startswith("-p ")]
         operation_kwargs = operation_repo.create.await_args.kwargs
         assert operation_kwargs["id"] != previous_operation_id
         assert operation_kwargs["kind"] == OperationKind.session_bootstrap
@@ -896,12 +902,12 @@ class TestAdvanceProvisioning:
         source = inspect.getsource(provisioning_worker)
         assert source.count("update_callback_token_hash") == 1
 
-    async def test_retry_fails_fast_on_empty_github_token(self) -> None:
-        """If github_content_token is empty, mark session failed before create_instance."""
+    async def test_retry_fails_fast_without_github_credential(self) -> None:
+        """If no GitHub credential is configured, mark session failed before create_instance."""
         # provisioning_recreation_attempts=3 so new_attempt=2 allows recreation to proceed
-        # far enough to hit the github_token check
+        # far enough to hit the github credential check
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
-        mocks["settings"].github_content_token = ""
+        mocks["settings"].github_auth_mode = GitHubAuthMode.none
         session = _make_gpu_session(
             status=GpuSessionStatus.pending,
             bundle_name="wan_2.2_i2v",
@@ -927,6 +933,39 @@ class TestAdvanceProvisioning:
         mocks["vastai_client"].create_instance.assert_not_called()
         # Session must be marked failed
         mock_repo.update_status.assert_called()
+        failed_call = mock_repo.update_status.call_args_list[-1]
+        assert failed_call[0][1] == GpuSessionStatus.failed
+
+    async def test_retry_fails_fast_when_github_token_unavailable(self) -> None:
+        """A GitHub outage on the retry path fails the session before any instance exists."""
+        provider = AsyncMock()
+        provider.get_token.side_effect = GitHubTokenUnavailableError(
+            "github app token mint failed: status 502"
+        )
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            github_token_provider=provider,
+        )
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token_hash="some-existing-hash",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        mocks["vastai_client"].create_instance.assert_not_called()
         failed_call = mock_repo.update_status.call_args_list[-1]
         assert failed_call[0][1] == GpuSessionStatus.failed
 
@@ -1532,7 +1571,7 @@ class TestEnvReconstruction:
         env = mocks["vastai_client"].create_instance.call_args[1]["env"]
         assert env["ACS_BUNDLE_VERSION"] == "current"
 
-    async def test_rebuild_env_includes_port_mapping_from_hardware(self) -> None:
+    async def test_rebuild_env_includes_comfyui_port_from_hardware(self) -> None:
         # provisioning_recreation_attempts=3 so new_attempt=2 < 3+1=4 → recreation fires
         worker, mocks = _make_worker(settings=_make_settings(provisioning_recreation_attempts=3))
         session = _make_gpu_session(status=GpuSessionStatus.pending)
@@ -1552,7 +1591,7 @@ class TestEnvReconstruction:
             await worker._retry_or_fail(session, reason="timeout")
 
         env = mocks["vastai_client"].create_instance.call_args[1]["env"]
-        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
+        assert env["ACS_COMFYUI_PORT"] == str(bundle.hardware.comfyui_port)
 
 
 class TestSweepConcurrency:

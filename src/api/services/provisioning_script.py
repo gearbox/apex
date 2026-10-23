@@ -1,9 +1,10 @@
 """Bootstrap-script delivery for Vast.ai GPU nodes (D1-D6).
 
 Resolves the Aisha ComfyUI bootstrap script from the private gearbox/aisha repo, using
-the server-side GitHub PAT, and caches successful fetches in Redis so the GitHub
-Contents API is hit at most once per (variant, ref) per cache TTL. Failures are never
-cached (D5) — a fixed ref would otherwise stay broken for the whole TTL.
+the server-side GitHub credential (App installation token or PAT, via
+GitHubTokenProvider), and caches successful fetches in Redis so the GitHub Contents API
+is hit at most once per (variant, ref) per cache TTL. Failures are never cached (D5) — a
+fixed ref would otherwise stay broken for the whole TTL.
 
 SECURITY: repo/path are never taken from the request — see
 src.core.constants.SCRIPT_VARIANT_SOURCES. Callers must never log the callback token
@@ -20,6 +21,7 @@ import httpx
 import structlog
 
 from src.api.security.callback_token import validate_callback_token
+from src.api.services.github.token_provider import GitHubTokenUnavailableError
 from src.core.constants import PROVISIONING_REF_PATTERN, SCRIPT_VARIANT_SOURCES
 from src.core.enums import ScriptServeOutcome, ScriptVariant
 from src.db.repositories.gpu_session import GpuSessionRepository
@@ -30,6 +32,7 @@ if TYPE_CHECKING:
     from redis.asyncio import Redis
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
+    from src.api.services.github.token_provider import GitHubTokenProvider
     from src.core.config import Settings
 
 logger = structlog.get_logger(__name__)
@@ -82,10 +85,12 @@ class ProvisioningScriptService:
         redis: Redis | None,
         settings: Settings,
         session_factory: async_sessionmaker[AsyncSession],
+        token_provider: GitHubTokenProvider | None,
     ) -> None:
         self._http = http
         self._redis = redis
         self._settings = settings
+        self._token_provider = token_provider
         self._session_factory = session_factory
 
     async def resolve(self, variant: ScriptVariant, ref: str) -> ResolvedScript:
@@ -240,8 +245,15 @@ class ProvisioningScriptService:
             "Accept": "application/vnd.github.raw",
             "X-GitHub-Api-Version": "2022-11-28",
         }
-        if self._settings.github_content_token:
-            headers["Authorization"] = f"Bearer {self._settings.github_content_token}"
+        if self._token_provider is not None:
+            try:
+                token = await self._token_provider.get_token()
+            except GitHubTokenUnavailableError as exc:
+                logger.warning(
+                    "provisioning.script.token_unavailable", repo=repo, ref=ref, reason=str(exc)
+                )
+                raise ProvisioningScriptUnavailableError("GitHub token unavailable") from exc
+            headers["Authorization"] = f"Bearer {token.value}"
 
         try:
             resp = await self._http.get(

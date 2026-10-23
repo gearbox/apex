@@ -40,6 +40,19 @@ class WorkerMode(StrEnum):
     api_only = "api_only"
 
 
+class GitHubAuthMode(StrEnum):
+    """How apex (and, via the node token endpoint, GPU nodes) authenticate to GitHub.
+
+    Derived from ``Settings``: ``app`` when the ``GITHUB_APP_*`` trio is set,
+    ``pat`` when only ``AI_BUNDLES_GITHUB_TOKEN`` is, ``none`` when neither is
+    (a misconfiguration for any GPU-session flow — the repos are private).
+    """
+
+    app = "app"
+    pat = "pat"
+    none = "none"
+
+
 class Provider(StrEnum):
     """Generation provider."""
 

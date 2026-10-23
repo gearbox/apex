@@ -157,6 +157,127 @@ async def test_terminal_failure_event_with_a_tokenized_url_is_redacted_on_disk(
             await db.commit()
 
 
+_ROTATING_APP_TOKEN = "ghs_RotatingAppInstallationToken0123456789ab"
+
+
+def _github_token_event(*, session_id, operation_id) -> OperationEventBody:  # type: ignore[no-untyped-def]
+    now = datetime.now(UTC)
+    return OperationEventBody(
+        schema_version=2,
+        event_id="github-token-event",
+        session_id=session_id,
+        operation_id=operation_id,
+        operation_kind=OperationKind.session_bootstrap,
+        batch=None,
+        sequence=0,
+        target=None,
+        status=OperationStatus.failed,
+        phase=None,
+        started_at=now,
+        ts=now,
+        elapsed_seconds=3.0,
+        phase_elapsed_seconds=None,
+        progress={"work": {"last_line": f"remote: Invalid credentials for {_ROTATING_APP_TOKEN}"}},
+        plan=None,
+        summary={"final_error": f"git failed with {_ROTATING_APP_TOKEN} in the remote url"},
+        message=f"git clone failed: fatal: bad credentials {_ROTATING_APP_TOKEN} for repo",
+        error=f"clone aborted ({_ROTATING_APP_TOKEN})",
+    )
+
+
+async def test_a_github_app_token_in_node_text_is_redacted_on_disk(
+    db_engine,  # type: ignore[no-untyped-def]
+) -> None:
+    """A rotating App installation token is minted per process, so it cannot be in the
+    static known-secret set; the GitHub token pattern pass must still keep it off disk
+    and out of the published SSE payload."""
+    session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    user = User(
+        id=uuid4(),
+        email=f"operation-redaction-ghs-{uuid4().hex}@example.com",
+        password_hash="hash",
+        product_id="vex",
+    )
+    gpu_session = GpuSession(
+        id=new_id(),
+        user_id=user.id,
+        product_id="vex",
+        status=GpuSessionStatus.provisioning,
+        bundle_name="qwen_rapid_aio",
+        model_type="aisha-image",
+        callback_token_hash=hashlib.sha256(_CALLBACK_TOKEN.encode()).hexdigest(),
+    )
+    operation_id = new_id()
+    command_id = new_id()
+
+    try:
+        async with session_factory() as db, db.begin():
+            db.add(user)
+            await db.flush()
+            db.add(gpu_session)
+            await db.flush()
+            await GpuSessionOperationRepository(db).create(
+                id=operation_id,
+                session_id=gpu_session.id,
+                user_id=user.id,
+                product_id=gpu_session.product_id,
+                kind=OperationKind.bundle_provision,
+                command_id=command_id,
+            )
+            await GpuSessionCommandRepository(db).create(
+                id=command_id,
+                session_id=gpu_session.id,
+                product_id=gpu_session.product_id,
+                operation_id=operation_id,
+                kind=OperationKind.bundle_provision,
+                payload={},
+            )
+
+        controller = object.__new__(InternalGpuSessionController)
+        settings = MagicMock()
+        # No PAT, and the rotating token is NOT a configured secret.
+        settings.github_content_token = ""
+        settings.hf_token = ""
+        settings.civitai_api_token = ""
+        receiver = OperationEventService(settings=settings)
+        request = MagicMock()
+        request.headers = {"Authorization": f"Bearer {_CALLBACK_TOKEN}"}
+        event_bus = AsyncMock()
+
+        async with session_factory() as db:
+            response = await InternalGpuSessionController.operation_event.fn(
+                controller,
+                session_id=gpu_session.id,
+                operation_id=operation_id,
+                request=request,
+                data=_github_token_event(session_id=gpu_session.id, operation_id=operation_id),
+                operation_event_service=receiver,
+                session=db,
+                event_bus=event_bus,
+            )
+        assert response.status_code == 200
+
+        async with session_factory() as db:
+            operation = await GpuSessionOperationRepository(db).get(operation_id)
+            assert operation is not None
+            assert "[REDACTED]" in (operation.message or "")
+            assert _ROTATING_APP_TOKEN not in (operation.message or "")
+            assert _ROTATING_APP_TOKEN not in (operation.error or "")
+            assert _ROTATING_APP_TOKEN not in str(operation.progress)
+            assert _ROTATING_APP_TOKEN not in str(operation.summary)
+
+            command = await GpuSessionCommandRepository(db).get_by_operation(operation_id)
+            assert command is not None
+            assert _ROTATING_APP_TOKEN not in (command.error or "")
+
+        event_bus.publish.assert_awaited_once()
+        assert _ROTATING_APP_TOKEN not in str(event_bus.publish.await_args.kwargs["payload"])
+    finally:
+        async with session_factory() as db:
+            await db.execute(delete(User).where(User.id == user.id))
+            await db.commit()
+
+
 def _deeply_nested(depth: int) -> dict[str, object]:
     value: dict[str, object] = {"leaf": "bottom"}
     for _ in range(depth):

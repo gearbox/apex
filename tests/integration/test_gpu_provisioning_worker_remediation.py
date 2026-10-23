@@ -16,6 +16,7 @@ from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.schemas.events import EventType
 from src.api.schemas.provisioning import ProvisionerFailureWebhookBody
+from src.api.services.github.token_provider import StaticGitHubTokenProvider
 from src.api.services.gpu_session.node_cooldown import NullNodeCooldownStore
 from src.api.services.gpu_session.provisioning_worker import (
     _REASON_PENDING_TIMEOUT,
@@ -28,6 +29,7 @@ from src.api.services.vastai.schemas import VastAIOffer
 from src.core.bundle_config import BundleMapping, HardwareRequirements
 from src.core.enums import (
     DeploymentStatus,
+    GitHubAuthMode,
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
@@ -56,6 +58,8 @@ class _RetrySettings:
     provisioning_recreation_attempts = 3
     vastai_offer_search_limit = 20
     provisioning_offer_walk_depth = 1
+    github_auth_mode = GitHubAuthMode.pat
+    # Still read by ProvisioningWebhookService's known-secret set.
     github_content_token = "test-github-token"
     ai_bundles_repo_url = "https://example.test/ai-bundles.git"
     ai_bundles_branch = "main"
@@ -66,7 +70,6 @@ class _RetrySettings:
     hf_token = "test-hf-token"
     civitai_api_token = "test-civitai-token"
     aisha_comfyui_host = "0.0.0.0"  # noqa: S104
-    aisha_comfyui_extra_args = ""
     vastai_destroy_retry_attempts = 3
 
 
@@ -169,6 +172,7 @@ async def test_retry_missing_primary_destroys_new_instance_fails_and_stops_futur
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=_make_provisioning_script_service(),
+        github_token_provider=StaticGitHubTokenProvider("test-github-token"),
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
     )
@@ -241,6 +245,7 @@ async def test_provisioning_failure_cascade_bumps_revision_and_emits_operation_u
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=_make_provisioning_script_service(),
+        github_token_provider=StaticGitHubTokenProvider("test-github-token"),
         event_bus=event_bus,
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
@@ -336,6 +341,7 @@ async def test_webhook_and_probe_failure_race_tears_down_and_refunds_once(
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=_make_provisioning_script_service(),
+        github_token_provider=StaticGitHubTokenProvider("test-github-token"),
         billing_service=billing,
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
@@ -395,6 +401,7 @@ async def test_webhook_persists_only_the_fixed_reason(
         settings=_RetrySettings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=_make_provisioning_script_service(),
+        github_token_provider=StaticGitHubTokenProvider("test-github-token"),
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]
     )
@@ -459,6 +466,7 @@ async def test_script_service_authorizes_real_session_rows(
         redis=None,
         settings=_RetrySettings(),  # type: ignore[arg-type]
         session_factory=provisioning_session_factory,
+        token_provider=StaticGitHubTokenProvider("test-github-token"),
     )
 
     valid = await script_service.serve_for_session(
@@ -906,6 +914,7 @@ def _make_retry_worker(
         settings=settings(),  # type: ignore[arg-type]
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=script_service,
+        github_token_provider=StaticGitHubTokenProvider("test-github-token"),
         billing_service=billing,
         redis_enabled=False,
         redis_client_factory=lambda: None,  # type: ignore[arg-type,return-value]

@@ -37,7 +37,12 @@ import structlog
 
 from src.api.security.callback_token import validate_callback_token
 from src.api.services.gpu_session.failure_reasons import MAX_GPU_SESSION_FAILURE_REASON_LENGTH
-from src.api.utils.redaction import redact_known_secrets, redact_secrets, redact_secrets_mapping
+from src.api.utils.redaction import (
+    known_secrets_from_settings,
+    redact_known_secrets,
+    redact_secrets,
+    redact_secrets_mapping,
+)
 from src.core.enums import (
     TERMINAL_GPU_SESSION_STATUSES,
     TERMINAL_OPERATION_STATUSES,
@@ -61,15 +66,6 @@ if TYPE_CHECKING:
 logger = structlog.get_logger(__name__)
 
 
-def _known_secrets_from_settings(settings: Settings) -> frozenset[str]:
-    """Layer 1 exact-match set: every plaintext secret apex holds at startup."""
-    return frozenset(
-        value
-        for value in (settings.github_content_token, settings.hf_token, settings.civitai_api_token)
-        if value
-    )
-
-
 @dataclass(frozen=True, slots=True)
 class OperationEventResult:
     """Writer outcome consumed by the callback route after its transaction commits."""
@@ -84,7 +80,7 @@ class OperationEventService:
     """Validate and persist operation telemetry using a caller-owned transaction."""
 
     def __init__(self, *, settings: Settings) -> None:
-        self._known_secrets = _known_secrets_from_settings(settings)
+        self._known_secrets = known_secrets_from_settings(settings)
 
     async def handle_event(
         self,

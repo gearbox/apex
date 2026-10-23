@@ -3,6 +3,7 @@
 URL contract (must match Aisha telemetry v2 and the P3 command-queue claim contract):
   POST /v1/internal/gpu-sessions/{session_id}/operations/{operation_id}/events
   POST /v1/internal/gpu-sessions/{session_id}/commands/claim
+  POST /v1/internal/gpu-sessions/{session_id}/github-token
   Authorization: Bearer {ACS_APEX_CALLBACK_TOKEN}
 
 This controller has NO guards — authentication is performed in the handler
@@ -24,20 +25,29 @@ from litestar.status_codes import (
     HTTP_400_BAD_REQUEST,
     HTTP_401_UNAUTHORIZED,
     HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
+    HTTP_503_SERVICE_UNAVAILABLE,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.responses import error_response as _error
-from src.api.schemas.gpu_session import ClaimCommandRequest, OperationEventBody
+from src.api.schemas.gpu_session import ClaimCommandRequest, GitHubTokenResponse, OperationEventBody
 from src.api.services.event_bus import EventBus
 from src.api.services.gpu_session._events import publish_operation_event
 from src.api.services.gpu_session.command_service import GpuSessionCommandService
+from src.api.services.gpu_session.github_token_service import (
+    GitHubTokenIssueOutcome,
+    GpuSessionGitHubTokenService,
+)
 from src.api.services.gpu_session.operation_event_service import OperationEventService
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 logger = structlog.get_logger(__name__)
+
+# How long a node should wait before asking again when GitHub could not issue a token.
+_GITHUB_TOKEN_RETRY_AFTER_SECONDS = 30
 
 
 def _extract_bearer_token(request: Request[Any, Any, Any]) -> str | None:
@@ -176,3 +186,56 @@ class InternalGpuSessionController(Controller):
             # Explicit empty body — Litestar's own 204 handling isn't relied on here.
             return Response(content=b"", status_code=HTTP_204_NO_CONTENT)
         return Response(content=envelope, status_code=HTTP_200_OK)
+
+    @post("/{session_id:uuid}/github-token", status_code=HTTP_200_OK)
+    async def github_token(
+        self,
+        session_id: UUID,
+        request: Request[Any, Any, Any],
+        gpu_session_github_token_service: GpuSessionGitHubTokenService,
+        session: AsyncSession,
+    ) -> Response[Any]:
+        """Issue the GitHub credential (App installation token, or the static PAT) to a node.
+
+        The node pulls a fresh token whenever it needs one (bootstrap, resume, before each
+        registry sync) rather than relying on the one in its Vast env. Responses are never
+        cacheable: 200 carries a live credential. 503 + ``Retry-After`` means GitHub could
+        not issue one right now (or apex has no GitHub credential configured).
+        """
+        bearer_token = _extract_bearer_token(request)
+        if bearer_token is None:
+            logger.warning(
+                "gpu_session.github_token.rejected",
+                session_id=str(session_id),
+                reason="missing_or_empty_bearer",
+            )
+            return _error("unauthorized", "Missing Bearer token", HTTP_401_UNAUTHORIZED)
+
+        result = await gpu_session_github_token_service.issue(
+            session_id=session_id, bearer_token=bearer_token, db=session
+        )
+        match result.outcome:
+            case GitHubTokenIssueOutcome.unauthorized:
+                return _error("unauthorized", "Invalid callback token", HTTP_401_UNAUTHORIZED)
+            case GitHubTokenIssueOutcome.not_eligible:
+                return _error(
+                    "session_not_eligible",
+                    "Session is not in a state that may use a GitHub token",
+                    HTTP_409_CONFLICT,
+                )
+            case GitHubTokenIssueOutcome.unavailable:
+                return _error(
+                    "github_token_unavailable",
+                    "GitHub token is temporarily unavailable",
+                    HTTP_503_SERVICE_UNAVAILABLE,
+                    headers={"Retry-After": str(_GITHUB_TOKEN_RETRY_AFTER_SECONDS)},
+                )
+            case GitHubTokenIssueOutcome.issued:
+                token = result.token
+                if token is None:  # invariant: `issued` always carries a token
+                    raise RuntimeError("issued outcome without a token")
+                return Response(
+                    content=GitHubTokenResponse(token=token.value, expires_at=token.expires_at),
+                    status_code=HTTP_200_OK,
+                    headers={"Cache-Control": "no-store"},
+                )

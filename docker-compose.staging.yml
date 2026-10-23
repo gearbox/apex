@@ -157,12 +157,15 @@ services:
 
       # --- Aisha CLI runtime (forwarded to GPU nodes via vastai_client.create_instance) ---
       AI_BUNDLES_GITHUB_TOKEN: ${AI_BUNDLES_GITHUB_TOKEN:?AI_BUNDLES_GITHUB_TOKEN is required (PAT for private gearbox/ai-bundles)}
+      # GitHub App credential (optional; replaces the PAT above when all three are set)
+      GITHUB_APP_ID: ${GITHUB_APP_ID:-}
+      GITHUB_APP_INSTALLATION_ID: ${GITHUB_APP_INSTALLATION_ID:-}
+      GITHUB_APP_PRIVATE_KEY_B64: ${GITHUB_APP_PRIVATE_KEY_B64:-}
       AI_BUNDLES_REPO_URL: ${AI_BUNDLES_REPO_URL:-https://github.com/gearbox/ai-bundles.git}
       AI_BUNDLES_BRANCH: ${AI_BUNDLES_BRANCH:-master}
       AISHA_REPO_URL: ${AISHA_REPO_URL:-https://github.com/gearbox/aisha.git}
       AISHA_BRANCH: ${AISHA_BRANCH:-master}
       AISHA_COMFYUI_HOST: ${AISHA_COMFYUI_HOST:-0.0.0.0}
-      AISHA_COMFYUI_EXTRA_ARGS: ${AISHA_COMFYUI_EXTRA_ARGS:-}
 
       # --- Model-download tokens (forwarded to GPU nodes; most bundles need HF_TOKEN) ---
       HF_TOKEN: ${HF_TOKEN:-}

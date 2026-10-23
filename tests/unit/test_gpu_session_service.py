@@ -21,6 +21,10 @@ from src.api.schemas.events import EventType, GpuSessionStatusPayload
 from src.api.services.billing import BillingResult, SettleUsageResult
 from src.api.services.bundle_index import BundleIndexService
 from src.api.services.cloudflare.client import CloudflareTunnelClient
+from src.api.services.github.token_provider import (
+    GitHubTokenUnavailableError,
+    StaticGitHubTokenProvider,
+)
 from src.api.services.gpu_session import (
     GpuSessionService,
     InvalidSessionStateError,
@@ -45,6 +49,7 @@ from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     CommandStatus,
     DeploymentStatus,
+    GitHubAuthMode,
     GpuSessionStatus,
     ModelType,
     OperationKind,
@@ -235,14 +240,13 @@ def _make_settings(
     settings.hf_token = "test-hf-token"
     settings.civitai_api_token = "test-civitai-token"
     settings.gpu_session_tokens_per_minute = 100
-    settings.github_content_token = "ghp_test_token"
+    settings.github_auth_mode = GitHubAuthMode.pat
     settings.provisioning_script_ref = "v1.0.0"
     settings.ai_bundles_repo_url = "https://github.com/gearbox/ai-bundles.git"
     settings.ai_bundles_branch = "master"
     settings.aisha_repo_url = "https://github.com/gearbox/aisha.git"
     settings.aisha_branch = "master"
     settings.aisha_comfyui_host = "0.0.0.0"  # noqa: S104
-    settings.aisha_comfyui_extra_args = ""
     return settings
 
 
@@ -282,6 +286,7 @@ def _make_service(
         "billing_service": _make_billing_mock(),
         "cooldown_store": NullNodeCooldownStore(),
         "provisioning_script_service": provisioning_script_service,
+        "github_token_provider": StaticGitHubTokenProvider("ghp_test_token"),
         "account_id": uuid4(),
         "event_bus": None,
         "job_sweep_service": None,
@@ -295,6 +300,7 @@ def _make_service(
         billing_service=mocks["billing_service"],
         cooldown_store=mocks["cooldown_store"],
         provisioning_script_service=mocks["provisioning_script_service"],
+        github_token_provider=mocks["github_token_provider"],
         event_bus=mocks["event_bus"],
         job_sweep_service=mocks["job_sweep_service"],
     )
@@ -593,8 +599,8 @@ class TestStartSession:
         # Must not have persisted any session row
         mock_repo.create.assert_not_called()
 
-    async def test_port_mapping_uses_hardware_comfyui_port(self) -> None:
-        """The env dict's port mapping must be derived from hardware.comfyui_port, not hardcoded."""
+    async def test_comfyui_port_uses_hardware_comfyui_port(self) -> None:
+        """ACS_COMFYUI_PORT and the tunnel must be derived from hardware.comfyui_port, not hardcoded."""
         service, mocks = _make_service()
         # Custom port — different from the default _DEFAULT_COMFYUI_PORT
         custom_hardware = HardwareRequirements(
@@ -630,8 +636,8 @@ class TestStartSession:
 
         # Inspect the env dict passed to create_instance
         env_arg = mocks["vastai_client"].create_instance.call_args.kwargs["env"]
-        assert "-p 9999:9999" in env_arg
-        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" not in env_arg
+        assert env_arg["ACS_COMFYUI_PORT"] == "9999"
+        assert str(_DEFAULT_COMFYUI_PORT) not in env_arg["ACS_COMFYUI_PORT"]
         # Also verify CF tunnel was configured for the same port
         mocks["cf_client"].create_session_tunnel.assert_called_once_with(ANY, 9999)
 
@@ -891,8 +897,9 @@ class TestStartSession:
         assert "ACS_APEX_CALLBACK_TOKEN" in env
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
-        assert f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}" in env
-        assert env[f"-p {_DEFAULT_COMFYUI_PORT}:{_DEFAULT_COMFYUI_PORT}"] == "1"
+        # No docker port mapping and no extra-args knob: both were dead (D8).
+        assert not [key for key in env if key.startswith("-p ")]
+        assert "ACS_COMFYUI_EXTRA_ARGS" not in env
         # New contract keys
         assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
         assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
@@ -902,7 +909,6 @@ class TestStartSession:
         assert env["ACS_COMFYUI_PORT"] == str(_DEFAULT_COMFYUI_PORT)
         assert env["ACS_COMFYUI_PORT"] == str(bundle.hardware.comfyui_port)
         assert env["ACS_COMFYUI_HOST"] == "0.0.0.0"  # noqa: S104
-        assert env["ACS_COMFYUI_EXTRA_ARGS"] == ""
 
     async def test_callback_token_is_random_per_call(self) -> None:
         service, mocks = _make_service()
@@ -1118,19 +1124,19 @@ class TestStartSession:
 
         assert result is expected_session
 
-    async def test_start_session_fails_fast_on_empty_github_token(self) -> None:
+    async def test_start_session_fails_fast_without_github_credential(self) -> None:
         """Config validation now runs BEFORE tunnel creation (D6) — a regression test
         for the old ordering bug where a misconfigured deploy leaked a tunnel on
         every attempt (2026-09-13 staging incident's root cause)."""
         service, mocks = _make_service()
-        mocks["settings"].github_content_token = ""
+        mocks["settings"].github_auth_mode = GitHubAuthMode.none
         mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
 
         with patch(_REPO_PATH) as MockRepo:
             mock_repo = AsyncMock()
             MockRepo.return_value = mock_repo
 
-            with pytest.raises(ProvisioningUnavailableError, match="github_content_token"):
+            with pytest.raises(ProvisioningUnavailableError, match="AI_BUNDLES_GITHUB_TOKEN"):
                 await service.start_session(
                     user_id=uuid4(),
                     product_id="vex",
@@ -1145,6 +1151,50 @@ class TestStartSession:
         mocks["vastai_client"].search_offers.assert_not_called()
         mocks["vastai_client"].create_instance.assert_not_called()
         mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_fast_when_github_token_unavailable(self) -> None:
+        """A GitHub App token that cannot be minted is a clean 503 before ANY external
+        resource exists — no tunnel, no Vast.ai call, no session row."""
+        provider = AsyncMock()
+        provider.get_token.side_effect = GitHubTokenUnavailableError(
+            "github app token mint failed: status 502"
+        )
+        service, mocks = _make_service(github_token_provider=provider)
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+
+            with pytest.raises(ProvisioningUnavailableError, match="status 502"):
+                await service.start_session(
+                    user_id=uuid4(),
+                    product_id="vex",
+                    model_type=ModelType.AISHA_IMAGE,
+                    account_id=mocks["account_id"],
+                )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["cf_client"].delete_session_tunnel.assert_not_called()
+        mocks["vastai_client"].search_offers.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
+        mock_repo.create.assert_not_called()
+
+    async def test_start_session_fails_fast_without_provider_even_if_mode_is_set(self) -> None:
+        """No provider wired (None) fails closed exactly like auth mode `none`."""
+        service, mocks = _make_service(github_token_provider=None)
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+
+        with pytest.raises(ProvisioningUnavailableError, match="GITHUB_APP_ID"):
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+
+        mocks["cf_client"].create_session_tunnel.assert_not_called()
+        mocks["vastai_client"].create_instance.assert_not_called()
 
     async def test_start_session_fails_fast_on_empty_provisioning_script_ref(self) -> None:
         service, mocks = _make_service()
