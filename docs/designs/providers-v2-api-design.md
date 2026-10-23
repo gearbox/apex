@@ -141,7 +141,8 @@ Same structure, but `user_context` key is **omitted entirely** (not `null`).
 
 ## 3. `msgspec.Struct` definitions
 
-> **Update (Wan 3.0 arc):** `VideoConstraints` gained `min_duration`, `supported_parameters`,
+> **Update (Wan 3.0 arc):** `VideoConstraints` gained required `bills_input_video_seconds`
+> (Wan true, Grok/Aisha false; v2v source seconds rounded up per clip), and `min_duration`, `supported_parameters`,
 > `input_video` (replaces an unreleased single per-clip seconds cap), `max_combined_duration` and `input_anchored_modes`
 > (additive wire fields; they mirror `VideoMeta` in `src/core/model_registry.py`). The sketch
 > below shows the current shape. See `docs/contracts/wan-video-contract.md`.
@@ -167,6 +168,7 @@ class InputVideoConstraintsInfo(msgspec.Struct, kw_only=True):
 
 
 class VideoConstraints(msgspec.Struct, kw_only=True):
+    bills_input_video_seconds: bool
     """Video-specific constraints for a model."""
 
     min_duration: int
@@ -426,6 +428,7 @@ class ProvidersController(Controller):
                 aspect_ratios=[ar.value for ar in meta.aspect_ratios],
                 video=(
                     VideoConstraints(
+                        bills_input_video_seconds=meta.video.bills_input_video_seconds,
                         max_duration=meta.video.max_duration,
                         resolutions=[r.value for r in meta.video.resolutions],
                     )

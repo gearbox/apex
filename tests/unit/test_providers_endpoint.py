@@ -119,6 +119,7 @@ class TestModelInfoSchema:
             supports_negative_prompt=False,
             aspect_ratios=["1:1", "16:9"],
             video=VideoConstraints(
+                bills_input_video_seconds=False,
                 min_duration=1,
                 max_duration=15,
                 resolutions=["480p", "720p"],
@@ -140,6 +141,7 @@ class TestModelInfoSchema:
             supports_negative_prompt=False,
             aspect_ratios=["1:1"],
             video=VideoConstraints(
+                bills_input_video_seconds=False,
                 min_duration=1,
                 max_duration=15,
                 resolutions=["480p", "720p"],
@@ -273,6 +275,7 @@ class TestModelInfoSchema:
         assert msgspec.to_builtins(info.video.input_video) == expected
         # Hard cutover: the single-seconds-cap field is gone, not kept beside ``input_video``.
         assert set(msgspec.to_builtins(info.video)) == {
+            "bills_input_video_seconds",
             "min_duration",
             "max_duration",
             "resolutions",
@@ -792,3 +795,24 @@ class TestNoHardcodedProviderNames:
                     f"Provider.{node.attr} reference found inside a function in providers.py "
                     f"at line {node.lineno}; no provider name may be used as a discriminator"
                 )
+
+
+@pytest.mark.parametrize(
+    "model_type", [m for m in ModelType if get_model_meta(m).video is not None]
+)
+def test_every_video_model_reports_input_seconds_billing(model_type: ModelType) -> None:
+    info = _build_model_info(
+        model_type,
+        SimpleNamespace(name="Test", description="", is_enabled=True),
+        runtime=None,
+    )
+    data = msgspec.json.decode(msgspec.json.encode(info))
+    assert data["video"]["bills_input_video_seconds"] is (model_type is ModelType.WAN_3_VIDEO)
+
+
+def test_video_billing_discovery_field_is_required() -> None:
+    with pytest.raises(msgspec.ValidationError, match="bills_input_video_seconds"):
+        msgspec.json.decode(
+            b'{"min_duration":1,"max_duration":15,"resolutions":[],"supported_parameters":[]}',
+            type=VideoConstraints,
+        )

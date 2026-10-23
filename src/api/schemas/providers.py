@@ -88,6 +88,9 @@ class InputImageConstraintsInfo(msgspec.Struct, kw_only=True):
 class VideoConstraints(msgspec.Struct, kw_only=True):
     """Video-specific constraints for a model."""
 
+    bills_input_video_seconds: bool
+    """Whether source video seconds (rounded up per clip) are billed in addition to duration. v2v only."""
+
     min_duration: int
     """Minimum video duration in seconds."""
 
