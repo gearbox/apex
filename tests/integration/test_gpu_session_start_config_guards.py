@@ -19,10 +19,15 @@ import pytest
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
+from src.api.services.github.token_provider import (
+    GitHubTokenProvider,
+    GitHubTokenUnavailableError,
+    StaticGitHubTokenProvider,
+)
 from src.api.services.gpu_session import GpuSessionService, NullNodeCooldownStore
 from src.api.services.gpu_session.exceptions import ProvisioningUnavailableError
 from src.core.bundle_config import BundleMapping, HardwareRequirements
-from src.core.enums import ModelType
+from src.core.enums import GitHubAuthMode, ModelType
 from src.db.models.gpu_session import GpuSession
 
 if TYPE_CHECKING:
@@ -31,10 +36,13 @@ if TYPE_CHECKING:
 pytestmark = pytest.mark.asyncio
 
 
+_DEFAULT_PROVIDER = StaticGitHubTokenProvider("test-github-token")
+
+
 class _GuardSettings:
     """The narrow Settings surface start_session's config guards touch."""
 
-    github_content_token = "test-github-token"
+    github_auth_mode = GitHubAuthMode.pat
     provisioning_script_ref = "v1.0.0"
     apex_callback_url = "https://apex.example.test"
     gpu_session_tokens_per_minute = 100
@@ -65,12 +73,13 @@ def session_factory(db_engine: AsyncEngine) -> async_sessionmaker[AsyncSession]:
 def _make_service(
     session_factory: async_sessionmaker[AsyncSession],
     *,
-    github_content_token: str = "test-github-token",
+    github_auth_mode: GitHubAuthMode = GitHubAuthMode.pat,
+    github_token_provider: GitHubTokenProvider | None = _DEFAULT_PROVIDER,
     provisioning_script_ref: str = "v1.0.0",
     apex_callback_url: str = "https://apex.example.test",
 ) -> tuple[GpuSessionService, MagicMock, MagicMock]:
     settings = _GuardSettings()
-    settings.github_content_token = github_content_token  # type: ignore[misc]
+    settings.github_auth_mode = github_auth_mode  # type: ignore[misc]
     settings.provisioning_script_ref = provisioning_script_ref  # type: ignore[misc]
     settings.apex_callback_url = apex_callback_url  # type: ignore[misc]
 
@@ -90,6 +99,7 @@ def _make_service(
         billing_service=billing_service,
         cooldown_store=NullNodeCooldownStore(),
         provisioning_script_service=AsyncMock(),
+        github_token_provider=github_token_provider,
     )
     return service, vastai_client, cf_client
 
@@ -103,13 +113,47 @@ async def _assert_no_session_row_for_user(
 
 
 class TestStartSessionConfigGuardsAgainstRealPostgres:
-    async def test_empty_github_content_token_returns_503_with_no_side_effects(
+    async def test_no_github_credential_returns_503_naming_both_options_with_no_side_effects(
         self, session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
-        service, vastai_client, cf_client = _make_service(session_factory, github_content_token="")
+        """Auth mode `none`: neither a PAT nor a GitHub App is configured (A19)."""
+        service, vastai_client, cf_client = _make_service(
+            session_factory, github_auth_mode=GitHubAuthMode.none, github_token_provider=None
+        )
         user_id = uuid4()
 
-        with pytest.raises(ProvisioningUnavailableError, match="github_content_token"):
+        with pytest.raises(ProvisioningUnavailableError) as excinfo:
+            await service.start_session(
+                user_id=user_id,
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=uuid4(),
+            )
+
+        assert "AI_BUNDLES_GITHUB_TOKEN" in str(excinfo.value)
+        assert "GITHUB_APP_ID" in str(excinfo.value)
+        assert "GITHUB_APP_INSTALLATION_ID" in str(excinfo.value)
+        assert "GITHUB_APP_PRIVATE_KEY_B64" in str(excinfo.value)
+        cf_client.create_session_tunnel.assert_not_awaited()
+        vastai_client.search_offers.assert_not_awaited()
+        vastai_client.create_instance.assert_not_awaited()
+        await _assert_no_session_row_for_user(session_factory, user_id)
+
+    async def test_unmintable_github_token_returns_503_with_no_side_effects(
+        self, session_factory: async_sessionmaker[AsyncSession]
+    ) -> None:
+        provider = AsyncMock()
+        provider.get_token.side_effect = GitHubTokenUnavailableError(
+            "github app token mint failed: status 502"
+        )
+        service, vastai_client, cf_client = _make_service(
+            session_factory,
+            github_auth_mode=GitHubAuthMode.app,
+            github_token_provider=provider,
+        )
+        user_id = uuid4()
+
+        with pytest.raises(ProvisioningUnavailableError, match="GitHub credential unavailable"):
             await service.start_session(
                 user_id=user_id,
                 product_id="vex",

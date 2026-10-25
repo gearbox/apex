@@ -153,7 +153,7 @@ def _make_bundle_dir(
 
     svc = BundleIndexService(
         repo_url="https://github.com/gearbox/ai-bundles.git",
-        github_token="",
+        token_provider=None,
         branch="master",
         sync_interval_minutes=15,
         cache_dir=cache_dir,

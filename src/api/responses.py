@@ -10,9 +10,14 @@ from src.api.schemas.errors import ErrorEnvelope
 
 
 def error_response(
-    error: str, message: str, status_code: int, detail: dict[str, Any] | None = None
+    error: str,
+    message: str,
+    status_code: int,
+    detail: dict[str, Any] | None = None,
+    headers: dict[str, str] | None = None,
 ) -> Response[Any]:
     return Response(
         content=ErrorEnvelope(error=error, message=message, status_code=status_code, detail=detail),
         status_code=status_code,
+        headers=headers,
     )

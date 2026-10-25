@@ -30,6 +30,10 @@ from src.api.services.event_bus import EventBus
 from src.api.services.feedback import FeedbackService
 from src.api.services.generation.provider_billing_policy import ProviderBillingPolicyRegistry
 from src.api.services.generation.service import GenerationService
+from src.api.services.github.token_provider import (
+    GitHubTokenProvider,
+    build_github_token_provider,
+)
 from src.api.services.gpu_session.billing_reconciler_worker import BillingReconcilerWorker
 from src.api.services.gpu_session.cleanup_worker import OrphanedTunnelCleanupWorker
 from src.api.services.gpu_session.command_service import GpuSessionCommandService
@@ -39,6 +43,7 @@ from src.api.services.gpu_session.deployment_orchestration_worker import (
     DeploymentOrchestrationWorker,
 )
 from src.api.services.gpu_session.deployment_service import GpuSessionDeploymentService
+from src.api.services.gpu_session.github_token_service import GpuSessionGitHubTokenService
 from src.api.services.gpu_session.node_cooldown import (
     NodeCooldownStore,
     NullNodeCooldownStore,
@@ -202,6 +207,12 @@ class ServiceContainer:
     # (not GPU-stack-gated; the claim endpoint must 204 cleanly even without Vast.ai/CF)
     operation_event_service: OperationEventService | None = None
     gpu_session_command_service: GpuSessionCommandService | None = None
+    # GitHub credential for the private repos: ONE provider per process (its token cache is
+    # the point). Built whenever the DB is up — the node token endpoint answers 503, not
+    # 404, in a process without Vast.ai/CF. `None` provider = auth mode `none`.
+    github_http_client: httpx.AsyncClient | None = None
+    github_token_provider: GitHubTokenProvider | None = None
+    gpu_session_github_token_service: GpuSessionGitHubTokenService | None = None
     # Bootstrap script delivery + provisioner failure webhook (D3)
     provisioning_script_service: ProvisioningScriptService | None = None
     provisioning_webhook_service: ProvisioningWebhookService | None = None
@@ -662,6 +673,15 @@ def get_gpu_session_command_service() -> GpuSessionCommandService:
     return _services.gpu_session_command_service
 
 
+def get_gpu_session_github_token_service() -> GpuSessionGitHubTokenService:
+    """Provide GpuSessionGitHubTokenService singleton (503 if DB not initialized)."""
+    if _services.gpu_session_github_token_service is None:
+        from litestar.exceptions import ServiceUnavailableException
+
+        raise ServiceUnavailableException(detail="GitHub token service not available")
+    return _services.gpu_session_github_token_service
+
+
 def get_provisioning_script_service() -> ProvisioningScriptService:
     """Provide ProvisioningScriptService singleton (503 if GPU stack not configured)."""
     if _services.provisioning_script_service is None:
@@ -956,6 +976,18 @@ async def init_services(settings: Settings) -> JWTService:
         settings=settings,
     )
     logger.info("gpu_session_command_service.initialized")
+
+    # One GitHub credential provider per process (App installation token, static PAT, or
+    # none). Shared by the bundle index, the bootstrap-script fetch, the session start /
+    # retry env and the node token endpoint — a per-consumer provider would defeat the cache.
+    _services.github_http_client = httpx.AsyncClient(timeout=10.0)
+    _services.github_token_provider = build_github_token_provider(
+        settings, http_client=_services.github_http_client
+    )
+    _services.gpu_session_github_token_service = GpuSessionGitHubTokenService(
+        provider=_services.github_token_provider
+    )
+    logger.info("github_token_provider.initialized", mode=settings.github_auth_mode.value)
 
     # Initialize Redis (required for pub/sub and rate limiting). Three pools —
     # see src/core/redis.py module docstring: the shared pool serves
@@ -1370,7 +1402,7 @@ async def init_services(settings: Settings) -> JWTService:
         )
         _services.bundle_index = BundleIndexService(
             repo_url=settings.ai_bundles_repo_url,
-            github_token=settings.github_content_token,
+            token_provider=_services.github_token_provider,
             branch=settings.ai_bundles_branch,
             sync_interval_minutes=settings.ai_bundles_sync_interval_minutes,
             default_comfyui_port=settings.comfyui_port,
@@ -1407,6 +1439,7 @@ async def init_services(settings: Settings) -> JWTService:
             redis=script_cache_redis,
             settings=settings,
             session_factory=_services.db_manager.session_factory,
+            token_provider=_services.github_token_provider,
         )
 
         _services.gpu_session_service = GpuSessionService(
@@ -1418,6 +1451,7 @@ async def init_services(settings: Settings) -> JWTService:
             billing_service=billing_service_for_worker,
             cooldown_store=cooldown_store,
             provisioning_script_service=_services.provisioning_script_service,
+            github_token_provider=_services.github_token_provider,
             event_bus=_services.event_bus,
             job_sweep_service=job_sweep_service,
             ops_event_bus=_services.ops_event_bus,
@@ -1450,6 +1484,7 @@ async def init_services(settings: Settings) -> JWTService:
                 settings=settings,
                 cooldown_store=cooldown_store,
                 provisioning_script_service=_services.provisioning_script_service,
+                github_token_provider=_services.github_token_provider,
                 billing_service=billing_service_for_worker,
                 event_bus=_services.event_bus,
                 job_sweep_service=job_sweep_service,
@@ -1835,6 +1870,10 @@ async def shutdown_services() -> None:
         await _services.gpu_session_http_client.aclose()
         logger.info("gpu_session_http_client.closed")
 
+    if _services.github_http_client is not None:
+        await _services.github_http_client.aclose()
+        logger.info("github_http_client.closed")
+
     if _services.aisha_job_poller is not None:
         await _services.aisha_job_poller.stop()
         logger.info("aisha_job_poller.stopped")
@@ -1993,6 +2032,10 @@ dependencies = {
     "operation_event_service": Provide(get_operation_event_service, sync_to_thread=False),
     # Internal command queue claim (node bearer auth validated in handler)
     "gpu_session_command_service": Provide(get_gpu_session_command_service, sync_to_thread=False),
+    # Internal GitHub token pull (node bearer auth validated in the service)
+    "gpu_session_github_token_service": Provide(
+        get_gpu_session_github_token_service, sync_to_thread=False
+    ),
     # Bootstrap script delivery + provisioner failure webhook (D3 — no guard,
     # per-session token validated in the service)
     "provisioning_script_service": Provide(get_provisioning_script_service, sync_to_thread=False),

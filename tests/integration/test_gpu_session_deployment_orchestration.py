@@ -86,6 +86,9 @@ class _StubSettings:
     """Just the attributes GpuSessionCommandService/DeploymentOrchestrationWorker read."""
 
     def __init__(self, *, restart_drain_timeout_seconds: int = 900) -> None:
+        self.github_content_token = ""
+        self.hf_token = ""
+        self.civitai_api_token = ""
         self.gpu_command_provision_timeout_seconds = 3600
         self.gpu_command_removal_timeout_seconds = 600
         self.gpu_command_restart_timeout_seconds = 300

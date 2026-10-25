@@ -209,7 +209,7 @@ class VastAIClient:
         Args:
             offer_id: Offer ID from search results.
             disk_gb: Disk allocation in GB.
-            env: Environment variables dict (includes port mappings as "-p X:X": "1").
+            env: Environment variables dict.
             template_hash_id: Vast.ai template hash. When set, image and onstart_cmd
                 are omitted (template provides them).
             image: Docker image (e.g. "vastai/comfy:latest"). Required when

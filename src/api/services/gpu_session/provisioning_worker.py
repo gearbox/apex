@@ -26,6 +26,7 @@ import httpx
 import msgspec
 import structlog
 
+from src.api.services.github.token_provider import GitHubTokenUnavailableError
 from src.api.services.jobs.sweep import JobSweepFailure
 from src.api.services.provisioning_script import ProvisioningScriptError
 from src.api.services.vastai.exceptions import InstanceNotFoundError
@@ -33,6 +34,7 @@ from src.core.enums import (
     LIVE_DEPLOYMENT_STATUSES,
     STOPPING_OR_TERMINAL_GPU_SESSION_STATUSES,
     DeploymentStatus,
+    GitHubAuthMode,
     GpuSessionStatus,
     OperationKind,
     OperationStatus,
@@ -62,6 +64,7 @@ if TYPE_CHECKING:
     from src.api.services.bundle_index import BundleIndexService
     from src.api.services.cloudflare.client import CloudflareTunnelClient
     from src.api.services.event_bus import EventBus
+    from src.api.services.github.token_provider import GitHubTokenProvider
     from src.api.services.gpu_session.node_cooldown import NodeCooldownStore
     from src.api.services.jobs.sweep import JobSweepService
     from src.api.services.ops_event_bus import OpsEventBus
@@ -204,6 +207,7 @@ class GpuProvisioningWorker(PeriodicWorker):
         settings: Settings,
         cooldown_store: NodeCooldownStore,
         provisioning_script_service: ProvisioningScriptService,
+        github_token_provider: GitHubTokenProvider | None,
         billing_service: BillingService | None = None,
         event_bus: EventBus | None = None,
         job_sweep_service: JobSweepService | None = None,
@@ -226,6 +230,9 @@ class GpuProvisioningWorker(PeriodicWorker):
         self._settings = settings
         self._cooldown = cooldown_store
         self._provisioning_script = provisioning_script_service
+        # None (mode `none`) fails closed: a retry refuses to create a node without a GitHub
+        # credential. Required, so a forgotten wiring fails at construction.
+        self._github_tokens = github_token_provider
         self._billing_service = billing_service
         self._event_bus = event_bus
         self._job_sweep = job_sweep_service
@@ -1037,13 +1044,16 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "retry_get_token_failed")
             return
 
-        if not self._settings.github_content_token:
+        # Defence in depth: Settings already refuses to boot a configured GPU stack without
+        # a GitHub credential, so this normally cannot fire.
+        github_tokens = self._github_tokens
+        if self._settings.github_auth_mode is GitHubAuthMode.none or github_tokens is None:
             logger.error(
                 "gpu_session.provision.retry_config_error",
                 session_id=str(session.id),
-                reason="github_content_token is empty; CLI clone will fail",
+                reason="no GitHub credential configured; CLI clone will fail",
             )
-            await self._mark_failed(session, "misconfigured: github_content_token is empty")
+            await self._mark_failed(session, "misconfigured: no GitHub credential configured")
             return
         if not self._settings.provisioning_script_ref:
             logger.error(
@@ -1052,6 +1062,18 @@ class GpuProvisioningWorker(PeriodicWorker):
                 reason="provisioning_script_ref is empty",
             )
             await self._mark_failed(session, "misconfigured: provisioning_script_ref is empty")
+            return
+
+        # Before the new instance exists: a GitHub outage must fail the retry cleanly, not
+        # leave a billable node that cannot clone.
+        try:
+            github_token = await github_tokens.get_token()
+        except GitHubTokenUnavailableError:
+            logger.exception(
+                "gpu_session.provision.retry_github_token_unavailable",
+                session_id=str(session.id),
+            )
+            await self._mark_failed(session, "retry_github_token_unavailable")
             return
 
         # Re-resolve the bootstrap script (D6) — near-certain cache hit since the ref
@@ -1094,6 +1116,7 @@ class GpuProvisioningWorker(PeriodicWorker):
                 tunnel_token=tunnel_token,
                 callback_token=fresh_callback_token,
                 provision_script_sha256=resolved_script.sha256,
+                github_token=github_token.value,
             )
         except ValueError:
             logger.exception(

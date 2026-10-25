@@ -14,6 +14,8 @@ if TYPE_CHECKING:
     from pathlib import Path
 
 _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
+# A configured GPU stack must carry a GitHub credential (Settings fails startup otherwise).
+_TEST_PAT = "ghp_test_provisioning_config"
 
 
 def _base_settings(**overrides: object) -> Settings:
@@ -127,6 +129,7 @@ class TestProvisioningScriptSettings:
 
     def test_ref_custom_value(self) -> None:
         s = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
             provisioning_script_ref="v1.2.3",
             apex_callback_url="https://apex.example.test",
         )
@@ -151,10 +154,14 @@ class TestProvisioningScriptSettings:
 
     def test_callback_url_is_normalized_to_an_origin(self) -> None:
         with_slash = _base_settings(
-            provisioning_script_ref="v1.2.3", apex_callback_url="https://apex.example.test/"
+            provisioning_script_ref="v1.2.3",
+            apex_callback_url="https://apex.example.test/",
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
         )
         without_slash = _base_settings(
-            provisioning_script_ref="v1.2.3", apex_callback_url="https://apex.example.test"
+            provisioning_script_ref="v1.2.3",
+            apex_callback_url="https://apex.example.test",
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
         )
         assert with_slash.apex_callback_url == without_slash.apex_callback_url
 
@@ -168,7 +175,9 @@ class TestProvisioningScriptSettings:
 
     def test_callback_url_alone_is_still_normalized_with_no_script_ref(self) -> None:
         s = _base_settings(
-            provisioning_script_ref="", apex_callback_url="https://apex.example.test/"
+            provisioning_script_ref="",
+            apex_callback_url="https://apex.example.test/",
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
         )
         assert s.apex_callback_url == "https://apex.example.test"
 
@@ -193,6 +202,7 @@ class TestProvisioningScriptSettings:
 
     def test_staging_accepts_its_explicit_dev_ref(self) -> None:
         settings = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
             environment="staging",
             provisioning_script_ref="main",
             provisioning_script_dev_ref="main",
@@ -227,6 +237,7 @@ class TestProvisioningScriptSettings:
 
     def test_dev_ref_slash_free_branch_name_is_accepted(self) -> None:
         s = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
             environment="staging",
             provisioning_script_ref="bootstrap-test",
             provisioning_script_dev_ref="bootstrap-test",
@@ -246,7 +257,9 @@ class TestProvisioningScriptSettings:
         would silently change what "default" means for every test in this class."""
         dotenv = tmp_path / ".env"
         dotenv.write_text(
-            "PROVISIONING_SCRIPT_REF=v1.2.3\nAPEX_CALLBACK_URL=https://from-dotenv.test\n"
+            "PROVISIONING_SCRIPT_REF=v1.2.3\n"
+            "APEX_CALLBACK_URL=https://from-dotenv.test\n"
+            f"AI_BUNDLES_GITHUB_TOKEN={_TEST_PAT}\n"
         )
 
         # A bare Settings() honoring that file would resolve non-empty here...

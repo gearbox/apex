@@ -15,6 +15,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
 import pytest
+import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.services.gpu_session.command_payload import (
@@ -35,9 +36,13 @@ _SESSION_REPO = "src.api.services.gpu_session.command_service.GpuSessionReposito
 _OPERATION_REPO = "src.api.services.gpu_session.command_service.GpuSessionOperationRepository"
 _COMMAND_REPO = "src.api.services.gpu_session.command_service.GpuSessionCommandRepository"
 _TOKEN = "callback-token"
+_APP_TOKEN = "ghs_RotatingAppInstallationToken0123456789ab"
 
 
 class _StubSettings:
+    github_content_token = ""
+    hf_token = ""
+    civitai_api_token = ""
     gpu_command_provision_timeout_seconds = 3600
     gpu_command_removal_timeout_seconds = 600
     gpu_command_restart_timeout_seconds = 300
@@ -403,6 +408,73 @@ class TestClaim:
             )
 
         assert result == (204, None)
+
+    async def test_agent_id_is_redacted_before_the_repository_call_and_the_claimed_log(
+        self,
+    ) -> None:
+        session_id = uuid4()
+        service = _make_service()
+        claimed = GpuSessionCommand(
+            id=uuid4(),
+            session_id=session_id,
+            product_id="vex",
+            operation_id=uuid4(),
+            kind="bundle_provision",
+            payload={"bundle": "wan_2.2_i2v", "mode": "full", "verify": True},
+            status=CommandStatus.claimed,
+            agent_id=f"{session_id}:[REDACTED]",
+            claimed_at=datetime.now(UTC),
+        )
+
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+            structlog.testing.capture_logs() as logs,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id)
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.claim.return_value = claimed
+
+            await service.claim(
+                session_id=session_id,
+                bearer_token=_TOKEN,
+                agent_id=f"{session_id}:{_APP_TOKEN}",
+            )
+
+        assert command_repo.claim.await_args.args[1] == f"{session_id}:[REDACTED]"
+        assert [entry["agent_id"] for entry in logs if "agent_id" in entry] == [
+            f"{session_id}:[REDACTED]"
+        ]
+        assert all(_APP_TOKEN not in str(entry) for entry in logs)
+
+    async def test_agent_id_is_redacted_in_the_claim_raced_log(self) -> None:
+        session_id = uuid4()
+        service = _make_service()
+        with (
+            patch(_SESSION_REPO) as SessionRepo,
+            patch(_COMMAND_REPO) as CommandRepo,
+            structlog.testing.capture_logs() as logs,
+        ):
+            session_repo = AsyncMock()
+            SessionRepo.return_value = session_repo
+            session_repo.get_by_id.return_value = _gpu_session(session_id=session_id)
+            command_repo = AsyncMock()
+            CommandRepo.return_value = command_repo
+            command_repo.claim.side_effect = IntegrityError("UPDATE", {}, Exception("unique"))
+
+            result = await service.claim(
+                session_id=session_id,
+                bearer_token=_TOKEN,
+                agent_id=f"{session_id}:{_APP_TOKEN}",
+            )
+
+        assert result == (204, None)
+        raced = [entry for entry in logs if entry["event"] == "gpu_session.command.claim_raced"]
+        assert [entry["agent_id"] for entry in raced] == [f"{session_id}:[REDACTED]"]
+        assert all(_APP_TOKEN not in str(entry) for entry in logs)
 
     async def test_successful_claim_returns_200_and_envelope(self) -> None:
         session_id = uuid4()
