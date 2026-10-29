@@ -80,7 +80,7 @@ class FeedbackReportRepository:
         return result.tuples().all()
 
     @staticmethod
-    def _select_with_email(report_id: UUID, product_id: str) -> Select[tuple[FeedbackReport, str]]:
+    def _select_with_email(report_id: UUID, product_id: str) -> Select[FeedbackReport, str]:
         """One report + the reporter's email (``None`` once the user is purged).
 
         Typed ``str`` because ``User.email`` is non-null; the outer join yields

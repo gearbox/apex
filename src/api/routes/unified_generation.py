@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Annotated
 from uuid import UUID
 
@@ -52,7 +51,7 @@ from src.api.services.idempotency import IdempotencyReplayResult, IdempotencySer
 from src.core.product import ProductConfig
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Awaitable, Callable, Sequence
 
 logger = structlog.get_logger(__name__)
 

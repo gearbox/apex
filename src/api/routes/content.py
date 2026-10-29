@@ -37,7 +37,6 @@ media send `private, no-store` so an admin device never keeps them in HTTP cache
 from __future__ import annotations
 
 import sys
-from collections.abc import Awaitable, Callable
 from typing import TYPE_CHECKING, Any
 from uuid import UUID
 
@@ -81,7 +80,7 @@ from src.core.library_ref import LibraryAssetSource
 from src.db.models import User
 
 if TYPE_CHECKING:
-    from collections.abc import AsyncIterator, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
 logger = structlog.get_logger(__name__)
 
