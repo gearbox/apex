@@ -121,7 +121,7 @@ Controls how Apex connects to the ComfyUI backend that executes generation workf
 
 ### Database (PostgreSQL)
 
-Apex uses SQLAlchemy 2.0 async via `asyncpg`. The URL **must** use the `postgresql+asyncpg://`
+Apex uses SQLAlchemy 2.1 async via `asyncpg`. The URL **must** use the `postgresql+asyncpg://`
 scheme — the synchronous `postgresql://` scheme will fail at startup.
 
 | Variable | Default | Type | Description |

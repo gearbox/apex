@@ -957,7 +957,7 @@ class TestMigration049:
                     )
                 )
                 # 'n' = ON DELETE SET NULL
-                assert dict(fks.tuples().all()) == {
+                assert dict(fks.all()) == {
                     "user_id": "n",
                     "job_id": "n",
                     "resolved_by": "n",

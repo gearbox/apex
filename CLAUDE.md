@@ -49,7 +49,7 @@ The backend serves two distinct products from the same codebase:
 - **Litestar 2.5+** — async web framework (NOT FastAPI)
 - **msgspec** — high-performance serialization for API schemas (NOT Pydantic for DTOs)
 - **Pydantic + pydantic-settings** — used ONLY for `Settings` / config loading
-- **SQLAlchemy 2.0+** — async ORM with `asyncpg` driver
+- **SQLAlchemy 2.1+** — async ORM with `asyncpg` driver
 - **PostgreSQL 16** — database (job queue with `FOR UPDATE SKIP LOCKED`)
 - **Alembic** — async migrations
 - **Cloudflare R2** — object storage via `aioboto3` (S3-compatible)
@@ -231,7 +231,7 @@ Routes (Controllers) → Services (Business Logic) → Repository (Data Access) 
   - ⚠️ Never name a Litestar handler argument `query`/`headers`/`cookies`/`state`/`scope`/`socket`/`body` — these are reserved kwargs; alias with `Parameter(query=...)` if the wire name must match.
 - **Services** (`src/api/services/`): Business logic. Injected via Litestar DI. Services receive repositories/other services as constructor args.
 - **Repository** (`src/db/repositories/`): `UserRepository`, `BillingRepository`, `JobRepository`, `OutputRepository`, `UserImageRepository` — all DB queries go here. Receive `AsyncSession`. Never imported directly by routes.
-- **Models** (`src/db/models/`): SQLAlchemy 2.0 declarative models using `Mapped[]` and `mapped_column()`.
+- **Models** (`src/db/models/`): SQLAlchemy 2.1 declarative models using `Mapped[]` and `mapped_column()`.
 - **In-flight jobs cannot be soft-deleted** (`JobRepository.soft_delete` is one conditional `UPDATE … WHERE status NOT IN (JobStatus.in_flight())` returning `SoftDeleteOutcome`; the route answers 409 `job_in_progress`). Enforced by `ck_generation_jobs_not_deleted_in_flight` (migration 054), so a lifecycle query's `is_deleted` filter can never hide a charged job. Retention only soft-deletes finished jobs.
 
 ### Dependency Injection
@@ -328,7 +328,11 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
 
 3. **Async everywhere** — all DB, HTTP, and storage operations are async.
 
-4. **SQLAlchemy 2.0 style** — `Mapped[]` type annotations, `mapped_column()`, async sessions via `asyncpg`.
+4. **SQLAlchemy 2.1 style** — `Mapped[]` type annotations, `mapped_column()`, async sessions via `asyncpg`.
+   - Multi-column statements are typed with the variadic form: `Select[FeedbackReport, str]`, not `Select[tuple[FeedbackReport, str]]`.
+   - Result rows are unpacked directly (`for a, b in result.all()`, `dict(result.all())`) — never `.tuples()`, which is deprecated in 2.1. Repositories still annotate returns as `tuple[...]` / `Sequence[tuple[...]]`; don't retype them to `Row[...]`.
+   - PostgreSQL `DISTINCT ON` uses `.ext(distinct_on(col))` from `sqlalchemy.dialects.postgresql`; `Select.distinct(col)` with an expression is deprecated. (`func.distinct(...)` inside an aggregate is the plain SQL `DISTINCT` and is unaffected.)
+   - `SADeprecationWarning` is an error under pytest (`filterwarnings` in `pyproject.toml`), so a deprecated call on any exercised path fails the suite.
 
 5. **Repository pattern** — `BaseRepository` provides shared `get`-with-optional-owner and cursor pagination helpers. Domain repositories (`JobRepository`, `OutputRepository`, `UserImageRepository`, `UserRepository`, `BillingRepository`, `LibraryRepository`, `LibraryProjectRepository`, `LibraryTagRepository`) wrap all DB queries. Injected with `AsyncSession`. All query methods must accept and filter by `product_id` where applicable.
 
@@ -539,7 +543,7 @@ Per-product dashboard config that has no code-side representation — must be se
 - **Line length**: 100
 - **Linter**: `ruff` (E, W, F, I, B, C4, UP, ARG, SIM, S, ISC, PIE, RET, ASYNC, DTZ, RUF, LOG, G, TRY, T20, TID, PLE, PLW, FA, PGH, TC, FLY, ANN)
 - **Formatter**: `ruff format`
-- **Type checker**: `mypy --strict` with SQLAlchemy plugin
+- **Type checker**: `mypy --strict` (no SQLAlchemy plugin; 2.1 types natively)
 - **Test runner**: `pytest` with `asyncio_mode = "auto"`
 - **Import order**: `ruff` isort with `known-first-party = ["src"]`
 - **Ruff target**: `py313

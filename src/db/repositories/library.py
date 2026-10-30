@@ -528,7 +528,7 @@ class LibraryRepository:
             )
             .group_by(GenerationOutput.job_id)
         )
-        return dict(result.tuples().all())
+        return dict(result.all())
 
     # -------------------------------------------------------------------------
     # Group detail + descendants

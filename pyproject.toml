@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.51.0"
+version = "0.51.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -13,7 +13,7 @@ dependencies = [
     "pydantic>=2.13.4",
     "pydantic-settings>=2.14.1",
     # Database
-    "sqlalchemy[asyncio]>=2.0.50",
+    "sqlalchemy[asyncio]>=2.1.6",
     "asyncpg>=0.31.0",
     "alembic>=1.18.4",
     # Storage
@@ -159,7 +159,6 @@ strict = true
 warn_return_any = true
 warn_unused_ignores = true
 plugins = [
-    "sqlalchemy.ext.mypy.plugin",
     "pydantic.mypy"
 ]
 
@@ -196,6 +195,9 @@ addopts = "-v --cov=src --cov-report=term-missing --cov-report=xml"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::pytest.PytestCollectionWarning",
+    # Later entries win: SQLAlchemy deprecations must fail the suite, not be
+    # silenced by the blanket DeprecationWarning ignore above.
+    "error::sqlalchemy.exc.SADeprecationWarning",
 ]
 markers = [
     "unit: fast unit tests (no database required)",
