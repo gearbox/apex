@@ -77,7 +77,7 @@ class FeedbackReportRepository:
                 limit + 1
             )
         )
-        return result.tuples().all()
+        return result.all()
 
     @staticmethod
     def _select_with_email(report_id: UUID, product_id: str) -> Select[FeedbackReport, str]:
@@ -100,7 +100,7 @@ class FeedbackReportRepository:
     ) -> tuple[FeedbackReport, str | None] | None:
         """Fetch one report with the reporter's email (``None`` once the user is purged)."""
         result = await self._session.execute(self._select_with_email(report_id, product_id))
-        return result.tuples().one_or_none()
+        return result.one_or_none()
 
     async def get_for_update(
         self, report_id: UUID, *, product_id: str
@@ -117,4 +117,4 @@ class FeedbackReportRepository:
             .with_for_update(of=FeedbackReport)
             .execution_options(populate_existing=True)
         )
-        return result.tuples().one_or_none()
+        return result.one_or_none()

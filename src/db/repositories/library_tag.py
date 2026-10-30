@@ -230,7 +230,7 @@ class LibraryTagRepository:
             )
             .group_by(LibraryAssetTag.tag_id)
         )
-        return dict(result.tuples().all())
+        return dict(result.all())
 
     # -------------------------------------------------------------------------
     # Asset-tag operations
@@ -282,7 +282,7 @@ class LibraryTagRepository:
         )
 
         grouped: dict[tuple[str, UUID], list[TagRef]] = defaultdict(list)
-        for asset_type, asset_id, tag_id, name in result.tuples().all():
+        for asset_type, asset_id, tag_id, name in result.all():
             grouped[(asset_type, asset_id)].append(TagRef(id=tag_id, name=name))
         return dict(grouped)
 

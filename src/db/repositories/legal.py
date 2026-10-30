@@ -5,6 +5,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 from sqlalchemy import select, text
+from sqlalchemy.dialects.postgresql import distinct_on
 
 from src.core.enums import LegalDocumentType
 from src.db.models.legal import LegalAcceptance
@@ -90,7 +91,7 @@ class LegalAcceptanceRepository:
                 LegalAcceptance.user_id == user_id,
                 LegalAcceptance.product_id == product_id,
             )
-            .distinct(LegalAcceptance.doc_type)
+            .ext(distinct_on(LegalAcceptance.doc_type))
             # seq is the serialized write order; timestamps are evidence only.
             .order_by(LegalAcceptance.doc_type, LegalAcceptance.seq.desc())
         )

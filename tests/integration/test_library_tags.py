@@ -1,7 +1,7 @@
 """Integration tests for Library Phase 3 tags against a real database.
 
 Covers: tag CRUD owner/product isolation + case-insensitive 409;
-replace-set semantics on patch_asset (add/remove/clear/idempotent re-set);
+batch_asset_counts (user_id, product_id) scoping; replace-set semantics on patch_asset (add/remove/clear/idempotent re-set);
 tag_id list filter; page hydration returns name-ordered tags; bulk
 add/remove all-or-nothing with a foreign tag_id; duplicate pairs collapse;
 delete_asset purges tag rows; retention sweep purges tag rows; tag CASCADE
@@ -30,7 +30,7 @@ from src.api.services.library import (
     LibraryValidationError,
 )
 from src.api.services.library_tag import LibraryTagNameConflictError, LibraryTagService
-from src.core.library_ref import LibraryAssetSource, format_asset_ref
+from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.product_registry import VEX_CONFIG
 from src.db.models.library import LibraryAssetTag
 from src.db.repositories.library_tag import LibraryTagRepository
@@ -189,6 +189,81 @@ class TestTagCrud:
             user.id, "vex", VEX_CONFIG, session=db_session, tag_id=tag.id
         )
         assert page.items == []
+
+
+class TestBatchAssetCountsScoping:
+    """``batch_asset_counts`` must be scoped to (user_id, product_id), like its
+    project counterpart. A join row belonging to another owner or product never
+    counts, even when it points at a tag the caller owns."""
+
+    async def test_excludes_foreign_owner_join_rows(
+        self,
+        tag_service: LibraryTagService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        owner = await make_user(email=f"tagcntowner-{uuid4().hex[:8]}@example.com")
+        other = await make_user(email=f"tagcntother-{uuid4().hex[:8]}@example.com")
+        tag = await tag_service.create(owner.id, "vex", "counted", session=db_session)
+
+        # Not something the service layer allows (tag ownership is checked
+        # before assignment), but the count must be scoped by (user_id,
+        # product_id) regardless of which rows exist.
+        repo = LibraryTagRepository(db_session)
+        owner_image = await make_user_image(user=owner)
+        other_images = [await make_user_image(user=other), await make_user_image(user=other)]
+        await repo.bulk_add_tags(
+            [AssetRef(LibraryAssetSource.UPLOAD, owner_image.id)],
+            [tag.id],
+            user_id=owner.id,
+            product_id="vex",
+        )
+        await repo.bulk_add_tags(
+            [AssetRef(LibraryAssetSource.UPLOAD, image.id) for image in other_images],
+            [tag.id],
+            user_id=other.id,
+            product_id="vex",
+        )
+
+        as_owner = await repo.batch_asset_counts([tag.id], user_id=owner.id, product_id="vex")
+        assert as_owner == {tag.id: 1}
+
+        as_other = await repo.batch_asset_counts([tag.id], user_id=other.id, product_id="vex")
+        assert as_other == {tag.id: 2}
+
+    async def test_excludes_foreign_product_join_rows(
+        self,
+        tag_service: LibraryTagService,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        make_user_image: Callable[..., Coroutine[Any, Any, Any]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"tagcntprod-{uuid4().hex[:8]}@example.com")
+        tag = await tag_service.create(user.id, "vex", "cross-product-count", session=db_session)
+        image = await make_user_image(user=user, product_id="synthara")
+
+        repo = LibraryTagRepository(db_session)
+        await repo.bulk_add_tags(
+            [AssetRef(LibraryAssetSource.UPLOAD, image.id)],
+            [tag.id],
+            user_id=user.id,
+            product_id="synthara",
+        )
+
+        assert await repo.batch_asset_counts([tag.id], user_id=user.id, product_id="vex") == {}
+        assert await repo.batch_asset_counts([tag.id], user_id=user.id, product_id="synthara") == {
+            tag.id: 1
+        }
+
+    async def test_empty_input_returns_empty_mapping(
+        self,
+        make_user: Callable[..., Coroutine[Any, Any, User]],
+        db_session: AsyncSession,
+    ) -> None:
+        user = await make_user(email=f"tagcntempty-{uuid4().hex[:8]}@example.com")
+        repo = LibraryTagRepository(db_session)
+        assert await repo.batch_asset_counts([], user_id=user.id, product_id="vex") == {}
 
 
 class TestReplaceSetSemantics:

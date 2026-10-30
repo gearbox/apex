@@ -23,6 +23,70 @@ if TYPE_CHECKING:
 _POLL_INTERVAL_SECONDS = 0.01
 
 
+async def wait_for_signal(
+    signal: asyncio.Event,
+    producer: asyncio.Task[object],
+    *,
+    timeout: float = 5.0,  # noqa: ASYNC109 — waits with a deadline and fails the test
+) -> None:
+    """Wait for ``signal``; fail fast with the producer's own exception if it dies first.
+
+    A bare ``await signal.wait()`` hangs forever when the task meant to set the
+    event raises first. ``asyncio.wait_for`` would bound the wait but report only
+    ``TimeoutError``, hiding why the producer never signalled.
+
+    Args:
+        signal: Event the producer sets once it reaches the handshake point.
+        producer: Task expected to set ``signal``.
+        timeout: Seconds before the test fails.
+
+    Raises:
+        AssertionError: ``producer`` finished without setting ``signal``.
+        TimeoutError: Neither the signal nor the producer's completion arrived in time.
+    """
+    waiter = asyncio.ensure_future(signal.wait())
+    try:
+        done, _ = await asyncio.wait(
+            {waiter, producer}, timeout=timeout, return_when=asyncio.FIRST_COMPLETED
+        )
+    finally:
+        waiter.cancel()
+    if waiter in done:
+        return
+    if producer in done:
+        producer.result()  # re-raises the real failure
+        raise AssertionError("producer finished without signalling")
+    raise TimeoutError(f"signal not set within {timeout}s")
+
+
+async def wait_for_start_signal(
+    signal: asyncio.Event,
+    *,
+    timeout: float = 5.0,  # noqa: ASYNC109 — waits with a deadline and fails the test
+) -> None:
+    """Bound a racer's ``start_after`` wait so a producer that never signals cannot hang the test.
+
+    For use *inside* the second racer of an ``asyncio.gather`` pair, where the
+    producer's task is not at hand: a producer that raises already fails the
+    gather, but one that returns without taking the lock would leave this
+    racer waiting forever.
+
+    Args:
+        signal: Event the first racer sets once it holds the lock.
+        timeout: Seconds before the test fails.
+
+    Raises:
+        TimeoutError: ``signal`` was not set in time.
+    """
+    try:
+        await asyncio.wait_for(signal.wait(), timeout=timeout)
+    except TimeoutError:
+        raise TimeoutError(
+            f"start signal not set within {timeout}s: the first racer finished "
+            "without reaching the handshake point"
+        ) from None
+
+
 async def wait_for_advisory_lock_waiter(
     engine: AsyncEngine,
     *,

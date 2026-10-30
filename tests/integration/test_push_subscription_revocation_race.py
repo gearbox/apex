@@ -50,6 +50,7 @@ from src.db.models.push_subscription import PushSubscription
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
+from tests.integration.pg_locks import wait_for_start_signal
 from tests.legal_support import make_legal_acceptance_service
 from tests.revocation_support import make_session_termination
 
@@ -178,7 +179,7 @@ async def _run_create_subscription(
     start_after: asyncio.Event | None,
 ) -> dict[str, object]:
     if start_after is not None:
-        await start_after.wait()
+        await wait_for_start_signal(start_after)
 
     token, _ = jwt_service.create_access_token(user_id, product_id=PRODUCT_ID)
     token_payload = jwt_service.decode_access_token(token)
@@ -215,7 +216,7 @@ async def _run_bulk_logout_all(
     start_after: asyncio.Event | None,
 ) -> None:
     if start_after is not None:
-        await start_after.wait()
+        await wait_for_start_signal(start_after)
 
     async with (
         AsyncSession(bind=engine, expire_on_commit=False) as session,

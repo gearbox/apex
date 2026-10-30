@@ -52,6 +52,7 @@ from src.core.uid import new_id
 from src.db.models.admin import AdminAuditLog, AdminPermissionGrant
 from src.db.models.user import RefreshToken, User
 from src.db.repositories.user import UserRepository
+from tests.integration.pg_locks import wait_for_start_signal
 from tests.legal_support import make_legal_acceptance_service
 from tests.revocation_support import make_session_termination
 
@@ -224,7 +225,7 @@ async def _run_grant_role(
     token_payload: TokenPayload | None = None,
 ) -> dict[str, object]:
     if start_after is not None:
-        await start_after.wait()
+        await wait_for_start_signal(start_after)
 
     if token_payload is None:
         token, _ = jwt_service.create_access_token(superadmin_id, product_id=PRODUCT_ID)
@@ -269,7 +270,7 @@ async def _run_single_device_logout(
     revocation the grant's re-check must actually observe.
     """
     if start_after is not None:
-        await start_after.wait()
+        await wait_for_start_signal(start_after)
 
     request = MagicMock()
     request.headers.get.return_value = f"Bearer {access_token}"
@@ -313,7 +314,7 @@ async def _run_bulk_logout_all(
     start_after: asyncio.Event | None,
 ) -> None:
     if start_after is not None:
-        await start_after.wait()
+        await wait_for_start_signal(start_after)
 
     async with (
         AsyncSession(bind=engine, expire_on_commit=False) as session,

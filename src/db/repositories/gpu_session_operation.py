@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, cast
 
 from sqlalchemy import func, or_, select, update
+from sqlalchemy.dialects.postgresql import distinct_on
 
 from src.core.enums import TERMINAL_OPERATION_STATUSES, OperationKind, OperationStatus
 from src.db.models.gpu_session import GpuSession
@@ -132,16 +133,14 @@ class GpuSessionOperationRepository:
                 GpuSessionDeployment.session_id == session_id,
                 GpuSessionOperation.session_id == session_id,
             )
-            .distinct(GpuSessionDeployment.id)
+            .ext(distinct_on(GpuSessionDeployment.id))
             .order_by(
                 GpuSessionDeployment.id,
                 GpuSessionOperation.created_at.desc(),
                 GpuSessionOperation.id.desc(),
             )
         )
-        operations_by_deployment: dict[UUID, GpuSessionOperation] = {}
-        for deployment_id, operation in result.all():
-            operations_by_deployment[deployment_id] = operation
+        operations_by_deployment: dict[UUID, GpuSessionOperation] = dict(result.all())
         return operations_by_deployment
 
     async def latest_for_deployment_and_kind(

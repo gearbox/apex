@@ -42,7 +42,7 @@ from src.db.models.user import User
 from src.db.repositories.legal import LegalAcceptanceRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_identity import UserIdentityRepository
-from tests.integration.pg_locks import wait_for_advisory_lock_waiter
+from tests.integration.pg_locks import wait_for_advisory_lock_waiter, wait_for_signal
 from tests.legal_support import accept_all_current, make_legal_document, make_legal_registry
 from tests.revocation_support import make_session_termination
 
@@ -111,7 +111,7 @@ async def _seqs(session: AsyncSession, user_id: UUID) -> dict[UUID, int]:
     result = await session.execute(
         select(LegalAcceptance.id, LegalAcceptance.seq).where(LegalAcceptance.user_id == user_id)
     )
-    return dict(result.tuples().all())
+    return dict(result.all())
 
 
 async def _consent_events(session: AsyncSession, user_id: UUID) -> list[tuple[LegalAction, int]]:
@@ -467,7 +467,7 @@ class TestIdempotentAcceptance:
 
         try:
             first_task = asyncio.create_task(submit(first=True))
-            await first_inserted.wait()
+            await wait_for_signal(first_inserted, first_task)
             second_task = asyncio.create_task(submit(first=False))
             if prove_second_blocks:
                 await wait_for_advisory_lock_waiter(db_engine)
@@ -805,7 +805,7 @@ class TestAcceptanceVsClosure:
 
         try:
             closure_task = asyncio.create_task(close_account())
-            await closure_locked.wait()
+            await wait_for_signal(closure_locked, closure_task)
             accept_task = asyncio.create_task(
                 _accept_committed(db_engine, registry, user.id, documents)
             )
@@ -865,7 +865,7 @@ class TestAcceptanceVsClosure:
 
         try:
             accept_task = asyncio.create_task(accept())
-            await accepted.wait()
+            await wait_for_signal(accepted, accept_task)
             closure_task = asyncio.create_task(close_account())
             await wait_for_advisory_lock_waiter(db_engine)
             release_acceptance.set()

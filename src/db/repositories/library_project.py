@@ -188,7 +188,7 @@ class LibraryProjectRepository:
         )
         # The WHERE clause above already excludes NULL project_id rows; the
         # `if pid is not None` here is only to satisfy mypy's column typing.
-        return {pid: count for pid, count in result.tuples().all() if pid is not None}
+        return {pid: count for pid, count in result.all() if pid is not None}
 
     async def batch_names(
         self,
@@ -217,4 +217,4 @@ class LibraryProjectRepository:
                 LibraryProject.product_id == product_id,
             )
         )
-        return dict(result.tuples().all())
+        return dict(result.all())
