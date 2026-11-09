@@ -237,9 +237,11 @@ the full design):
 **GitHub App installation tokens are covered by a pattern pass, not by Layer 1.** They
 rotate hourly and are minted by whichever apex process a node called, so no static
 known-secret set can hold them. `redact_secrets` therefore also masks GitHub's token
-formats (`gh[pousr]_…` and `github_pat_…`, 20+ token characters, on word boundaries)
-wherever they appear in free text, after Layer 1 and before truncation. It is a fixed-format
-scan (no regex, linear time), so unlike Layers 2/3 it has no key-name heuristics to miss.
+formats (`gh[pousr]_` / `github_pat_` followed by 20+ characters from `[A-Za-z0-9_.-]`, which
+covers stateless `ghs_<APPID>_<JWT>` installation tokens, about 520 chars, with a word
+boundary before the prefix) wherever they appear in free text, after Layer 1 and before
+truncation. It is a fixed-format scan (no regex, linear time), so unlike Layers 2/3 it has no
+key-name heuristics to miss.
 
 Node-supplied identifiers (`event_id`, `target.bundle_version`, the claim's `agent_id`) go
 through `redact_identifier`: exact known secrets plus the GitHub token pass, with no tokenizer
