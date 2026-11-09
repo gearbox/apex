@@ -14,6 +14,7 @@ from datetime import UTC, datetime
 from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
 
+import pytest
 from sqlalchemy import delete
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -26,6 +27,7 @@ from src.db.models.gpu_session import GpuSession
 from src.db.models.user import User
 from src.db.repositories.gpu_session_command import GpuSessionCommandRepository
 from src.db.repositories.gpu_session_operation import GpuSessionOperationRepository
+from tests.github_token_support import stateless_ghs
 
 _CALLBACK_TOKEN = "operation-redaction-token"
 _LEAKED_SECRET = "leak-me-this-callback-token"
@@ -158,9 +160,24 @@ async def test_terminal_failure_event_with_a_tokenized_url_is_redacted_on_disk(
 
 
 _ROTATING_APP_TOKEN = "ghs_RotatingAppInstallationToken0123456789ab"
+# Stateless installation tokens (the default GitHub mints now) are ~520 characters.
+_STATELESS_APP_TOKEN = stateless_ghs()
+_APP_TOKENS = [
+    pytest.param(_ROTATING_APP_TOKEN, id="legacy-installation-token"),
+    pytest.param(_STATELESS_APP_TOKEN, id="stateless-installation-token"),
+]
 
 
-def _github_token_event(*, session_id, operation_id) -> OperationEventBody:  # type: ignore[no-untyped-def]
+def _assert_token_absent(token: str, *persisted: object) -> None:
+    """Neither the token nor any 8-character fragment of it may appear in any value."""
+    fragments = [token[i : i + 8] for i in range(len(token) - 7)]
+    for value in persisted:
+        text = str(value)
+        assert token not in text
+        assert [fragment for fragment in fragments if fragment in text] == []
+
+
+def _github_token_event(*, session_id, operation_id, token: str) -> OperationEventBody:  # type: ignore[no-untyped-def]
     now = datetime.now(UTC)
     return OperationEventBody(
         schema_version=2,
@@ -177,16 +194,18 @@ def _github_token_event(*, session_id, operation_id) -> OperationEventBody:  # t
         ts=now,
         elapsed_seconds=3.0,
         phase_elapsed_seconds=None,
-        progress={"work": {"last_line": f"remote: Invalid credentials for {_ROTATING_APP_TOKEN}"}},
+        progress={"work": {"last_line": f"remote: Invalid credentials for {token}"}},
         plan=None,
-        summary={"final_error": f"git failed with {_ROTATING_APP_TOKEN} in the remote url"},
-        message=f"git clone failed: fatal: bad credentials {_ROTATING_APP_TOKEN} for repo",
-        error=f"clone aborted ({_ROTATING_APP_TOKEN})",
+        summary={"final_error": f"git failed with {token} in the remote url"},
+        message=f"git clone failed: fatal: bad credentials {token} for repo",
+        error=f"clone aborted ({token})",
     )
 
 
+@pytest.mark.parametrize("token", _APP_TOKENS)
 async def test_a_github_app_token_in_node_text_is_redacted_on_disk(
     db_engine,  # type: ignore[no-untyped-def]
+    token: str,
 ) -> None:
     """A rotating App installation token is minted per process, so it cannot be in the
     static known-secret set; the GitHub token pattern pass must still keep it off disk
@@ -250,7 +269,9 @@ async def test_a_github_app_token_in_node_text_is_redacted_on_disk(
                 session_id=gpu_session.id,
                 operation_id=operation_id,
                 request=request,
-                data=_github_token_event(session_id=gpu_session.id, operation_id=operation_id),
+                data=_github_token_event(
+                    session_id=gpu_session.id, operation_id=operation_id, token=token
+                ),
                 operation_event_service=receiver,
                 session=db,
                 event_bus=event_bus,
@@ -261,17 +282,19 @@ async def test_a_github_app_token_in_node_text_is_redacted_on_disk(
             operation = await GpuSessionOperationRepository(db).get(operation_id)
             assert operation is not None
             assert "[REDACTED]" in (operation.message or "")
-            assert _ROTATING_APP_TOKEN not in (operation.message or "")
-            assert _ROTATING_APP_TOKEN not in (operation.error or "")
-            assert _ROTATING_APP_TOKEN not in str(operation.progress)
-            assert _ROTATING_APP_TOKEN not in str(operation.summary)
-
             command = await GpuSessionCommandRepository(db).get_by_operation(operation_id)
             assert command is not None
-            assert _ROTATING_APP_TOKEN not in (command.error or "")
+            _assert_token_absent(
+                token,
+                operation.message or "",
+                operation.error or "",
+                operation.progress,
+                operation.summary,
+                command.error or "",
+            )
 
         event_bus.publish.assert_awaited_once()
-        assert _ROTATING_APP_TOKEN not in str(event_bus.publish.await_args.kwargs["payload"])
+        _assert_token_absent(token, event_bus.publish.await_args.kwargs["payload"])
     finally:
         async with session_factory() as db:
             await db.execute(delete(User).where(User.id == user.id))
@@ -350,8 +373,18 @@ def _settings_with(*, hf_token: str = "") -> MagicMock:
     return settings
 
 
+@pytest.mark.parametrize(
+    ("event_id", "stored_event_id"),
+    [
+        pytest.param(f"evt-{_ROTATING_APP_TOKEN}", "evt-[REDACTED]", id="legacy-embedded"),
+        # ~520 characters in, `[REDACTED]` out: only the redacted value fits String(64).
+        pytest.param(_STATELESS_APP_TOKEN, "[REDACTED]", id="stateless-standalone"),
+    ],
+)
 async def test_a_github_app_token_in_event_id_is_redacted_and_still_deduplicates(
     db_engine,  # type: ignore[no-untyped-def]
+    event_id: str,
+    stored_event_id: str,
 ) -> None:
     """F1, review r2: ``event_id`` is node-supplied and persisted verbatim as
     ``last_event_id`` (String(64)), and a 40-char installation token fits. It must be
@@ -359,7 +392,6 @@ async def test_a_github_app_token_in_event_id_is_redacted_and_still_deduplicates
     event must still classify as a ``duplicate``, not a ``sequence_collision``."""
     session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
     user, gpu_session, operation_id = await _seed_operation(session_factory)
-    event_id = f"evt-{_ROTATING_APP_TOKEN}"
     receiver = OperationEventService(settings=_settings_with())
 
     try:
@@ -383,8 +415,7 @@ async def test_a_github_app_token_in_event_id_is_redacted_and_still_deduplicates
         async with session_factory() as db:
             operation = await GpuSessionOperationRepository(db).get(operation_id)
             assert operation is not None
-            assert _ROTATING_APP_TOKEN not in (operation.last_event_id or "")
-            assert "[REDACTED]" in (operation.last_event_id or "")
+            assert operation.last_event_id == stored_event_id
     finally:
         async with session_factory() as db:
             await db.execute(delete(User).where(User.id == user.id))

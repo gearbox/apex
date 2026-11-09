@@ -20,6 +20,7 @@ from src.api.utils.redaction import (
     redact_secrets_mapping,
 )
 from src.core.enums import GitHubAuthMode
+from tests.github_token_support import stateless_ghs, stateless_ghs_jwt
 from tests.unit.helpers import hermetic_settings
 
 # ---------------------------------------------------------------------------
@@ -868,7 +869,9 @@ _GITHUB_TOKENS = [
     pytest.param(f"gho_{_BODY_36}", id="oauth-gho"),
     pytest.param(f"ghu_{_BODY_36}", id="user-to-server-ghu"),
     pytest.param(f"ghr_{_BODY_36}", id="refresh-ghr"),
-    pytest.param(f"github_pat_{'11ABCDEFG0aBcDeFgHiJkL'}_{'x' * 59}", id="fine-grained-pat"),
+    pytest.param(
+        f"github_pat_11ABCDEFG0aBcDeFgHiJkL_{'x' * 59}", id="fine-grained-pat"
+    ),
 ]
 
 
@@ -913,13 +916,20 @@ class TestGitHubTokenPatternPass:
         assert redact_secrets("ghs_" + "a" * 19, max_length=500) == "ghs_" + "a" * 19
 
     def test_does_not_mask_inside_a_longer_identifier(self) -> None:
-        """A token must start and end on a word boundary — `my_ghs_...` is a name."""
+        """A token must start on a word boundary — `my_ghs_...` is a name."""
         text = "my_ghs_" + "a" * 30
         assert redact_secrets(text, max_length=500) == text
 
-    def test_runs_before_truncation(self) -> None:
+    @pytest.mark.parametrize(
+        "token",
+        [
+            pytest.param(f"ghs_{_BODY_36}", id="installation-ghs"),
+            pytest.param(stateless_ghs(), id="stateless-ghs"),
+        ],
+    )
+    def test_runs_before_truncation(self, token: str) -> None:
         """A token straddling the length cap must not leak its prefix."""
-        text = "x" * 9 + " ghs_" + _BODY_36
+        text = "x" * 9 + " " + token
 
         result = redact_secrets(text, max_length=20)
 
@@ -948,6 +958,114 @@ class TestGitHubTokenPatternPass:
         hostile = ("ghs_" + "a" * 19 + " ") * 20_000 + "g" * 100_000
 
         assert redact_secrets(hostile, max_length=10) == hostile[:10]
+
+
+# ---------------------------------------------------------------------------
+# Stateless installation tokens: `ghs_<APPID>_<JWT>`, ~520 chars, base64url segments joined
+# by two dots. The alphanumeric run after `ghs_` is just the App ID, so a body charset
+# without `_ - .` left the whole token unredacted (the 20-character floor was never met).
+# ---------------------------------------------------------------------------
+
+_STATELESS = stateless_ghs()
+_STATELESS_JWT = stateless_ghs_jwt()
+
+
+def _fragments(value: str, size: int = 8) -> list[str]:
+    """Every `size`-character window of `value`."""
+    return [value[i : i + size] for i in range(len(value) - size + 1)]
+
+
+def _assert_no_jwt_material(output: str) -> None:
+    """Neither the token nor any 8-character fragment of its JWT part may survive."""
+    assert _STATELESS not in output
+    assert "ghs_" not in output
+    leaked = [fragment for fragment in _fragments(_STATELESS_JWT) if fragment in output]
+    assert not leaked
+
+
+class TestStatelessInstallationToken:
+    def test_fixture_has_the_stateless_shape(self) -> None:
+        """Guards the fixture: if it drifts off-format the tests below prove nothing."""
+        assert 500 <= len(_STATELESS) <= 560
+        assert _STATELESS.startswith("ghs_1234567_")
+        assert _STATELESS_JWT.count(".") == 2
+        assert _STATELESS.isascii()
+        # Both non-alphanumeric base64url characters appear inside the JWT part.
+        assert {"-", "_"} <= set(_STATELESS_JWT)
+
+    @pytest.mark.parametrize(
+        ("template", "expected"),
+        [
+            pytest.param("{tok}", "[REDACTED]", id="alone"),
+            pytest.param('"{tok}"', '"[REDACTED]"', id="quoted"),
+            pytest.param('{"detail":"{tok}"}', '{"detail":"[REDACTED]"}', id="json"),
+            pytest.param("key={tok}", "key=[REDACTED]", id="after-key"),
+            pytest.param(
+                "Authorization: Bearer {tok}",
+                "Authorization: Bearer [REDACTED]",
+                id="bearer-header",
+            ),
+            pytest.param("git said {tok}.", "git said [REDACTED]", id="end-of-sentence"),
+        ],
+    )
+    def test_redact_secrets_masks_the_token(self, template: str, expected: str) -> None:
+        text = template.replace("{tok}", _STATELESS)
+
+        # A cap above the token length, so a pass can't be explained by truncation.
+        result = redact_secrets(text, max_length=2000)
+
+        assert result == expected
+        _assert_no_jwt_material(result)
+
+    def test_redact_identifier_masks_the_token_standing_alone(self) -> None:
+        result = redact_identifier(_STATELESS, frozenset())
+
+        assert result == "[REDACTED]"
+
+    def test_redact_identifier_masks_the_token_embedded_in_an_id(self) -> None:
+        result = redact_identifier(f"evt-{_STATELESS}", frozenset())
+
+        assert result == "evt-[REDACTED]"
+        _assert_no_jwt_material(result)
+
+    def test_redact_secrets_mapping_masks_a_nested_token(self) -> None:
+        payload = {
+            "detail": {"last_error": f"git said {_STATELESS}", "steps": [f"try {_STATELESS}"]}
+        }
+
+        result = redact_secrets_mapping(payload, max_length=2000)
+
+        assert result == {
+            "detail": {"last_error": "git said [REDACTED]", "steps": ["try [REDACTED]"]}
+        }
+        _assert_no_jwt_material(json.dumps(result))
+
+    @pytest.mark.parametrize("token", [pytest.param(f"ghs_{_BODY_36}", id="legacy"), _STATELESS])
+    def test_a_non_ascii_letter_after_the_token_does_not_prevent_masking(self, token: str) -> None:
+        """Refusing to mask when a word character follows would fail open on `é`."""
+        assert redact_secrets(f"{token}é", max_length=2000) == "[REDACTED]é"
+        assert redact_identifier(f"{token}é", frozenset()) == "[REDACTED]é"
+
+    @pytest.mark.parametrize("suffix", [".", "-", "_"])
+    def test_trailing_token_punctuation_is_absorbed_into_the_mask(self, suffix: str) -> None:
+        """Cosmetic: trimming it would re-expose a token that legitimately ends in `-`/`_`."""
+        assert redact_secrets(f"{_STATELESS}{suffix}", max_length=2000) == "[REDACTED]"
+
+    def test_the_app_id_prefix_alone_is_below_the_floor(self) -> None:
+        """The 20-character floor counts the whole body, App ID included."""
+        text = "ghs_1234567_ ghs_1234567_abc.def"
+        assert redact_secrets(text, max_length=500) == text
+
+    def test_a_token_glued_to_a_word_character_is_still_a_name(self) -> None:
+        """The leading boundary is kept: `my_ghs_…` is an identifier, not a token."""
+        text = f"my_{_STATELESS}"
+        assert redact_secrets(text, max_length=2000) == text
+
+    def test_scan_stays_linear_on_a_long_dotted_chain(self) -> None:
+        """Every `ghs_` in the chain is absorbed by the first body: one pass, no rescans."""
+        hostile = ("ghs_" + "a" * 9 + ".") * 20_000
+
+        assert redact_secrets(hostile, max_length=2000) == "[REDACTED]"
 
 
 class TestRedactIdentifier:

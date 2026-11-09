@@ -50,10 +50,14 @@ set can hold them. ``redact_secrets`` therefore runs one pass over the text, rig
 after Layer 1 and before Layer 3, that masks GitHub's documented token formats
 (``gh[pousr]_…`` and ``github_pat_…``) wherever they appear; ``redact_identifier``
 runs the same pass (after Layer 1) for node-supplied identifiers. The formats are
-unambiguous (a fixed prefix plus 20+ token characters), so unlike Layer 3's key
-heuristics this pass has no key-name guessing. It is a ``str.find`` scan, not a regex,
-like the rest of this module (see ``test_no_regex_module_used``): it is linear in the
-input and can never backtrack.
+unambiguous (a fixed prefix plus a body of 20+ characters from ``[A-Za-z0-9_.-]``, which
+covers stateless ``ghs_<APPID>_<JWT>`` installation tokens — about 520 characters with two
+dots), so unlike Layer 3's key heuristics this pass has no key-name guessing. Only the
+*leading* boundary is checked (``my_ghs_…`` is a name, not a token); a ``.``, ``-`` or
+``_`` directly after a token is absorbed into the mask, which is cosmetic, whereas
+trimming it would re-expose a token that legitimately ends in ``-`` or ``_``. It is a
+``str.find`` scan, not a regex, like the rest of this module (see
+``test_no_regex_module_used``): it is linear in the input and can never backtrack.
 
 **Identifiers (T11, r2 F1/N1).** Structurally simple node-supplied values — an
 operation event's ``event_id`` and ``target.bundle_version``, the command claim's
@@ -123,13 +127,17 @@ if TYPE_CHECKING:
 _REDACTED = "[REDACTED]"
 
 # GitHub token formats: classic/OAuth/user/server/refresh (`ghp_`, `gho_`, `ghu_`, `ghs_`,
-# `ghr_` — `ghs_` is an App installation token; body is alphanumeric) and fine-grained PATs
-# (`github_pat_`; body also allows `_`). The 20-character floor leaves ordinary words such
-# as `ghs_short` alone, and a token must start and end on a word boundary.
+# `ghr_` — `ghs_` is an App installation token) and fine-grained PATs (`github_pat_`).
+# One body charset for every prefix, GitHub's documented `[A-Za-z0-9._-]`: stateless
+# installation tokens are `ghs_<APPID>_<JWT>` (~520 chars, base64url segments joined by two
+# dots), and the format may spread to other prefixes. The 20-character floor leaves ordinary
+# words such as `ghs_short` alone, and a token must start on a word boundary. It is not
+# required to end on one: the body already absorbs `_`, so the only thing that could follow
+# it is a non-ASCII letter, and refusing to mask there would be a bypass.
 _GITHUB_TOKEN_PREFIXES = ("ghp_", "gho_", "ghu_", "ghs_", "ghr_")
 _GITHUB_FINE_GRAINED_PREFIX = "github_pat_"
 _ASCII_ALNUM = frozenset(string.ascii_letters + string.digits)
-_ASCII_ALNUM_UNDERSCORE = _ASCII_ALNUM | {"_"}
+_GITHUB_TOKEN_BODY_CHARS = _ASCII_ALNUM | {"_", "-", "."}
 _GITHUB_TOKEN_MIN_BODY_LENGTH = 20
 
 # Layer 2 (mapping-key) sensitivity test: a lowercase substring check,
@@ -671,20 +679,14 @@ def _github_token_end(text: str, start: int) -> int:
     """End index of the GitHub token beginning at `start`, or -1 if none does."""
     if text.startswith(_GITHUB_FINE_GRAINED_PREFIX, start):
         body_start = start + len(_GITHUB_FINE_GRAINED_PREFIX)
-        body_chars = _ASCII_ALNUM_UNDERSCORE
     elif text.startswith(_GITHUB_TOKEN_PREFIXES, start):
         body_start = start + len("ghp_")
-        body_chars = _ASCII_ALNUM
     else:
         return -1
     end = body_start
-    while end < len(text) and text[end] in body_chars:
+    while end < len(text) and text[end] in _GITHUB_TOKEN_BODY_CHARS:
         end += 1
-    if end - body_start < _GITHUB_TOKEN_MIN_BODY_LENGTH:
-        return -1
-    # A word character right after the body (`_`/non-ASCII letter) means this is the
-    # middle of some longer identifier, not a token.
-    return -1 if end < len(text) and _is_word_char(text[end]) else end
+    return -1 if end - body_start < _GITHUB_TOKEN_MIN_BODY_LENGTH else end
 
 
 def _redact_github_tokens(text: str) -> str:
