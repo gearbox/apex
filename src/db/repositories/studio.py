@@ -138,20 +138,6 @@ class StudioArtistRepository:
         )
         return result.scalar_one_or_none()
 
-    async def get_by_ids(
-        self, artist_ids: Sequence[UUID], *, user_id: UUID, product_id: str
-    ) -> dict[UUID, StudioArtist]:
-        if not artist_ids:
-            return {}
-        result = await self._session.execute(
-            select(StudioArtist).where(
-                StudioArtist.id.in_(artist_ids),
-                StudioArtist.user_id == user_id,
-                StudioArtist.product_id == product_id,
-            )
-        )
-        return {artist.id: artist for artist in result.scalars()}
-
     async def list_page(
         self,
         *,

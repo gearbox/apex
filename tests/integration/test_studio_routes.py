@@ -492,6 +492,48 @@ class TestJourney:
         assert track["current_lyrics_version_id"] is None
         assert track["current_plan_version_id"] == detached.json()["version"]["id"]
 
+    async def test_detach_without_make_current_is_a_422_that_writes_nothing(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        # Invariant 28: "detach" only means something when the plan becomes current.
+        h = owner.headers
+        await _enable(client, owner)
+        track_id = await _track(client, owner)
+
+        resp = await client.post(
+            f"{S}/tracks/{track_id}/versions",
+            headers=h,
+            json=_plan_body(make_plan(title="x"), make_current=False, incompatible_lyrics="detach"),
+        )
+        assert resp.status_code == 422
+        body = resp.json()
+        assert body["error"] == "document_invalid"
+        assert body["detail"] == {
+            "issues": [{"path": "incompatible_lyrics", "code": "requires_make_current"}]
+        }
+        async with session_factory() as session:
+            count = (
+                await session.execute(select(func.count()).select_from(StudioDocumentVersion))
+            ).scalar_one()
+        assert count == 0
+
+        # The other combinations stay valid.
+        combinations = (
+            {"make_current": True, "incompatible_lyrics": "detach"},
+            {"make_current": False, "incompatible_lyrics": "reject"},
+            {"make_current": False},
+        )
+        for n, extra in enumerate(combinations):
+            created = await client.post(
+                f"{S}/tracks/{track_id}/versions",
+                headers=h,
+                json=_plan_body(make_plan(title=f"ok-{n}"), **extra),
+            )
+            assert created.status_code == 201, (extra, created.text)
+
     async def test_switching_and_deleting_versions(
         self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
     ) -> None:

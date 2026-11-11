@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import msgspec
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.studio import ArtistCreate, ArtistPatch, ProjectProfilePut
 from src.core.enums import StudioReleaseKind
@@ -226,4 +227,20 @@ class TestArtistInUse:
         with pytest.raises(ArtistInUse) as exc:  # the count said 0; the NO ACTION FK said no
             await w.artists.delete(out.id, w.user_id, w.product_id)
         assert exc.value.detail == {"project_count": 1}
+        assert (await w.artists.get(out.id, w.user_id, w.product_id)).id == out.id  # session intact
+
+    async def test_an_unexplained_integrity_error_propagates_instead_of_artist_in_use(
+        self, studio: StudioWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The recount after the failure is 0: no project holds the artist, so "in use" would be a
+        # misleading 409 for a failure nobody can explain.
+        w = studio
+        out = await w.artists.create(w.user_id, w.product_id, _create())
+
+        async def refuse(*_args: object, **_kwargs: object) -> bool:
+            raise IntegrityError("DELETE studio_artists", {}, Exception("unexplained"))
+
+        monkeypatch.setattr(w.artists._repo, "delete", refuse)
+        with pytest.raises(IntegrityError):
+            await w.artists.delete(out.id, w.user_id, w.product_id)
         assert (await w.artists.get(out.id, w.user_id, w.product_id)).id == out.id  # session intact

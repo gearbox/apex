@@ -183,13 +183,15 @@ class ArtistService:
             async with self._session.begin_nested():
                 deleted = await self._repo.delete(artist_id, user_id=user_id, product_id=product_id)
         except IntegrityError as exc:
-            # A project adopted the artist after the count: the FK is the backstop.
-            raise ArtistInUse(
-                await self._repo.count_profiles_using(
-                    artist_id, user_id=user_id, product_id=product_id
-                )
-                or None
-            ) from exc
+            # A project adopted the artist after the count: the FK is the backstop. If the
+            # recount still finds none, the failure is unexplained -- let it surface rather than
+            # blame a project that is not there with a misleading 409.
+            in_use = await self._repo.count_profiles_using(
+                artist_id, user_id=user_id, product_id=product_id
+            )
+            if not in_use:
+                raise
+            raise ArtistInUse(in_use) from exc
         if not deleted:
             raise ArtistNotFound
         logger.info("studio.artist_deleted", artist_id=str(artist_id), user_id=str(user_id))

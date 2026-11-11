@@ -20,7 +20,12 @@ from src.studio.errors import (
     TrackLimitReached,
     TrackOrderMismatch,
 )
-from src.studio.services.mappers import lyrics_version_detail, plan_version_detail, track_out
+from src.studio.services.mappers import (
+    lyrics_version_detail,
+    plan_version_detail,
+    require_current_row,
+    track_out,
+)
 from src.studio.validation import normalize_text
 
 if TYPE_CHECKING:
@@ -133,18 +138,20 @@ class TrackService:
         track = await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
         if track is None:
             raise StudioNotFound
+        # A non-null pointer whose row cannot be read is a broken invariant: raise (RD5), do not
+        # return a track that silently claims to have no current document.
         current_plan = None
         if track.current_plan_version_id is not None:
             row = await self._versions.get_on_track(
                 track.current_plan_version_id, track_id, user_id=user_id, product_id=product_id
             )
-            current_plan = None if row is None else plan_version_detail(row, track)
+            current_plan = plan_version_detail(require_current_row(row), track)
         current_lyrics = None
         if track.current_lyrics_version_id is not None:
             row = await self._versions.get_on_track(
                 track.current_lyrics_version_id, track_id, user_id=user_id, product_id=product_id
             )
-            current_lyrics = None if row is None else lyrics_version_detail(row, track)
+            current_lyrics = lyrics_version_detail(require_current_row(row), track)
         base = track_out(track)
         return TrackDetail(
             id=base.id,

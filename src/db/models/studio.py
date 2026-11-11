@@ -186,10 +186,12 @@ class StudioTrack(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
     product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     library_project_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
@@ -255,10 +257,12 @@ class StudioDocumentVersion(Base):
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
     product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
     user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
         ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
     track_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
