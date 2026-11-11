@@ -1064,10 +1064,13 @@ class GpuProvisioningWorker(PeriodicWorker):
             await self._mark_failed(session, "misconfigured: provisioning_script_ref is empty")
             return
 
-        # Before the new instance exists: a GitHub outage must fail the retry cleanly, not
-        # leave a billable node that cannot clone.
+        # Credential pre-flight, before the new instance exists: in app mode this proves
+        # Apex can still mint an installation token, so a broken App fails the retry
+        # cleanly rather than leaving a billable node that cannot clone. The value is
+        # discarded — nodes pull their own token from the github-token endpoint. A no-op
+        # in pat mode.
         try:
-            github_token = await github_tokens.get_token()
+            await github_tokens.get_token()
         except GitHubTokenUnavailableError:
             logger.exception(
                 "gpu_session.provision.retry_github_token_unavailable",
@@ -1096,8 +1099,8 @@ class GpuProvisioningWorker(PeriodicWorker):
         bootstrap_operation_id = new_id()
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
-        # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /
-        # PROVISIONER_WEBHOOK_URL, which carry the callback token in their query string.
+        # civitai_api_token, and (D3) PROVISIONING_SCRIPT / PROVISIONER_WEBHOOK_URL,
+        # which carry the callback token in their query string.
         # S7: guarded like the two config checks immediately above — build_acs_env
         # raises a bare ValueError when apex_callback_url fails to normalize.
         # Effectively unreachable today (the Settings validator catches an invalid
@@ -1116,7 +1119,6 @@ class GpuProvisioningWorker(PeriodicWorker):
                 tunnel_token=tunnel_token,
                 callback_token=fresh_callback_token,
                 provision_script_sha256=resolved_script.sha256,
-                github_token=github_token.value,
             )
         except ValueError:
             logger.exception(

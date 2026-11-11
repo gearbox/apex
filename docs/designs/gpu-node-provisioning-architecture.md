@@ -278,6 +278,10 @@ When Apex provisions a node, it translates `HardwareRequirements` into Vast.ai s
 }
 ```
 
+> **Superseded:** `ACS_GITHUB_TOKEN` was removed from the node env in the GitHub App rollout
+> (Phase C); nodes pull a token from Apex. See
+> `docs/contracts/provisioning-bootstrap-contract.md`.
+
 ---
 
 ## 5. Cloudflare Tunnel Integration
@@ -1086,6 +1090,10 @@ All env vars set at instance creation, covering both Phase 1 and Phase 2:
 | `ACS_APEX_SESSION_ID` | `str(session.id)` | 2 | Session ID for callback correlation |
 | `ACS_APEX_CALLBACK_URL` | `settings.apex_callback_url` | 2 | Apex webhook URL |
 | `ACS_APEX_CALLBACK_TOKEN` | Generated HMAC token | 2 | Callback authentication |
+
+> **Superseded:** `ACS_GITHUB_TOKEN` was removed from the node env in the GitHub App rollout
+> (Phase C); nodes pull a token from Apex. See
+> `docs/contracts/provisioning-bootstrap-contract.md`.
 
 ---
 

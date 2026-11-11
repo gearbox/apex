@@ -376,10 +376,12 @@ class GpuSessionService:
                 "Set APEX_CALLBACK_URL to the public Apex http(s) origin."
             )
 
-        # Obtained here, before anything external exists, so a GitHub outage is a clean 503
-        # rather than a half-built session; consumed by build_acs_env below.
+        # Credential pre-flight: in app mode this proves Apex can mint an installation
+        # token before anything billable exists, so a broken App is a clean 503 rather
+        # than a rented node that cannot clone. The value is discarded — nodes pull their
+        # own token from the github-token endpoint. A no-op in pat mode.
         try:
-            github_token = await github_tokens.get_token()
+            await github_tokens.get_token()
         except GitHubTokenUnavailableError as exc:
             logger.exception(
                 "gpu_session.start.failed",
@@ -466,8 +468,8 @@ class GpuSessionService:
         )
 
         # SECURITY: never log env — contains tunnel_token, callback_token, hf_token,
-        # civitai_api_token, ACS_GITHUB_TOKEN, and (D3) PROVISIONING_SCRIPT /
-        # PROVISIONER_WEBHOOK_URL, which carry the callback token in their query string.
+        # civitai_api_token, and (D3) PROVISIONING_SCRIPT / PROVISIONER_WEBHOOK_URL,
+        # which carry the callback token in their query string.
         env = build_acs_env(
             settings=self._settings,
             session_id=session_id,
@@ -478,7 +480,6 @@ class GpuSessionService:
             tunnel_token=tunnel_token,
             callback_token=callback_token,
             provision_script_sha256=resolved_script.sha256,
-            github_token=github_token.value,
         )
 
         # Step 6: create Vast.ai instance with retry loop

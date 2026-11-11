@@ -4,14 +4,15 @@ Centralizes the env-var contract with the Aisha CLI in one place so
 service.py (initial start_session) and provisioning_worker.py (retry
 path) cannot drift apart.
 
-SECURITY: the returned dict contains tokens — never log it. ``ACS_GITHUB_TOKEN`` is the
-provider's current token (a 1 h App installation token, or the static PAT): it is a
-bootstrap convenience for pinned aisha versions that still read it, and nodes that pull a
-fresh token from the token endpoint never depend on it. Since D3, that
+SECURITY: the returned dict contains tokens — never log it. Since D3, that
 includes PROVISIONING_SCRIPT and PROVISIONER_WEBHOOK_URL, which carry the
 per-session callback token in their query string — treat them exactly like
 tunnel_token/callback_token themselves; never log a full value, only redact
 or log lengths/prefixes if logging is ever needed.
+
+The env carries no GitHub credential: nodes pull a short-lived token from
+``POST /v1/internal/gpu-sessions/{id}/github-token`` when they need one
+(aisha ≥ v0.10.0).
 """
 
 from __future__ import annotations
@@ -72,13 +73,11 @@ def build_acs_env(
     tunnel_token: str,
     callback_token: str,
     provision_script_sha256: str,
-    github_token: str,
 ) -> dict[str, str]:
     """Build the env dict for vastai_client.create_instance.
 
     Args:
-        settings: Apex Settings (provides ai_bundles_*, aisha_*, hf_token, etc.). The GitHub
-            credential is NOT read from here — see ``github_token``.
+        settings: Apex Settings (provides ai_bundles_*, aisha_*, hf_token, etc.).
         session_id: GpuSession UUID — surfaced to the CLI for log enrichment
         operation_id: Apex-owned bootstrap operation UUID for telemetry correlation
         bundle_name: Resolved bundle name (e.g. "wan_2.2_i2v")
@@ -90,9 +89,6 @@ def build_acs_env(
             serve for this ref (from ProvisioningScriptService.resolve()) — the
             aisha script echoes this back in acs.provision.ready so apex can
             detect drift between what it served and what actually ran (D3).
-        github_token: The GitHubTokenProvider's current token, forwarded as
-            ACS_GITHUB_TOKEN (Phase A of the GitHub App rollout; removed once aisha
-            ``v0.10.0`` — which pulls tokens from apex — is pinned).
 
     Returns:
         Env dict ready to pass to vastai_client.create_instance(env=...).
@@ -106,6 +102,8 @@ def build_acs_env(
           *settings* overrides — neither family gets the ACS_ prefix (D3).
           Apex owns the ref pin (settings.provisioning_script_ref); the Vast
           template itself no longer sets PROVISIONING_SCRIPT (D2).
+        - No ``ACS_GITHUB_TOKEN``: removed in Phase C of the GitHub App rollout; see the
+          bootstrap contract.
     """
     callback_origin = normalize_apex_callback_url(settings.apex_callback_url)
     if callback_origin is None:
@@ -120,8 +118,7 @@ def build_acs_env(
         # --- Bundle selection ---
         "ACS_BUNDLE": bundle_name,
         "ACS_BUNDLE_VERSION": bundle_version or "current",
-        # --- GitHub auth + repos ---
-        "ACS_GITHUB_TOKEN": github_token,
+        # --- Repos ---
         "ACS_BUNDLES_REPO": settings.ai_bundles_repo_url,
         "ACS_BUNDLES_BRANCH": settings.ai_bundles_branch,
         "ACS_AISHA_REPO": settings.aisha_repo_url,

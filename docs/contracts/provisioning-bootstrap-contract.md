@@ -184,8 +184,7 @@ function's module docstring.
 
 D3 put the callback token into the node's own environment
 (`PROVISIONING_SCRIPT`/`PROVISIONER_WEBHOOK_URL` query strings, plus
-`CF_TUNNEL_TOKEN`/`ACS_GITHUB_TOKEN`/`ACS_HF_TOKEN`/`ACS_CIVITAI_API_TOKEN` as
-bare env vars), so any node-side code path that echoes a failing command, a
+`CF_TUNNEL_TOKEN`/`ACS_HF_TOKEN`/`ACS_CIVITAI_API_TOKEN` as bare env vars), so any node-side code path that echoes a failing command, a
 curl error, or an env dump into free-text telemetry can otherwise leak a
 secret straight into a database row or the client's event stream. Three
 receivers apply this today:
@@ -346,17 +345,22 @@ unconfigured or fails to resolve (D6).
 | `pat` | only `AI_BUNDLES_GITHUB_TOKEN` is set | That static PAT |
 | `none` | neither | No provider. **Startup fails** when the GPU stack is configured (`provisioning_script_ref` or `apex_callback_url` set); otherwise (local dev) session start answers `503 provisioning_unavailable` |
 
-Apex's own fetches (bundle-index tarball, bootstrap script), the `ACS_GITHUB_TOKEN`
-below, and the `github-token` endpoint above all take their credential from that provider,
-so a node and apex always hold the same kind of token. **Phase A (current):** apex still
-sends `ACS_GITHUB_TOKEN` (the provider's token at instance-creation time) so aisha `v0.9.3`,
-which exits 2 without it, keeps working; in `app` mode that env token expires after an hour,
-so enable the App only once aisha `v0.10.0` (which pulls from the endpoint) is pinned.
-**Phase C (after that pin):** `ACS_GITHUB_TOKEN` is removed from this env.
+Apex's own fetches (bundle-index tarball, bootstrap script) and the `github-token`
+endpoint above all take their credential from that provider, so a node and apex always
+hold the same kind of token. Apex sends **no** GitHub credential in the node env (Phase C,
+2026-11): nodes running aisha ≥ v0.10.0 pull a token from the `github-token` endpoint, and
+Settings rejects older `vX.Y.Z` script refs (`MIN_PROVISIONING_SCRIPT_TAG`, `v0.10.0`;
+full commit SHAs and the dev ref cannot be ordered and are not checked, so a SHA must point
+at v0.10.0 or later). Apex still awaits the provider once before it creates anything
+billable (session start and provisioning retry) and discards the value: in `app` mode that
+proves the App key, installation and GitHub are reachable, so a broken App fails as a clean
+`503 provisioning_unavailable` / `retry_github_token_unavailable` instead of a rented node
+that cannot clone.
 
-**Token scope (S5, round-2 remediation):** in `pat` mode, `ACS_GITHUB_TOKEN` above, and the
-token `ProvisioningScriptService._fetch_from_github` presents to GitHub to
-resolve the bootstrap script, are the same value: `Settings.github_content_token`
+**Token scope (S5, round-2 remediation):** in `pat` mode, the token the bundle-index fetch
+and `ProvisioningScriptService._fetch_from_github` (the bootstrap-script fetch) present to
+GitHub, and the one the `github-token` endpoint hands to a node, are the same value:
+`Settings.github_content_token`
 (env `AI_BUNDLES_GITHUB_TOKEN` — kept via `validation_alias` so no deployment's
 env needs to change). It requires read access to **both**
 `gearbox/ai-bundles` (bundle index cloning) and `gearbox/aisha` (bootstrap
