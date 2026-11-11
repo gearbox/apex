@@ -149,10 +149,159 @@ async def test_lyrics_must_fit_the_chosen_plan(enabled_studio: StudioWorld) -> N
             plan_version_id=versed.version.id,
             lyrics_version_id=lyrics_id,
         )
-    with pytest.raises(LyricsIncompatibleWithPlan):  # current lyrics are used by default
-        await w.exports.render_suno(
-            track, w.user_id, w.product_id, plan_version_id=versed.version.id
+
+
+class TestDefaultsFormAPair:
+    """Invariant 26 (RD2): current lyrics are used only when no plan id was given."""
+
+    async def test_an_explicit_older_plan_renders_alone_even_if_current_lyrics_do_not_fit_it(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        # Review probe (a): this used to answer 409 lyrics_incompatible_with_plan.
+        w = enabled_studio
+        verse, bridge = make_section(K.VERSE), make_section(K.BRIDGE)
+        track = await w.new_track()
+        v1, _ = await w.plan(track, make_plan(verse, title="v1"))
+        v2, _ = await w.plan(track, make_plan(verse, bridge, title="v2"), parent=v1.version.id)
+        await w.lyrics(track, make_lyrics((bridge.id, ["line"])), v2.version.id)
+
+        out = await w.exports.render_suno(
+            track, w.user_id, w.product_id, plan_version_id=v1.version.id
         )
+        assert out.plan_version_id == v1.version.id
+        assert out.lyrics_version_id is None
+        assert out.title == "v1"
+        assert out.lyrics == "[Verse]"
+        assert "line" not in out.lyrics
+
+    async def test_a_compatible_explicit_plan_does_not_borrow_the_current_lyrics(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        # Review probe (b): lyrics written for v2 were silently rendered under v1, no warning.
+        w = enabled_studio
+        verse = make_section(K.VERSE)
+        track = await w.new_track()
+        v1, _ = await w.plan(track, make_plan(verse, title="v1"))
+        v2, _ = await w.plan(track, make_plan(verse, title="v2", tags=["x"]), parent=v1.version.id)
+        await w.lyrics(track, make_lyrics((verse.id, ["written for v2"])), v2.version.id)
+
+        out = await w.exports.render_suno(
+            track, w.user_id, w.product_id, plan_version_id=v1.version.id
+        )
+        assert out.lyrics_version_id is None
+        assert "written for v2" not in out.lyrics
+        assert out.warnings == []
+
+    async def test_no_ids_renders_the_current_pair(self, enabled_studio: StudioWorld) -> None:
+        w = enabled_studio
+        track, plan_id, lyrics_id, *_ = await _song(w)
+        out = await w.exports.render_suno(track, w.user_id, w.product_id)
+        assert (out.plan_version_id, out.lyrics_version_id) == (plan_id, lyrics_id)
+        assert "hook" in out.lyrics
+
+    async def test_explicit_lyrics_alone_pair_with_the_current_plan(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track, plan_id, current_lyrics, verse, _ = await _song(w)
+        other, _ = await w.lyrics(
+            track,
+            make_lyrics((verse.id, ["older take"])),
+            plan_id,
+            make_current=False,
+        )
+        out = await w.exports.render_suno(
+            track, w.user_id, w.product_id, lyrics_version_id=other.version.id
+        )
+        assert out.plan_version_id == plan_id
+        assert out.lyrics_version_id == other.version.id != current_lyrics
+        assert "older take" in out.lyrics
+        assert "hook" not in out.lyrics  # the current lyrics were not mixed in
+
+    async def test_explicit_lyrics_alone_are_checked_against_the_current_plan(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        verse, bridge = make_section(K.VERSE), make_section(K.BRIDGE)
+        track = await w.new_track()
+        v1, _ = await w.plan(track, make_plan(verse, bridge, title="v1"))
+        stored, _ = await w.lyrics(
+            track, make_lyrics((bridge.id, ["line"])), v1.version.id, make_current=False
+        )
+        await w.plan(track, make_plan(verse, title="v2"), parent=v1.version.id)  # drops bridge
+        with pytest.raises(LyricsIncompatibleWithPlan):
+            await w.exports.render_suno(
+                track, w.user_id, w.product_id, lyrics_version_id=stored.version.id
+            )
+
+    async def test_an_incompatible_explicit_pair_is_still_a_409(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        verse, bridge = make_section(K.VERSE), make_section(K.BRIDGE)
+        track = await w.new_track()
+        v1, _ = await w.plan(track, make_plan(verse, title="v1"))
+        v2, _ = await w.plan(track, make_plan(verse, bridge, title="v2"), parent=v1.version.id)
+        lyr, _ = await w.lyrics(track, make_lyrics((bridge.id, ["line"])), v2.version.id)
+        with pytest.raises(LyricsIncompatibleWithPlan):
+            await w.exports.render_suno(
+                track,
+                w.user_id,
+                w.product_id,
+                plan_version_id=v1.version.id,
+                lyrics_version_id=lyr.version.id,
+            )
+
+    async def test_an_explicit_compatible_pair_renders_that_pair(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        verse = make_section(K.VERSE)
+        track = await w.new_track()
+        v1, _ = await w.plan(track, make_plan(verse, title="v1"))
+        v2, _ = await w.plan(track, make_plan(verse, title="v2", tags=["x"]), parent=v1.version.id)
+        lyr, _ = await w.lyrics(track, make_lyrics((verse.id, ["for v2"])), v2.version.id)
+        out = await w.exports.render_suno(
+            track,
+            w.user_id,
+            w.product_id,
+            plan_version_id=v1.version.id,
+            lyrics_version_id=lyr.version.id,
+        )
+        # The caller chose this cross-plan pair, so it is rendered as asked.
+        assert (out.plan_version_id, out.lyrics_version_id) == (v1.version.id, lyr.version.id)
+        assert "for v2" in out.lyrics
+
+    async def test_lyrics_only_on_a_track_without_a_plan_is_plan_required(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        verse = make_section(K.VERSE)
+        track = await w.new_track()
+        stored_plan, _ = await w.plan(track, make_plan(verse), make_current=False)
+        stored, _ = await w.lyrics(
+            track, make_lyrics((verse.id, ["la"])), stored_plan.version.id, make_current=False
+        )
+        assert (await w.track_row(track)).current_plan_version_id is None
+        with pytest.raises(PlanRequired):
+            await w.exports.render_suno(
+                track, w.user_id, w.product_id, lyrics_version_id=stored.version.id
+            )
+
+    async def test_the_response_names_exactly_the_lyrics_that_were_rendered(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track, plan_id, lyrics_id, *_ = await _song(w)
+        for kwargs, expect_lyrics in (
+            ({}, lyrics_id),
+            ({"plan_version_id": plan_id}, None),
+            ({"lyrics_version_id": lyrics_id}, lyrics_id),
+            ({"plan_version_id": plan_id, "lyrics_version_id": lyrics_id}, lyrics_id),
+        ):
+            out = await w.exports.render_suno(track, w.user_id, w.product_id, **kwargs)
+            assert out.lyrics_version_id == expect_lyrics
+            assert ("hook" in out.lyrics) is (expect_lyrics is not None)
 
 
 async def test_a_plan_alone_renders_the_section_skeleton(enabled_studio: StudioWorld) -> None:

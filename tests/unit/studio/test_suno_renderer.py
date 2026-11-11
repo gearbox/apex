@@ -51,6 +51,7 @@ class TestGolden:
         drop = make_section(
             K.DROP, tags=("heavy bass",), avoid=("distortion",), duration_seconds=20
         )
+        instrumental_drop = make_section(K.DROP, instrumental=True)
         bridge = make_section(K.BRIDGE, label="Break It Down")
         outro = make_section(K.OUTRO)
         plan = normalize_plan(
@@ -62,6 +63,7 @@ class TestGolden:
                 verse_b,
                 chorus_2,
                 drop,
+                instrumental_drop,
                 bridge,
                 outro,
                 title="Neon Rain",
@@ -120,7 +122,9 @@ class TestGolden:
             "[Chorus]\n"
             "Chorus again\n"
             "\n"
-            "[Drop: heavy bass]\n"
+            "[Drop 1: heavy bass]\n"
+            "\n"
+            "[Drop 2: instrumental]\n"
             "\n"
             "[Break It Down]\n"
             "\n"
@@ -223,6 +227,58 @@ class TestSectionDescriptors:
         section = make_section(K.VERSE, delivery=("soft", "Raspy"), tags=("raspy", "dark"))
         plan = normalize_plan(make_plan(section))
         assert _text(_render(plan), "lyrics") == "[Verse: soft, Raspy, dark]"
+
+    def test_an_instrumental_flag_on_another_kind_is_cued_not_dropped(self) -> None:
+        # Review probe: this used to render a bare "[Drop]" with no warning and no cue.
+        plan = to_renderable_plan(make_plan(make_section(K.DROP, instrumental=True)))
+        export = SUNO.render(RenderContext(plan=plan, lyrics=None, artist=None))
+        assert _text(export, "lyrics") == "[Drop: instrumental]"
+        assert export.warnings == ()
+
+    def test_the_cue_goes_first_and_counts_toward_the_length(self) -> None:
+        section = make_section(K.DROP, instrumental=True, delivery=("massive",), tags=("heavy",))
+        export = _render(normalize_plan(make_plan(section)))
+        assert _text(export, "lyrics") == "[Drop: instrumental, massive, heavy]"
+        assert export.fields["lyrics"].report.length == len("[Drop: instrumental, massive, heavy]")
+
+    @pytest.mark.parametrize("typed", ["Instrumental", "INSTRUMENTAL", "instrumental"])
+    def test_a_typed_instrumental_descriptor_is_deduped_case_insensitively(
+        self, typed: str
+    ) -> None:
+        by_delivery = make_section(K.DROP, instrumental=True, delivery=(typed,))
+        by_tag = make_section(K.DROP, instrumental=True, tags=(typed,))
+        for section in (by_delivery, by_tag):
+            export = _render(normalize_plan(make_plan(section)))
+            assert _text(export, "lyrics") == "[Drop: instrumental]"  # the cue was first
+
+    def test_the_cue_applies_to_vocal_kinds_and_custom_labels(self) -> None:
+        plan = normalize_plan(
+            make_plan(
+                make_section(K.VERSE, instrumental=True),
+                make_section(K.BRIDGE, label="Break", instrumental=True),
+            )
+        )
+        assert _text(_render(plan), "lyrics").split("\n\n") == [
+            "[Verse: instrumental]",
+            "[Break: instrumental]",
+        ]
+
+    @pytest.mark.parametrize("flag", [True, False])
+    def test_an_instrumental_kind_section_gets_no_extra_cue(self, flag: bool) -> None:
+        plan = normalize_plan(
+            make_plan(
+                make_section(K.INSTRUMENTAL, instrumental=flag),
+                make_section(K.INSTRUMENTAL, instrumental=flag, tags=("pads",)),
+            )
+        )
+        assert _text(_render(plan), "lyrics").split("\n\n") == [
+            "[Instrumental 1]",
+            "[Instrumental 2: pads]",
+        ]
+
+    def test_a_section_that_is_not_instrumental_gets_no_cue(self) -> None:
+        plan = normalize_plan(make_plan(make_section(K.DROP, instrumental=False)))
+        assert _text(_render(plan), "lyrics") == "[Drop]"
 
     def test_vocal_section_without_lyrics_renders_header_only(self) -> None:
         plan = normalize_plan(make_plan(make_section(K.VERSE), make_section(K.CHORUS)))

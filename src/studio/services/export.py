@@ -54,13 +54,28 @@ class ExportService:
     ) -> SunoExportOut:
         """Render the track's Suno fields.
 
+        The plan and lyrics form a **pair**; which pair is rendered depends on what was asked:
+
+        ===============  ==========================  ===============================
+        ``plan_version`` ``lyrics_version``          Rendered
+        ===============  ==========================  ===============================
+        none             none                        the current plan + current lyrics
+        given            none                        that plan alone (section skeleton)
+        none             given                       the current plan + those lyrics
+        given            given                       exactly that pair
+        ===============  ==========================  ===============================
+
+        Current lyrics are used only when *no* plan id is given: they were written for the
+        current plan, so pairing them with an explicitly chosen other plan would silently render
+        lyrics for a different plan. Any explicit lyrics are checked against the chosen plan.
+
         Args:
             track_id: Track to export.
             user_id: Owner scope.
             product_id: Product scope.
             plan_version_id: Plan version to render; defaults to the track's current plan.
-            lyrics_version_id: Lyrics version to render; defaults to the track's current lyrics
-                (which may be none — the result is then the section skeleton only).
+            lyrics_version_id: Lyrics version to render. When omitted: the track's current
+                lyrics (which may be none) if no plan was given, otherwise no lyrics.
 
         Raises:
             StudioNotFound: Track or a requested version not found (or of the wrong kind).
@@ -71,10 +86,17 @@ class ExportService:
         if track is None:
             raise StudioNotFound
 
-        plan_id = plan_version_id or track.current_plan_version_id
+        plan_id: UUID | None
+        lyrics_id: UUID | None
+        if plan_version_id is None and lyrics_version_id is None:
+            plan_id, lyrics_id = track.current_plan_version_id, track.current_lyrics_version_id
+        elif lyrics_version_id is None:  # explicit plan only -> that plan alone
+            plan_id, lyrics_id = plan_version_id, None
+        else:  # explicit lyrics, with or without an explicit plan
+            plan_id = plan_version_id or track.current_plan_version_id
+            lyrics_id = lyrics_version_id
         if plan_id is None:
             raise PlanRequired
-        lyrics_id = lyrics_version_id or track.current_lyrics_version_id
 
         plan_row = await self._version_of(
             plan_id, track_id, StudioDocumentKind.PLAN, user_id, product_id
