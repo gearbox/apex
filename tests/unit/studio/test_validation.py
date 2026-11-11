@@ -4,13 +4,22 @@ from __future__ import annotations
 
 import unicodedata
 
+import msgspec
 import pytest
 
 from src.core.enums import StudioSectionKind as K
 from src.core.uid import new_id
-from src.studio.documents import LyricLine, LyricsDocument, LyricsSection, SyllableRange
+from src.studio.documents import (
+    LyricLine,
+    LyricsDocument,
+    LyricsSection,
+    PlanDocument,
+    SyllableRange,
+)
 from src.studio.errors import DocumentIssue, StudioDocumentInvalid
 from src.studio.validation import (
+    MAX_DOCUMENT_BYTES,
+    MAX_LYRICS_TEXT_CHARS,
     check_pair_compatible,
     is_instrumental,
     normalize_artist_style,
@@ -285,6 +294,138 @@ class TestNormalizeLyrics:
     def test_empty_lyrics_are_valid(self) -> None:
         plan, *_ = self._plan()
         assert normalize_lyrics(LyricsDocument(language="en"), plan).sections == ()
+
+
+def _encoded_size(document: PlanDocument | LyricsDocument) -> int:
+    return len(msgspec.json.encode(document))
+
+
+def _plan_of_size(target_bytes: int) -> PlanDocument:
+    """A plan whose normalized compact JSON is exactly ``target_bytes`` (padded ``idea``).
+
+    The padded plan is already in normalized form, so its own encoding is the measured size —
+    no ``normalize_plan`` call, which would itself reject targets above the cap.
+    """
+    probe = _encoded_size(make_plan(idea="x"))
+    plan = make_plan(idea="x" * (1 + target_bytes - probe))
+    assert _encoded_size(plan) == target_bytes
+    return plan
+
+
+def _long_lyrics(
+    total_chars: int, *, line_chars: int = 300, char: str = "x"
+) -> tuple[PlanDocument, LyricsDocument]:
+    """A plan and lyrics whose line text totals exactly ``total_chars`` code points.
+
+    Lines are ``line_chars`` long and spread over sections of at most 60 lines, so the wire
+    caps (64 lines per section, 300 chars per line) hold.
+    """
+    full, rest = divmod(total_chars, line_chars)
+    lines = [char * line_chars] * full + ([char * rest] if rest else [])
+    chunks = [lines[i : i + 60] for i in range(0, len(lines), 60)]
+    sections = [make_section(K.VERSE) for _ in chunks]
+    plan = make_plan(*sections)
+    lyrics = make_lyrics(*[(s.id, chunk) for s, chunk in zip(sections, chunks, strict=True)])
+    return plan, lyrics
+
+
+class TestDocumentSizeCaps:
+    """Invariant 25: size caps are validation issues, measured after normalization (RD1)."""
+
+    def test_limits_are_the_locked_values(self) -> None:
+        assert (MAX_LYRICS_TEXT_CHARS, MAX_DOCUMENT_BYTES) == (20_000, 131_072)
+
+    def test_lyrics_text_of_exactly_the_cap_passes(self) -> None:
+        plan, lyrics = _long_lyrics(MAX_LYRICS_TEXT_CHARS)
+        out = normalize_lyrics(lyrics, plan)
+        assert sum(len(line.text) for s in out.sections for line in s.lines) == 20_000
+
+    def test_one_character_over_the_cap_is_lyrics_too_long(self) -> None:
+        plan, lyrics = _long_lyrics(MAX_LYRICS_TEXT_CHARS + 1)
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, plan)
+        assert _issues(exc) == {("sections", "lyrics_too_long")}
+
+    def test_the_cap_counts_normalized_text_not_the_raw_request(self) -> None:
+        # Raw lines carry 20 padding spaces each; after trim they total exactly the cap.
+        sections = [make_section(K.VERSE) for _ in range(4)]
+        padded = [f"  {'x' * 100}  " + " " * 16 for _ in range(50)]
+        lyrics = make_lyrics(*[(s.id, padded) for s in sections])
+        assert sum(len(line.text) for s in lyrics.sections for line in s.lines) > 20_000
+        out = normalize_lyrics(lyrics, make_plan(*sections))
+        assert sum(len(line.text) for s in out.sections for line in s.lines) == 20_000
+
+    def test_the_cap_counts_code_points_and_cyrillic_stays_under_the_byte_cap(self) -> None:
+        # 20,000 Cyrillic characters in 400 lines of 50: ~2 bytes each, still far below 128 KiB.
+        plan, lyrics = _long_lyrics(20_000, line_chars=50, char="я")
+        out = normalize_lyrics(lyrics, plan)
+        size = _encoded_size(out)
+        assert 2 * 20_000 < size < MAX_DOCUMENT_BYTES
+
+    def test_a_plan_of_exactly_the_byte_cap_passes(self) -> None:
+        out = normalize_plan(_plan_of_size(MAX_DOCUMENT_BYTES))
+        assert _encoded_size(out) == MAX_DOCUMENT_BYTES
+
+    def test_one_byte_over_the_cap_is_document_too_large(self) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(_plan_of_size(MAX_DOCUMENT_BYTES + 1))
+        assert _issues(exc) == {("", "document_too_large")}
+
+    def test_the_byte_cap_is_measured_after_normalization(self) -> None:
+        # A raw idea of 200k blank-padded characters normalizes down to a tiny document.
+        raw = make_plan(idea="x" + " " * 200_000)
+        assert normalize_plan(raw).idea == "x"
+
+    def test_lyrics_over_the_byte_cap_with_few_characters_is_document_too_large(self) -> None:
+        # Thousands of 1-char lines: little text, but 26+ bytes of JSON overhead per line.
+        verse = make_section(K.VERSE)
+        lines = tuple(LyricLine(text="a") for _ in range(6_000))
+        lyrics = LyricsDocument(
+            language="en", sections=(LyricsSection(section_id=verse.id, lines=lines),)
+        )
+        assert _encoded_size(lyrics) > MAX_DOCUMENT_BYTES
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, make_plan(verse))
+        assert _issues(exc) == {("", "document_too_large")}
+
+    def test_both_codes_are_collected_with_every_other_issue(self) -> None:
+        verse = make_section(K.VERSE)
+        big = LyricsSection(
+            section_id=verse.id, lines=tuple(LyricLine(text="abcd") for _ in range(6_000))
+        )
+        stray = LyricsSection(section_id=new_id(), lines=(LyricLine(text=" "),))
+        lyrics = LyricsDocument(language="en", sections=(big, stray))
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, make_plan(verse))
+        assert _issues(exc) == {
+            ("sections[1].lines[0].text", "empty_after_normalization"),
+            ("sections[1].section_id", "unknown_section"),
+            ("sections", "lyrics_too_long"),
+            ("", "document_too_large"),
+        }
+
+    def test_plan_size_is_collected_with_other_plan_issues(self) -> None:
+        # The blank title below normalizes to "", so pad by the default title's length to keep
+        # the *normalized* document exactly one byte over the cap.
+        plan = _plan_of_size(MAX_DOCUMENT_BYTES + 1 + len("Song"))
+        broken = PlanDocument(
+            title=" ",
+            idea=plan.idea,
+            global_style=plan.global_style,
+            sections=plan.sections,
+        )
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(broken)
+        assert _issues(exc) == {
+            ("title", "empty_after_normalization"),
+            ("", "document_too_large"),
+        }
+
+    def test_issue_paths_stay_text_free(self) -> None:
+        plan, lyrics = _long_lyrics(MAX_LYRICS_TEXT_CHARS + 1, char="S")
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, plan)
+        assert all("SSS" not in repr(i) for i in exc.value.issues)
 
 
 class TestCheckPairCompatible:

@@ -24,6 +24,7 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from src.core.uid import new_id
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.billing import Organization, TokenAccount
 from src.db.models.gpu_session import GpuSession
@@ -639,8 +640,11 @@ async def make_library_project(
             user = await make_user(
                 email=f"proj-{uuid4().hex[:8]}@example.com", product_id=product_id
             )
+        # new_id() (UUIDv7, strictly increasing in-process) matches the production default. The
+        # studio profile keyset falls back to ``library_project_id DESC`` when two profiles share
+        # a transaction timestamp, so a random uuid4() here made "newest first" non-deterministic.
         project = LibraryProject(
-            id=uuid4(),
+            id=new_id(),
             product_id=product_id,
             user_id=user.id,
             name=name or f"Project {uuid4().hex[:8]}",

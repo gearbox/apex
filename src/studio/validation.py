@@ -34,6 +34,8 @@ if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
 
 __all__ = [
+    "MAX_DOCUMENT_BYTES",
+    "MAX_LYRICS_TEXT_CHARS",
     "MAX_TOTAL_DURATION_SECONDS",
     "NormalizedArtistStyle",
     "check_pair_compatible",
@@ -49,6 +51,20 @@ __all__ = [
 
 MAX_TOTAL_DURATION_SECONDS: Final = 1800
 """Upper bound on the sum of a plan's planned section durations (30 minutes)."""
+
+MAX_LYRICS_TEXT_CHARS: Final = 20_000
+"""Upper bound on the total lyric text of one document, in code points, after normalization.
+
+About 4x Suno's own lyrics box, so it never rejects anything Suno could take; the wire caps alone
+(64 sections x 64 lines x 300 chars) would allow 1.2 M characters per version.
+"""
+
+MAX_DOCUMENT_BYTES: Final = 131_072
+"""Upper bound on a normalized document as compact UTF-8 JSON (128 KiB), plans and lyrics alike.
+
+Measured on ``msgspec.json.encode(normalized_document)`` — exactly what is hashed and stored.
+Bounds storage per version: with the 500-version cap a track holds at most 64 MiB per kind.
+"""
 
 _RESERVED: Final = frozenset("[]")
 """Characters that would break Suno meta-tags ``[Verse]`` if they appeared inside one."""
@@ -131,6 +147,18 @@ def _normalize_style(style: StyleSpec, path: str, issues: list[DocumentIssue]) -
     return StyleSpec(tags=tags, avoid=avoid)
 
 
+def _check_document_size(
+    document: PlanDocument | LyricsDocument, issues: list[DocumentIssue]
+) -> None:
+    """Flag a *normalized* document whose compact JSON exceeds :data:`MAX_DOCUMENT_BYTES`.
+
+    The issue is collected with the others (P1-6), never raised on its own, and its path is the
+    document root (``""``) — it belongs to no single field.
+    """
+    if len(msgspec.json.encode(document)) > MAX_DOCUMENT_BYTES:
+        issues.append(DocumentIssue("", "document_too_large"))
+
+
 def is_instrumental(section: PlanSection) -> bool:
     """A section that must not carry lyrics."""
     return section.instrumental or section.kind is StudioSectionKind.INSTRUMENTAL
@@ -147,7 +175,8 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
 
     Raises:
         StudioDocumentInvalid: With every issue found (empty text, duplicate section ids or
-            tags, tag conflicts, reserved characters, total duration over the cap).
+            tags, tag conflicts, reserved characters, total duration over the cap, and a
+            normalized document above :data:`MAX_DOCUMENT_BYTES`).
     """
     issues: list[DocumentIssue] = []
 
@@ -196,9 +225,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
     if total_duration > MAX_TOTAL_DURATION_SECONDS:
         issues.append(DocumentIssue("sections", "total_duration_exceeded"))
 
-    if issues:
-        raise StudioDocumentInvalid(tuple(issues))
-    return PlanDocument(
+    normalized = PlanDocument(
         title=title,
         idea=normalize_block(plan.idea),
         tempo_bpm=plan.tempo_bpm,
@@ -206,6 +233,10 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
         references=references,
         sections=tuple(sections),
     )
+    _check_document_size(normalized, issues)
+    if issues:
+        raise StudioDocumentInvalid(tuple(issues))
+    return normalized
 
 
 def check_pair_compatible(plan: PlanDocument, lyrics: LyricsDocument) -> tuple[DocumentIssue, ...]:
@@ -241,7 +272,9 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
         The normalized copy.
 
     Raises:
-        StudioDocumentInvalid: With every issue found.
+        StudioDocumentInvalid: With every issue found, including ``lyrics_too_long`` (total
+            normalized line text above :data:`MAX_LYRICS_TEXT_CHARS` code points) and
+            ``document_too_large`` (normalized document above :data:`MAX_DOCUMENT_BYTES`).
     """
     issues: list[DocumentIssue] = []
 
@@ -250,6 +283,7 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
 
     sections: list[LyricsSection] = []
     seen: set[UUID] = set()
+    total_chars = 0
     for index, section in enumerate(lyrics.sections):
         base = f"sections[{index}]"
         if section.section_id in seen:
@@ -260,6 +294,7 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
         for line_index, line in enumerate(section.lines):
             line_base = f"{base}.lines[{line_index}]"
             text = normalize_text(line.text)
+            total_chars += len(text)
             if not text:
                 issues.append(DocumentIssue(f"{line_base}.text", _EMPTY))
             elif _has_reserved(text):
@@ -274,10 +309,14 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
             )
         sections.append(LyricsSection(section_id=section.section_id, lines=tuple(lines)))
 
+    if total_chars > MAX_LYRICS_TEXT_CHARS:
+        issues.append(DocumentIssue("sections", "lyrics_too_long"))
+
     normalized = LyricsDocument(
         language=lyrics.language, line_syllables=lyrics.line_syllables, sections=tuple(sections)
     )
     issues.extend(check_pair_compatible(plan, normalized))
+    _check_document_size(normalized, issues)
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
     return normalized
