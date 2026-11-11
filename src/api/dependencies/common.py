@@ -123,6 +123,12 @@ from src.db.repositories import (
     UserIdentityRepository,
     UserRepository,
 )
+from src.studio.services.artist import ArtistService
+from src.studio.services.export import ExportService
+from src.studio.services.project import StudioProjectService
+from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
+from src.studio.services.track import TrackService
+from src.studio.services.version import DocumentVersionService
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
@@ -754,13 +760,38 @@ def get_library_service(session: AsyncSession) -> LibraryService:
 
 
 def get_library_project_service(session: AsyncSession) -> LibraryProjectService:
-    """Provide LibraryProjectService per-request."""
-    return LibraryProjectService(session=session)
+    """Provide LibraryProjectService per-request, with the contexts that may veto a delete."""
+    return LibraryProjectService(session=session, deletion_guards=(StudioProjectDeletionGuard(),))
 
 
 def get_library_tag_service(session: AsyncSession) -> LibraryTagService:
     """Provide LibraryTagService per-request."""
     return LibraryTagService(session=session)
+
+
+def get_studio_artist_service(session: AsyncSession) -> ArtistService:
+    """Provide the studio ArtistService per-request."""
+    return ArtistService(session)
+
+
+def get_studio_project_service(session: AsyncSession) -> StudioProjectService:
+    """Provide the StudioProjectService per-request."""
+    return StudioProjectService(session)
+
+
+def get_studio_track_service(session: AsyncSession) -> TrackService:
+    """Provide the studio TrackService per-request."""
+    return TrackService(session)
+
+
+def get_studio_version_service(session: AsyncSession) -> DocumentVersionService:
+    """Provide the studio DocumentVersionService per-request."""
+    return DocumentVersionService(session)
+
+
+def get_studio_export_service(session: AsyncSession) -> ExportService:
+    """Provide the studio ExportService per-request."""
+    return ExportService(session)
 
 
 def get_feedback_service(session: AsyncSession) -> FeedbackService:
@@ -2020,6 +2051,12 @@ dependencies = {
     "library_service": Provide(get_library_service, sync_to_thread=False),
     "library_project_service": Provide(get_library_project_service, sync_to_thread=False),
     "library_tag_service": Provide(get_library_tag_service, sync_to_thread=False),
+    # Media Project Studio (request-scoped; gated by studio_feature_guard on the controllers)
+    "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
+    "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
+    "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
+    "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),
+    "studio_export_service": Provide(get_studio_export_service, sync_to_thread=False),
     # In-product problem reports
     "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
     # Idempotency

@@ -21,9 +21,15 @@ from src.db.repositories.library import UNSET_UPDATE, OptionalUpdate
 from src.db.repositories.library_project import LibraryProjectRepository
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.api.services.library_project_guards import (
+        ProjectDeletionBlocker,
+        ProjectDeletionGuard,
+    )
 
 logger = structlog.get_logger(__name__)
 
@@ -40,11 +46,29 @@ class LibraryProjectNameConflictError(Exception):
         super().__init__(f"A project named {name!r} already exists")
 
 
+class LibraryProjectInUseError(Exception):
+    """Raised when another context still depends on the project. → HTTP 409 ``project_in_use``"""
+
+    def __init__(self, blockers: Sequence[ProjectDeletionBlocker]) -> None:
+        self.blockers = tuple(blockers)
+        super().__init__("The project is in use and cannot be deleted")
+
+
 class LibraryProjectService:
     """Business logic for /v1/library/projects."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(
+        self, session: AsyncSession, *, deletion_guards: Sequence[ProjectDeletionGuard]
+    ) -> None:
+        """Create the service.
+
+        Args:
+            session: Request-scoped session.
+            deletion_guards: Ports that may veto a delete (required, no default — a construction
+                site must decide, so a guard can never be forgotten by omission).
+        """
         self._session = session
+        self._deletion_guards = tuple(deletion_guards)
 
     async def list_projects(
         self,
@@ -215,12 +239,50 @@ class LibraryProjectService:
         *,
         session: AsyncSession,
     ) -> bool:
-        """Delete a project. Assigned assets are unassigned via ON DELETE SET NULL (P2)."""
+        """Delete a project. Assigned assets are unassigned via ON DELETE SET NULL (P2).
+
+        Returns:
+            True if deleted; False if not found / not owned.
+
+        Raises:
+            LibraryProjectInUseError: A deletion guard reported blockers (e.g. studio tracks), or
+                one appeared between the guard check and the delete (the FK backstop fired).
+        """
         repo = LibraryProjectRepository(session)
-        deleted = await repo.delete(project_id, user_id=user_id, product_id=product_id)
+        if await repo.get(project_id, user_id=user_id, product_id=product_id) is None:
+            return False
+
+        await self._raise_if_blocked(project_id, user_id, product_id, session)
+        try:
+            async with session.begin_nested():
+                deleted = await repo.delete(project_id, user_id=user_id, product_id=product_id)
+        except IntegrityError:
+            # Race: a dependent row appeared after the guards ran and a NO ACTION FK refused the
+            # delete. Re-evaluate to report the precise blockers — never a 500.
+            await self._raise_if_blocked(project_id, user_id, product_id, session)
+            raise
         if deleted:
             logger.info("library.project_deleted", project_id=str(project_id), user_id=str(user_id))
         return deleted
+
+    async def _raise_if_blocked(
+        self, project_id: UUID, user_id: UUID, product_id: str, session: AsyncSession
+    ) -> None:
+        blockers: list[ProjectDeletionBlocker] = []
+        for guard in self._deletion_guards:
+            blockers.extend(
+                await guard.blockers(
+                    project_id, user_id=user_id, product_id=product_id, session=session
+                )
+            )
+        if blockers:
+            logger.info(
+                "library.project_delete_blocked",
+                project_id=str(project_id),
+                user_id=str(user_id),
+                blockers=[(b.code, b.count) for b in blockers],
+            )
+            raise LibraryProjectInUseError(blockers)
 
     @staticmethod
     def _normalize_name(raw: str) -> str:

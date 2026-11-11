@@ -97,7 +97,7 @@ async def library_service(db_session: AsyncSession) -> LibraryService:
 
 @pytest_asyncio.fixture
 async def project_service(db_session: AsyncSession) -> LibraryProjectService:
-    return LibraryProjectService(session=db_session)
+    return LibraryProjectService(session=db_session, deletion_guards=())
 
 
 @pytest_asyncio.fixture
@@ -459,7 +459,7 @@ class TestMetadataPurgeUnaffectedByProjectColumns:
             session.add(expired_image)
             await session.flush()
 
-            project_service = LibraryProjectService(session=session)
+            project_service = LibraryProjectService(session=session, deletion_guards=())
             project = await project_service.create(
                 user.id, "vex", "Purge Project", None, session=session
             )

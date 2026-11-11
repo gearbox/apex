@@ -81,6 +81,9 @@ The backend serves two distinct products from the same codebase:
 │   │   │   ├── library.py      # LibraryController: GET /v1/library/, /assets/{asset_ref}[/lineage],
 │   │   │   │                   #   /groups/{job_id}; PATCH/PUT/DELETE favorite/delete; POST assets/bulk
 │   │   │   ├── library_project.py  # LibraryProjectController: CRUD /v1/library/projects
+│   │   │   ├── studio_artists.py   # StudioArtistController: /v1/studio/artists (gated by studio_feature_guard)
+│   │   │   ├── studio_projects.py  # StudioProjectController: /v1/studio/projects[/{id}/tracks[/order]]
+│   │   │   ├── studio_tracks.py    # StudioTrackController: /v1/studio/tracks, /versions, /current, /exports/suno
 │   │   │   ├── library_tag.py      # LibraryTagController: CRUD /v1/library/tags
 │   │   │   ├── oauth.py        # OAuthController: GET /v1/auth/oauth/{provider}/authorize|callback;
 │   │   │   │                   #   POST /exchange, /signup-info, /complete-signup (unguarded)
@@ -112,6 +115,7 @@ The backend serves two distinct products from the same codebase:
 │   │       ├── library.py           # LibraryService — unified grid/detail, favorites, patch, bulk ops, lineage graph
 │   │       ├── library_capabilities.py  # resolve_library_actions() — pure, table-driven available_actions resolver
 │   │       ├── library_project.py   # LibraryProjectService — project CRUD (one project per asset)
+│   │       ├── library_project_guards.py  # ProjectDeletionGuard port + ProjectDeletionBlocker (library-owned; D12)
 │   │       ├── library_tag.py       # LibraryTagService — tag CRUD (many-to-many asset tagging)
 │   │       ├── health/         # Health check system (Phase 4)
 │   │       │   ├── base.py     # HealthChecker protocol, ComponentHealth dataclass
@@ -167,6 +171,12 @@ The backend serves two distinct products from the same codebase:
 │   │   ├── library_ref.py      # AssetRef, LibraryAssetSource, parse_asset_ref()/format_asset_ref() —
 │   │   │                       #   pure typed identity for "upload:<uuid>" / "output:<uuid>"
 │   │   └── library_limits.py   # MAX_TAGS_PER_ASSET — shared bound (schemas + services)
+│   ├── studio/                 # Media Project Studio bounded context (see Key Convention 17)
+│   │   ├── documents.py        # PlanDocument / LyricsDocument msgspec Structs, decode_stored, CURRENT_SCHEMA_VERSION
+│   │   ├── validation.py       # pure normalize_plan / normalize_lyrics / check_pair_compatible / content_hash
+│   │   ├── errors.py           # StudioError hierarchy (one handler in app.py) + StudioDocumentSchemaError
+│   │   ├── services/           # artist, project, track, version (idempotent create), export, project_deletion_guard
+│   │   └── renderers/          # base (projections), projection.py, suno.py (deterministic TargetRenderer registry)
 │   ├── db/
 │   │   ├── models/
 │   │   │   ├── storage.py      # GenerationJob (+ lineage FKs), UserImage, GenerationOutput
@@ -279,6 +289,12 @@ dependencies = {
     "library_service": Provide(get_library_service, sync_to_thread=False),
     "library_project_service": Provide(get_library_project_service, sync_to_thread=False),
     "library_tag_service": Provide(get_library_tag_service, sync_to_thread=False),
+    # Media Project Studio (request-scoped; 404 unless STUDIO_ENABLED + product feature)
+    "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
+    "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
+    "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
+    "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),
+    "studio_export_service": Provide(get_studio_export_service, sync_to_thread=False),
     # Idempotency
     "idempotency_service": Provide(get_idempotency_service, sync_to_thread=False),
     # Health
@@ -378,6 +394,17 @@ Lifecycle: `lifespan` context manager in `app.py` calls `init_services()` / `shu
 
 16. **Registry-driven video validation & pricing** — `ModelMeta.video` (`VideoMeta`, `src/core/model_registry.py`) is the single source for video limits: `min_duration`/`max_duration`, `resolutions`, `supported_parameters` (`VideoParameter`: `audio`, `prompt_extend`), `input_anchored_modes`, `input_video` (`InputVideoConstraints`: accepted `formats`, `min_duration_ms`/`max_duration_ms`, `max_bytes`; `None` = the model takes no video source — non-`None` exactly when a mode accepts `MediaKind.VIDEO`), `max_combined_duration`, `bills_input_video_seconds`. Every field is required with **no default** — a new video model must decide each one. `GenerationService.generate()` validates against it **before any billing call** (`src/api/services/generation/video_validation.py`: request phase, then resolved-source phase for V2V); never re-implement these rules in a provider's `validate()`. An optional parameter sent non-`None` to a model that doesn't declare it raises `UnsupportedGenerationParameterError` (also for image models). `ModelMeta.seed_range` (`SeedRange`; `None` = unbounded, Wan is 0–2147483647) is enforced for **every** model by `validate_seed` (`generation/request_validation.py`) before any billing call; `null`/omitted always means random and `-1` is rejected, so there is one spelling of "random". Pricing: `quote = (token_cost + input_token_cost·k + per_second_token_cost·billed_seconds) · n`, with `billed_seconds = duration (+ input-video seconds when bills_input_video_seconds)`; `pricing_catalog.video_resolution` (NULL = any) selects the rule by four tiers (model+resolution → model → resolution → wildcard) and image jobs never match a resolution-specific rule. A per-second rule priced with `billed_seconds == 0` raises. Per-provider charge/refund rules come from `ProviderBillingPolicyRegistry.from_settings(settings)`.
 
+17. **Media Project Studio** (`src/studio`, `src/db/{models,repositories}/studio.py`, `src/api/routes/studio_*.py`; contract `docs/contracts/studio-contract.md`). Behind `STUDIO_ENABLED` (default off) **and** the `studio` product feature: `studio_feature_guard` answers **404** (not 403) and runs *before* `auth_guard` on every studio controller (`guards = [studio_feature_guard, auth_guard]`). The container is the existing `LibraryProject` + a 1:1 `studio_project_profiles` row; tracks are ordered inside it; **Plan** and **Lyrics** are versioned separately. Invariants:
+    - **Versions are immutable full snapshots** in a per-(track, kind) tree; `schema_version` + an Alembic data migration on breaking change (`decode_stored` raises `StudioDocumentSchemaError` — a 500 — on an unknown version, never a fallback). Version numbers come from per-track counters taken under the **track row lock** (`allocate_version_number`), never `max()+1`, and are never reused.
+    - **Create is naturally idempotent**: `UNIQUE NULLS NOT DISTINCT (track, kind, parent, content_hash)`; an identical sibling → `200` replay (no new row, no number) that **still applies `make_current`**; content equal to its parent → `409 version_unchanged`. The hash is over the *normalized* document (NFC + trim + collapse whitespace; case-insensitive comparisons use `str.casefold()`). No `Idempotency-Key`.
+    - **The current (plan, lyrics) pair is always compatible** (`check_pair_compatible`). The decision is made *before* any write, so a `409` writes nothing. Incompatible lyrics on a plan create: `incompatible_lyrics="reject"` (default, 409) or the caller's explicit `"detach"` (clears the lyrics pointer, keeps the version, response `lyrics_detached: true`). No silent auto-detach.
+    - **Same-track integrity lives in the database**: composite FKs `(parent, track, kind)`, `(based_on_plan, track)`, `(current_*, track)`; lyrics ⇔ `based_on_plan_version_id` CHECK; lyrics pointer needs a plan pointer CHECK. `tracks → profile` and `profile → artist` are **NO ACTION** (not RESTRICT) so the user hard-delete cascade is order-independent.
+    - **Locks**: profile row before `next_position`/reorder/disable/track delete; track row before numbering/pointers/version delete; always profile → track. Repositories use Core `insert/update … RETURNING`, never `flush()`/`commit()`; locking reads use `populate_existing`.
+    - **Validation collects all issues** into one `422 document_invalid` (`detail.issues=[{path, code}]`, paths never contain text). All client-facing errors are `StudioError` subclasses rendered by **one** handler (`studio_error_handler`); messages are static. Logs carry ids/kinds/counts/codes only — never names, tags, lyrics, ideas or concepts.
+    - **Renderers see projections, not documents** (`RenderablePlan`, `ArtistRenderInput`): `references`, `idea`, `notes`, persona and `aesthetic_references` have no field to leak through. Export is a pure `GET` that **always renders**: `length`/`limit`/`within_limit` per field (Suno limits are unofficial measurements), structured `warnings`, never truncation, never `(`/`)` it did not receive.
+    - **Library ↔ studio coupling is one-way**: the library defines `ProjectDeletionGuard` (`library_project_guards.py`); `LibraryProjectService(deletion_guards=…)` is **required** (no default). DI passes `StudioProjectDeletionGuard`; a project with tracks → `409 project_in_use` (`detail.blockers=[{code:"studio_tracks", count}]`), and an FK race at delete time is re-evaluated into the same 409. The library package must never import `src.studio`.
+    - Studio mutations are legal-enforced like any other (never add them to the exempt set). Studio uses `PUT`, which is in the CORS allowed methods.
+
 ---
 
 ## Common Commands
@@ -441,6 +468,10 @@ make format                       # ruff format
 | `UserIdentity` | `user_identities` | OAuth subject link: `(product_id, provider, subject)` unique, one per `(user_id, provider)`; no email stored; deleted on self-closure, kept on admin deactivation |
 | `FeedbackReport` | `feedback_reports` | In-product problem report: category/status (`open → in_progress → resolved \| dismissed`, terminal-once `resolved_at`/`resolved_by`), user text, optional `job_id` + polymorphic asset ref (no FK); `user_id`/`job_id`/`resolved_by` `ON DELETE SET NULL` so reports survive purges. Contract: `docs/contracts/feedback-contract.md` |
 | `LegalAcceptance` | `legal_acceptances` | Append-only legal events: one row per ACCEPT/WITHDRAW of one document version (`content_sha256`, IP, UA, source); CHECK: ACCEPT requires a hash; `ON DELETE CASCADE` from `users` only |
+| `StudioArtist` | `studio_artists` | Reusable artist persona; name unique case-insensitively per owner; `style_tags`/`global_avoid` are exportable, `persona`/`voice_notes`/`aesthetic_references` are planner-only and never exported |
+| `StudioProjectProfile` | `studio_project_profiles` | 1:1 studio extension of `library_projects` (PK = `library_project_id`, `ON DELETE CASCADE`); release kind, artist (`NO ACTION` FK → 409 `artist_in_use`), concept |
+| `StudioTrack` | `studio_tracks` | Ordered track (deferred unique `(project, position)`); per-kind version counters (never reused); `current_plan/lyrics_version_id` as composite same-track FKs; tracks → profile is `NO ACTION` |
+| `StudioDocumentVersion` | `studio_document_versions` | Immutable plan/lyrics snapshot (JSONB, `schema_version`, `content_hash`); tree via composite `(parent, track, kind)` FK; lyrics carry `based_on_plan_version_id`; `UNIQUE NULLS NOT DISTINCT (track, kind, parent, hash)` makes create idempotent |
 
 ---
 
@@ -514,6 +545,9 @@ PUSH_BROADCAST_CONCURRENCY=10  # Max concurrent Web Push sends per broadcast fan
 
 # Legal documents (see docs/CONFIGURATION.md)
 LEGAL_DOCUMENTS_DIR=legal      # manifest.toml + {product}/{doc_type}/{YYYY-MM-DD}.md; validated at startup
+
+# Media Project Studio (default off; routes answer 404 when off — see docs/CONFIGURATION.md)
+STUDIO_ENABLED=false
 
 # Alibaba Model Studio / Wan (empty URL or key = provider disabled; see docs/CONFIGURATION.md)
 MODEL_STUDIO_BASE_URL=https://<workspace>.ap-southeast-1.maas.aliyuncs.com   # https origin, no path

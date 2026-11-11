@@ -97,7 +97,7 @@ def content_proxy() -> ContentProxyService:
 
 @pytest_asyncio.fixture
 async def project_service(db_session: AsyncSession) -> LibraryProjectService:
-    return LibraryProjectService(session=db_session)
+    return LibraryProjectService(session=db_session, deletion_guards=())
 
 
 @pytest_asyncio.fixture

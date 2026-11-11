@@ -322,6 +322,14 @@ enabled (independently of `*_VIDEO_WORKER_IN_PROCESS`); a standalone worker is o
 
 ---
 
+### Media Project Studio
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `STUDIO_ENABLED` | `false` | `bool` | Global kill switch for `/v1/studio/*`. Studio is exposed only when this is `true` **and** the resolved product lists the `studio` feature (both `vex` and `synthara` do). Otherwise every studio route answers `404` — before authentication and before any DB access — so a disabled feature is indistinguishable from a route that does not exist. Contract: `docs/contracts/studio-contract.md`. |
+
+---
+
 ### Email (Resend)
 
 Verification and password-reset emails. With `RESEND_API_KEY` empty, `LogEmailService` is used and

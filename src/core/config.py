@@ -965,6 +965,17 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Media Project Studio
+    # -------------------------------------------------------------------------
+    studio_enabled: bool = Field(
+        default=False,
+        description=(
+            "Global kill switch for /v1/studio (env STUDIO_ENABLED). When false every studio "
+            "route answers 404, whatever the product's 'studio' feature flag says."
+        ),
+    )
+
+    # -------------------------------------------------------------------------
     # Background workers
     # -------------------------------------------------------------------------
     worker_mode: WorkerMode = Field(
