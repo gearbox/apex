@@ -71,8 +71,23 @@ class StudioProjectService:
                     release_kind=data.release_kind.value,
                     concept=normalize_block(data.concept),
                 )
-        except IntegrityError as exc:  # the artist was deleted after the check
-            raise ArtistNotFound from exc
+        except IntegrityError as exc:
+            # A foreign key failed: the library project or the artist was deleted after the
+            # checks above. Re-check to report which; anything else is unexplained and surfaces.
+            if (
+                await self._library_projects.get(
+                    library_project_id, user_id=user_id, product_id=product_id
+                )
+                is None
+            ):
+                raise StudioNotFound from exc
+            if (
+                data.artist_id is not None
+                and await self._artists.get(data.artist_id, user_id=user_id, product_id=product_id)
+                is None
+            ):
+                raise ArtistNotFound from exc
+            raise
         row = await self._profiles.get_row(
             library_project_id, user_id=user_id, product_id=product_id
         )

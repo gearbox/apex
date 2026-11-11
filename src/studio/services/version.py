@@ -28,11 +28,13 @@ from src.core.enums import StudioDocumentKind, StudioDocumentOrigin, StudioIncom
 from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTrackRepository
 from src.studio.documents import CURRENT_SCHEMA_VERSION, LyricsDocument, PlanDocument
 from src.studio.errors import (
+    DocumentIssue,
     InvalidCursor,
     LyricsIncompatibleWithPlan,
     ParentVersionNotFound,
     PlanRequired,
     PlanVersionNotFound,
+    StudioDocumentInvalid,
     StudioError,
     StudioNotFound,
     VersionHasChildren,
@@ -44,6 +46,7 @@ from src.studio.errors import (
 from src.studio.services.mappers import (
     decode_lyrics,
     decode_plan,
+    require_current_row,
     track_out,
     version_detail,
     version_summary,
@@ -105,25 +108,37 @@ class DocumentVersionService:
             raise missing
         return version
 
+    async def _pointer_row(
+        self, version_id: UUID, track: StudioTrack, user_id: UUID, product_id: str
+    ) -> StudioDocumentVersion:
+        """The row a non-null current pointer of ``track`` refers to.
+
+        Raises:
+            RuntimeError: There is no such row (a broken invariant, never "no document").
+        """
+        return require_current_row(
+            await self._versions.get_on_track(
+                version_id, track.id, user_id=user_id, product_id=product_id
+            )
+        )
+
     async def _current_plan_doc(
         self, track: StudioTrack, user_id: UUID, product_id: str
     ) -> PlanDocument | None:
+        """The current plan, or ``None`` when the track has none (a null pointer)."""
         if track.current_plan_version_id is None:
             return None
-        row = await self._versions.get_on_track(
-            track.current_plan_version_id, track.id, user_id=user_id, product_id=product_id
-        )
-        return None if row is None else decode_plan(row)
+        row = await self._pointer_row(track.current_plan_version_id, track, user_id, product_id)
+        return decode_plan(row)
 
     async def _current_lyrics_doc(
         self, track: StudioTrack, user_id: UUID, product_id: str
     ) -> LyricsDocument | None:
+        """The current lyrics, or ``None`` when the track has none (a null pointer)."""
         if track.current_lyrics_version_id is None:
             return None
-        row = await self._versions.get_on_track(
-            track.current_lyrics_version_id, track.id, user_id=user_id, product_id=product_id
-        )
-        return None if row is None else decode_lyrics(row)
+        row = await self._pointer_row(track.current_lyrics_version_id, track, user_id, product_id)
+        return decode_lyrics(row)
 
     # -- create ------------------------------------------------------------------------------
 
@@ -143,12 +158,24 @@ class DocumentVersionService:
             StudioNotFound: The track is not the caller's.
             ParentVersionNotFound: The parent is not a version of this track and kind.
             PlanVersionNotFound: The lyrics' base is not a plan version of this track.
-            StudioDocumentInvalid: The document failed validation (all issues).
+            StudioDocumentInvalid: The document failed validation (all issues), or
+                ``incompatible_lyrics="detach"`` was sent with ``make_current=False``
+                (``requires_make_current``; raised before anything is read).
             VersionUnchanged: The content equals the parent's.
             LyricsIncompatibleWithPlan: ``make_current`` would make an incompatible pair current.
             PlanRequired: Lyrics were made current on a track without a plan.
             VersionLimitReached: The per-kind cap is reached (replays are exempt).
         """
+        if (
+            isinstance(request, PlanVersionCreate)
+            and request.incompatible_lyrics is StudioIncompatibleLyricsPolicy.DETACH
+            and not request.make_current
+        ):
+            # "Detach" is a statement about the *current* pair; without make_current there is
+            # no change to the pair, so the request contradicts itself. Refused before any read.
+            raise StudioDocumentInvalid(
+                (DocumentIssue("incompatible_lyrics", "requires_make_current"),)
+            )
         track = await self._lock_track(track_id, user_id, product_id)
         kind = (
             StudioDocumentKind.PLAN
@@ -400,20 +427,22 @@ class DocumentVersionService:
         if lyrics_id is not None:
             if plan_id is None:
                 raise PlanRequired
-            plan_doc = (
-                decode_plan(plan_row)
+            # A row that was not given in this call is the one the track's pointer names; if it
+            # cannot be read the invariant is broken and the compatibility check must not be
+            # skipped (RD5).
+            plan_doc = decode_plan(
+                plan_row
                 if plan_row is not None
-                else await self._current_plan_doc(track, user_id, product_id)
+                else await self._pointer_row(plan_id, track, user_id, product_id)
             )
-            lyrics_doc = (
-                decode_lyrics(lyrics_row)
+            lyrics_doc = decode_lyrics(
+                lyrics_row
                 if lyrics_row is not None
-                else await self._current_lyrics_doc(track, user_id, product_id)
+                else await self._pointer_row(lyrics_id, track, user_id, product_id)
             )
-            if plan_doc is not None and lyrics_doc is not None:
-                issues = check_pair_compatible(plan_doc, lyrics_doc)
-                if issues:
-                    raise LyricsIncompatibleWithPlan(issues)
+            issues = check_pair_compatible(plan_doc, lyrics_doc)
+            if issues:
+                raise LyricsIncompatibleWithPlan(issues)
 
         if plan_id != track.current_plan_version_id or lyrics_id != track.current_lyrics_version_id:
             track = await self._tracks.set_current(

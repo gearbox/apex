@@ -157,6 +157,7 @@ def upgrade() -> None:
         ),
     )
     op.create_index("ix_studio_tracks_product_id", "studio_tracks", ["product_id"])
+    op.create_index("ix_studio_tracks_user_id", "studio_tracks", ["user_id"])
 
     # -- studio_document_versions -------------------------------------------------------------
     op.create_table(
@@ -218,6 +219,7 @@ def upgrade() -> None:
     op.create_index(
         "ix_studio_document_versions_product_id", "studio_document_versions", ["product_id"]
     )
+    op.create_index("ix_studio_document_versions_user_id", "studio_document_versions", ["user_id"])
     op.create_index(
         "ix_studio_doc_versions_based_on", "studio_document_versions", ["based_on_plan_version_id"]
     )
@@ -253,9 +255,11 @@ def downgrade() -> None:
 
     op.drop_index("ix_studio_doc_versions_list", table_name="studio_document_versions")
     op.drop_index("ix_studio_doc_versions_based_on", table_name="studio_document_versions")
+    op.drop_index("ix_studio_document_versions_user_id", table_name="studio_document_versions")
     op.drop_index("ix_studio_document_versions_product_id", table_name="studio_document_versions")
     op.drop_table("studio_document_versions")
 
+    op.drop_index("ix_studio_tracks_user_id", table_name="studio_tracks")
     op.drop_index("ix_studio_tracks_product_id", table_name="studio_tracks")
     op.drop_table("studio_tracks")
 

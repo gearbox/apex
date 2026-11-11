@@ -7,6 +7,7 @@ from uuid import uuid4
 
 import msgspec
 import pytest
+from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.studio import ArtistCreate, ProjectProfilePut, TrackPatch
 from src.core.enums import StudioReleaseKind
@@ -99,6 +100,79 @@ class TestProfiles:
             ProjectProfilePut(release_kind=StudioReleaseKind.SINGLE, artist_id=mine.id),
         )
         assert out.artist_id == mine.id
+
+    @staticmethod
+    def _vanishes_after_first_read(service: object, attribute: str, monkeypatch) -> None:
+        """Make ``service.<attribute>.get`` find its row once, then report it gone (a race)."""
+        repo = getattr(service, attribute)
+        real = repo.get
+        calls = 0
+
+        async def vanishing(*args: object, **kwargs: object) -> object:
+            nonlocal calls
+            calls += 1
+            return await real(*args, **kwargs) if calls == 1 else None
+
+        monkeypatch.setattr(repo, "get", vanishing)
+
+    @staticmethod
+    def _foreign_key_failure(w: StudioWorld, monkeypatch) -> None:
+        async def refuse(*_args: object, **_kwargs: object) -> object:
+            raise IntegrityError("INSERT studio_project_profiles", {}, Exception("fk"))
+
+        monkeypatch.setattr(w.projects._profiles, "upsert", refuse)
+
+    async def test_a_library_project_deleted_mid_request_is_not_found(
+        self, studio: StudioWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # The FK failure used to be reported as artist_not_found whatever had vanished.
+        w = studio
+        self._vanishes_after_first_read(w.projects, "_library_projects", monkeypatch)
+        self._foreign_key_failure(w, monkeypatch)
+        with pytest.raises(StudioNotFound):
+            await w.projects.upsert_profile(
+                w.project_id,
+                w.user_id,
+                w.product_id,
+                ProjectProfilePut(release_kind=StudioReleaseKind.SINGLE),
+            )
+
+    async def test_an_artist_deleted_mid_request_is_artist_not_found(
+        self, studio: StudioWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        w = studio
+        artist = await w.artists.create(w.user_id, w.product_id, ArtistCreate(name="Fleeting"))
+        self._vanishes_after_first_read(w.projects, "_artists", monkeypatch)
+        self._foreign_key_failure(w, monkeypatch)
+        with pytest.raises(ArtistNotFound):
+            await w.projects.upsert_profile(
+                w.project_id,
+                w.user_id,
+                w.product_id,
+                ProjectProfilePut(release_kind=StudioReleaseKind.SINGLE, artist_id=artist.id),
+            )
+
+    async def test_an_unexplained_integrity_error_propagates(
+        self, studio: StudioWorld, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        # Neither the project nor the artist is gone: do not guess a code, let it surface.
+        w = studio
+        artist = await w.artists.create(w.user_id, w.product_id, ArtistCreate(name="Steady"))
+        self._foreign_key_failure(w, monkeypatch)
+        with pytest.raises(IntegrityError):
+            await w.projects.upsert_profile(
+                w.project_id,
+                w.user_id,
+                w.product_id,
+                ProjectProfilePut(release_kind=StudioReleaseKind.SINGLE, artist_id=artist.id),
+            )
+        with pytest.raises(IntegrityError):  # and without an artist at all
+            await w.projects.upsert_profile(
+                w.project_id,
+                w.user_id,
+                w.product_id,
+                ProjectProfilePut(release_kind=StudioReleaseKind.SINGLE),
+            )
 
     async def test_reads_and_pages(self, enabled_studio: StudioWorld, make_library_project) -> None:
         w = enabled_studio

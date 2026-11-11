@@ -179,7 +179,9 @@ async def test_check_values_are_generated_from_the_enums(db_engine: AsyncEngine)
         "ix_studio_project_profiles_artist_id",
         "ix_studio_project_profiles_product_id",
         "ix_studio_tracks_product_id",
+        "ix_studio_tracks_user_id",
         "ix_studio_document_versions_product_id",
+        "ix_studio_document_versions_user_id",
         "ix_studio_doc_versions_based_on",
         "ix_studio_doc_versions_list",
     ],
@@ -197,3 +199,5 @@ async def test_indexes_exist(db_engine: AsyncEngine, index: str) -> None:
         assert "UNIQUE" in found
     if index == "ix_studio_doc_versions_list":
         assert "created_at DESC, id DESC" in found
+    if index.endswith("_user_id"):  # the users ON DELETE CASCADE must not scan sequentially
+        assert found.endswith("USING btree (user_id)")

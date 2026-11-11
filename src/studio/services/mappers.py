@@ -2,7 +2,7 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, cast
+from typing import TYPE_CHECKING, Final, cast
 
 from src.api.schemas.studio import (
     ArtistOut,
@@ -20,6 +20,7 @@ if TYPE_CHECKING:
     from src.db.repositories.studio import ProjectListRow
 
 __all__ = [
+    "DANGLING_CURRENT_POINTER",
     "artist_out",
     "decode_lyrics",
     "decode_plan",
@@ -27,10 +28,13 @@ __all__ = [
     "lyrics_version_detail",
     "plan_version_detail",
     "project_out",
+    "require_current_row",
     "track_out",
     "version_detail",
     "version_summary",
 ]
+
+DANGLING_CURRENT_POINTER: Final = "studio current pointer without a row"
 
 
 def artist_out(artist: StudioArtist) -> ArtistOut:
@@ -77,6 +81,22 @@ def track_out(track: StudioTrack) -> TrackOut:
 
 def is_current(version: StudioDocumentVersion, track: StudioTrack) -> bool:
     return version.id in (track.current_plan_version_id, track.current_lyrics_version_id)
+
+
+def require_current_row(row: StudioDocumentVersion | None) -> StudioDocumentVersion:
+    """The version row a track's **non-null** current pointer refers to.
+
+    The composite same-track foreign keys make a dangling pointer impossible, so a missing row
+    means an internal invariant is broken. It must fail loudly (the catch-all 500 handler logs
+    it), never read as "no document": that would skip the pair-compatibility check or hide the
+    track's current document from the UI (RD5).
+
+    Raises:
+        RuntimeError: ``row`` is ``None``.
+    """
+    if row is None:
+        raise RuntimeError(DANGLING_CURRENT_POINTER)
+    return row
 
 
 def decode_plan(version: StudioDocumentVersion) -> PlanDocument:

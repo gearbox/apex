@@ -663,6 +663,37 @@ class TestCurrentPair:
         assert row.current_lyrics_version_id is None
         assert (await w.version_row(lyr.version.id)).id == lyr.version.id  # the version survives
 
+    async def test_detach_without_make_current_is_refused_and_writes_nothing(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        # Review probe: this used to be accepted, did nothing, and reported lyrics_detached=false.
+        w = enabled_studio
+        track, p, lyr, verse, _ = await _track_with_pair(w)
+        before = await w.version_count()
+        counter_before = (await w.track_row(track)).next_plan_version_number
+
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            await w.plan(
+                track, make_plan(verse, title="no chorus"), make_current=False, incompatible=DETACH
+            )
+        assert exc.value.detail == {
+            "issues": [{"path": "incompatible_lyrics", "code": "requires_make_current"}]
+        }
+        assert await w.version_count() == before
+        row = await w.track_row(track)
+        assert row.next_plan_version_number == counter_before
+        assert (row.current_plan_version_id, row.current_lyrics_version_id) == (
+            p.version.id,
+            lyr.version.id,
+        )
+
+    async def test_detach_without_make_current_is_refused_before_any_read(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        with pytest.raises(StudioDocumentInvalid):  # not StudioNotFound: no track was looked up
+            await w.plan(uuid4(), make_plan(), make_current=False, incompatible=DETACH)
+
     async def test_detach_with_compatible_lyrics_changes_nothing(
         self, enabled_studio: StudioWorld
     ) -> None:
