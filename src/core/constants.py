@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Mapping
+from typing import Final
 from uuid import UUID
 
 from src.core.enums import ScriptVariant
@@ -28,6 +29,12 @@ SCRIPT_VARIANT_SOURCES: Mapping[ScriptVariant, tuple[str, str]] = {
 # Settings.provisioning_script_dev_ref — but it is checked separately, never folded into
 # this pattern, so it never gets the long "immutable" cache TTL.
 PROVISIONING_REF_PATTERN = re.compile(r"^(v\d+\.\d+\.\d+|[0-9a-f]{40})$")
+
+# Oldest aisha bootstrap-script release that pulls its GitHub token from Apex
+# (POST /v1/internal/gpu-sessions/{id}/github-token). Apex no longer sends
+# ACS_GITHUB_TOKEN, so an older script exits 2 at startup. Only vX.Y.Z tags can be
+# ordered; full commit SHAs and the dev ref are not checked.
+MIN_PROVISIONING_SCRIPT_TAG: Final = (0, 10, 0)
 
 # T3 (round-3 remediation): characters that are unsafe in Settings.provisioning_script_dev_ref
 # because it is interpolated raw as the single `{ref:str}` path segment of

@@ -727,8 +727,10 @@ class TestAdvanceProvisioning:
         assert update_instance_kwargs["callback_token_hash"] == expected_hash
         assert "ACS_HF_TOKEN" in env
         assert "ACS_CIVITAI_API_TOKEN" in env
+        # Phase C: Apex sends no GitHub credential — nodes pull their own token.
+        assert "ACS_GITHUB_TOKEN" not in env
+        assert "ghp_test_token" not in env.values()
         # New contract keys
-        assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
         assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
         assert env["ACS_BUNDLES_BRANCH"] == "master"
         assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
@@ -995,9 +997,55 @@ class TestAdvanceProvisioning:
 
             await worker._retry_or_fail(session, reason="timeout")
 
+        provider.get_token.assert_awaited_once()
         mocks["vastai_client"].create_instance.assert_not_called()
         failed_call = mock_repo.update_status.call_args_list[-1]
         assert failed_call[0][1] == GpuSessionStatus.failed
+        assert failed_call.kwargs["error_message"] == "retry_github_token_unavailable"
+
+    async def test_retry_awaits_github_provider_once_before_creating_the_instance(self) -> None:
+        """K4: the credential pre-flight still runs exactly once on the retry path, ahead of
+        instance creation, even though its value is discarded."""
+        call_order: list[str] = []
+
+        async def _get_token() -> None:
+            call_order.append("get_token")
+
+        async def _create_instance(*_args: Any, **_kwargs: Any) -> int:
+            call_order.append("create_instance")
+            return 88888
+
+        provider = AsyncMock()
+        provider.get_token.side_effect = _get_token
+        worker, mocks = _make_worker(
+            settings=_make_settings(provisioning_recreation_attempts=3),
+            github_token_provider=provider,
+        )
+        session = _make_gpu_session(
+            status=GpuSessionStatus.pending,
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            callback_token_hash="some-existing-hash",
+        )
+        mocks["vastai_client"].destroy_instance = AsyncMock()
+        mocks["bundle_index"].resolve_bundle_override.return_value = _make_bundle_mapping()
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["cf_client"].get_tunnel_token.return_value = "fetched-tunnel-token"
+        mocks["vastai_client"].create_instance.side_effect = _create_instance
+
+        with patch(_REPO_PATH) as MockRepo, patch(_OPERATION_REPO_PATH) as MockOperationRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.increment_provision_attempt.return_value = 2
+            mock_repo.get_by_id.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+            MockOperationRepo.return_value = AsyncMock()
+
+            await worker._retry_or_fail(session, reason="timeout")
+
+        provider.get_token.assert_awaited_once()
+        assert call_order == ["get_token", "create_instance"]
+        env = mocks["vastai_client"].create_instance.call_args.kwargs["env"]
+        assert "ACS_GITHUB_TOKEN" not in env
 
     async def test_retry_fails_fast_when_build_acs_env_raises(self) -> None:
         """S7: build_acs_env's bare ValueError (invalid apex_callback_url) must be

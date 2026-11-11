@@ -210,6 +210,63 @@ class TestProvisioningScriptSettings:
         )
         assert settings.provisioning_script_ref == "main"
 
+    @pytest.mark.parametrize("old_ref", ["v0.9.3", "v0.9.10", "v0.1.0", "v0.0.0"])
+    def test_tag_older_than_the_floor_is_rejected(self, old_ref: str) -> None:
+        """K5/D3: Apex no longer sends ACS_GITHUB_TOKEN, so a pre-v0.10.0 script would exit 2
+        on every node. v0.9.10 pins that the comparison is numeric, not lexicographic."""
+        with pytest.raises(ValidationError, match=r"older than v0\.10\.0") as exc_info:
+            _base_settings(
+                AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
+                provisioning_script_ref=old_ref,
+                apex_callback_url="https://apex.example.test",
+            )
+        assert old_ref in str(exc_info.value)
+
+    @pytest.mark.parametrize("ref", ["v0.10.0", "v0.10.1", "v0.11.0", "v1.2.3", "v10.0.0"])
+    def test_tag_at_or_above_the_floor_loads(self, ref: str) -> None:
+        s = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
+            provisioning_script_ref=ref,
+            apex_callback_url="https://apex.example.test",
+        )
+        assert s.provisioning_script_ref == ref
+
+    @pytest.mark.parametrize("sha", ["a" * 40, "0123456789abcdef" * 2 + "01234567"])
+    def test_commit_sha_is_not_version_checked(self, sha: str) -> None:
+        """A SHA cannot be ordered against a tag, so it is accepted unchecked (and must
+        never reach int())."""
+        s = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
+            provisioning_script_ref=sha,
+            apex_callback_url="https://apex.example.test",
+        )
+        assert s.provisioning_script_ref == sha
+
+    @pytest.mark.parametrize("dev_ref", ["main", "vnext", "v0.9.3-fix"])
+    def test_dev_ref_outside_production_is_not_version_checked(self, dev_ref: str) -> None:
+        """A dev ref that merely starts with 'v' (or looks like an old tag plus a suffix)
+        is not a vX.Y.Z tag, so the floor never applies and int() is never reached."""
+        s = _base_settings(
+            AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
+            environment="staging",
+            provisioning_script_ref=dev_ref,
+            provisioning_script_dev_ref=dev_ref,
+            apex_callback_url="https://apex.example.test",
+        )
+        assert s.provisioning_script_ref == dev_ref
+
+    def test_old_tag_is_rejected_even_when_it_is_also_the_dev_ref(self) -> None:
+        """A dev ref spelled exactly like a vX.Y.Z tag is that tag as far as the floor is
+        concerned: it matches the immutable pattern, so it is ordered like any other."""
+        with pytest.raises(ValidationError, match=r"older than v0\.10\.0"):
+            _base_settings(
+                AI_BUNDLES_GITHUB_TOKEN=_TEST_PAT,
+                environment="staging",
+                provisioning_script_ref="v0.9.3",
+                provisioning_script_dev_ref="v0.9.3",
+                apex_callback_url="https://apex.example.test",
+            )
+
     def test_cache_ttl_defaults(self) -> None:
         s = _base_settings()
         assert s.provisioning_script_cache_ttl_seconds == 86400

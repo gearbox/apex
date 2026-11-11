@@ -15,6 +15,7 @@ from pydantic import BaseModel, BeforeValidator, Field, SecretStr, computed_fiel
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 from src.core.constants import (
+    MIN_PROVISIONING_SCRIPT_TAG,
     PROVISIONING_REF_PATTERN,
     validate_dev_ref_is_route_safe,
 )
@@ -711,7 +712,9 @@ class Settings(BaseSettings):
             "vX.Y.Z tag or a full 40-hex commit SHA) unless it equals "
             "provisioning_script_dev_ref. Required for GPU sessions to start — empty is "
             "treated as a config-validation failure (503 provisioning_unavailable), the "
-            "same fail-closed posture as an empty github_content_token."
+            "same fail-closed posture as an empty github_content_token. Tags older than "
+            "v0.10.0 are rejected (they need the removed `ACS_GITHUB_TOKEN`); commit SHAs "
+            "must point at v0.10.0 or later, unchecked."
         ),
     )
     provisioning_script_dev_ref: OptionalNonBlankStr = Field(
@@ -1867,6 +1870,16 @@ class Settings(BaseSettings):
                     "provisioning_script_ref must be a release tag/full commit SHA, or equal "
                     "provisioning_script_dev_ref outside production"
                 )
+            # Only a vX.Y.Z tag can be ordered; a SHA or the dev ref never reaches int().
+            if ref.startswith("v") and is_immutable:
+                version = tuple(int(part) for part in ref[1:].split("."))
+                if version < MIN_PROVISIONING_SCRIPT_TAG:
+                    raise ValueError(
+                        "provisioning_script_ref "
+                        f"{ref} is older than v{'.'.join(map(str, MIN_PROVISIONING_SCRIPT_TAG))}: "
+                        "Apex no longer sends ACS_GITHUB_TOKEN, and older aisha scripts "
+                        "cannot fetch a GitHub token from Apex"
+                    )
 
         gpu_stack_configured = bool(ref) or bool(self.apex_callback_url)
         if gpu_stack_configured:

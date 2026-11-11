@@ -924,8 +924,10 @@ class TestStartSession:
         # No docker port mapping and no extra-args knob: both were dead (D8).
         assert not [key for key in env if key.startswith("-p ")]
         assert "ACS_COMFYUI_EXTRA_ARGS" not in env
+        # Phase C: Apex sends no GitHub credential — nodes pull their own token.
+        assert "ACS_GITHUB_TOKEN" not in env
+        assert "ghp_test_token" not in env.values()
         # New contract keys
-        assert env["ACS_GITHUB_TOKEN"] == "ghp_test_token"
         assert env["ACS_BUNDLES_REPO"] == "https://github.com/gearbox/ai-bundles.git"
         assert env["ACS_BUNDLES_BRANCH"] == "master"
         assert env["ACS_AISHA_REPO"] == "https://github.com/gearbox/aisha.git"
@@ -1175,6 +1177,41 @@ class TestStartSession:
         mocks["vastai_client"].search_offers.assert_not_called()
         mocks["vastai_client"].create_instance.assert_not_called()
         mock_repo.create.assert_not_called()
+
+    async def test_start_session_awaits_github_provider_once_before_tunnel_creation(self) -> None:
+        """K3: the credential pre-flight still runs exactly once, ahead of the first external
+        resource — even though its value is discarded (nodes pull their own token)."""
+        call_order: list[str] = []
+
+        async def _get_token() -> None:
+            call_order.append("get_token")
+
+        async def _create_tunnel(*_args: Any, **_kwargs: Any) -> tuple[str, str, str, str]:
+            call_order.append("create_session_tunnel")
+            return _TUNNEL_RESULT
+
+        provider = AsyncMock()
+        provider.get_token.side_effect = _get_token
+        service, mocks = _make_service(github_token_provider=provider)
+        mocks["bundle_index"].resolve_bundle.return_value = _make_bundle_mapping()
+        mocks["cf_client"].create_session_tunnel.side_effect = _create_tunnel
+        mocks["vastai_client"].search_offers.return_value = [_make_offer()]
+        mocks["vastai_client"].create_instance.return_value = 55555
+
+        with patch(_REPO_PATH) as MockRepo:
+            mock_repo = AsyncMock()
+            MockRepo.return_value = mock_repo
+            mock_repo.create.return_value = _make_gpu_session(status=GpuSessionStatus.pending)
+
+            await service.start_session(
+                user_id=uuid4(),
+                product_id="vex",
+                model_type=ModelType.AISHA_IMAGE,
+                account_id=mocks["account_id"],
+            )
+
+        provider.get_token.assert_awaited_once()
+        assert call_order == ["get_token", "create_session_tunnel"]
 
     async def test_start_session_fails_fast_when_github_token_unavailable(self) -> None:
         """A GitHub App token that cannot be minted is a clean 503 before ANY external

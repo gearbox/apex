@@ -869,9 +869,7 @@ _GITHUB_TOKENS = [
     pytest.param(f"gho_{_BODY_36}", id="oauth-gho"),
     pytest.param(f"ghu_{_BODY_36}", id="user-to-server-ghu"),
     pytest.param(f"ghr_{_BODY_36}", id="refresh-ghr"),
-    pytest.param(
-        f"github_pat_11ABCDEFG0aBcDeFgHiJkL_{'x' * 59}", id="fine-grained-pat"
-    ),
+    pytest.param(f"github_pat_11ABCDEFG0aBcDeFgHiJkL_{'x' * 59}", id="fine-grained-pat"),
 ]
 
 

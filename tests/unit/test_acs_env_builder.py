@@ -4,7 +4,8 @@ The builder is a pure function — no mocks needed. Tests cover:
 - all contract keys present
 - each key maps to the correct settings field
 - defaults and type coercions
-- the GitHub token comes from the caller (the GitHubTokenProvider's), never from settings
+- the env carries no GitHub credential (Phase C): no ACS_GITHUB_TOKEN, and build_acs_env
+  no longer accepts a github_token
 - no dead docker "-p" mapping and no ACS_COMFYUI_EXTRA_ARGS (D8)
 - closed contract (no unexpected keys)
 """
@@ -35,7 +36,6 @@ _DEFAULT_COMFYUI_PORT: int = Settings.model_fields["comfyui_port"].default
 _EXPECTED_ACS_KEYS = {
     "ACS_BUNDLE",
     "ACS_BUNDLE_VERSION",
-    "ACS_GITHUB_TOKEN",
     "ACS_BUNDLES_REPO",
     "ACS_BUNDLES_BRANCH",
     "ACS_AISHA_REPO",
@@ -90,7 +90,6 @@ def _build(**overrides: object) -> dict[str, str]:
         provision_script_sha256=overrides.pop(  # type: ignore[arg-type]
             "provision_script_sha256", "a" * 64
         ),
-        github_token=overrides.pop("github_token", "ghp_test_token"),  # type: ignore[arg-type]
     )
 
 
@@ -105,17 +104,31 @@ def test_all_acs_keys_present() -> None:
         assert key in env, f"Missing required key: {key}"
 
 
-def test_acs_github_token_is_the_token_passed_in() -> None:
-    env = _build(github_token="ghs_app_installation_token")
-    assert env["ACS_GITHUB_TOKEN"] == "ghs_app_installation_token"
-
-
-def test_acs_github_token_ignores_settings() -> None:
-    """The PAT on Settings must never leak into the env: the provider decides."""
+def test_env_carries_no_github_credential() -> None:
+    """K1: Phase C — nodes pull their own token from Apex, so the env has none: not the
+    removed ACS_GITHUB_TOKEN key, and not the configured PAT under any other key."""
     s = _make_settings(github_content_token="ghp_settings_pat")
-    env = _build(settings=s, github_token="ghs_from_provider")
-    assert env["ACS_GITHUB_TOKEN"] == "ghs_from_provider"
+    env = _build(settings=s)
+    assert "ACS_GITHUB_TOKEN" not in env
     assert "ghp_settings_pat" not in env.values()
+    assert not any("ghp_settings_pat" in value for value in env.values())
+
+
+def test_build_acs_env_no_longer_accepts_github_token() -> None:
+    """K2: the parameter is gone, so a stale caller fails loudly instead of being ignored."""
+    with pytest.raises(TypeError, match="github_token"):
+        build_acs_env(
+            settings=_make_settings(),
+            session_id=uuid4(),
+            operation_id=uuid4(),
+            bundle_name="wan_2.2_i2v",
+            bundle_version="260105-01",
+            comfyui_port=_DEFAULT_COMFYUI_PORT,
+            tunnel_token="tunnel-secret",
+            callback_token="cb-secret",
+            provision_script_sha256="a" * 64,
+            github_token="ghp_test_token",  # type: ignore[call-arg]  # pyright: ignore[reportCallIssue]
+        )
 
 
 def test_acs_bundles_repo_from_settings() -> None:
