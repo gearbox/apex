@@ -102,6 +102,22 @@ def _section_labels(sections: tuple[RenderableSection, ...]) -> list[str]:
     return labels
 
 
+_INSTRUMENTAL_CUE: Final = "instrumental"
+
+
+def _instrumental_cue(section: RenderableSection) -> list[str]:
+    """The ``instrumental`` descriptor for a flagged section whose header does not say so.
+
+    A section of kind ``instrumental`` is already headed ``[Instrumental]``; any other kind with
+    ``instrumental=True`` (a drop, a verse, ...) would otherwise render as a bare ``[Drop]`` and
+    Suno would be free to sing over it. The cue goes **first** so a long tag list cannot push it
+    out of sight (and counts toward the lyrics length like any other text).
+    """
+    if section.instrumental and section.kind is not StudioSectionKind.INSTRUMENTAL:
+        return [_INSTRUMENTAL_CUE]
+    return []
+
+
 def _meta_tag(label: str, descriptors: list[str]) -> str:
     return f"[{label}: {', '.join(descriptors)}]" if descriptors else f"[{label}]"
 
@@ -135,7 +151,9 @@ class SunoRenderer:
         labels = _section_labels(plan.sections)
         blocks: list[str] = []
         for section, label in zip(plan.sections, labels, strict=True):
-            descriptors = dedupe_ci([*section.delivery, *section.style.tags])
+            descriptors = dedupe_ci(
+                [*_instrumental_cue(section), *section.delivery, *section.style.tags]
+            )
             block = [_meta_tag(label, descriptors)]
             for line in lines_by_section.get(section.id, ()):
                 if line.delivery:
