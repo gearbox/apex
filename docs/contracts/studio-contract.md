@@ -50,7 +50,7 @@ type SectionKind =
 // ----- artists -------------------------------------------------------------------------
 interface Artist {
   id: UUID;
-  name: string;                      // 1–100 after normalization, unique per owner (case-insensitive)
+  name: string;                      // 1–100 after normalization, unique per owner (case-insensitive via lower(), see §9)
   persona: string | null;            // ≤ 4000 — planner context only, never exported
   voice_notes: string | null;        // ≤ 2000 — planner context only, never exported
   default_language: string | null;   // BCP-47-like, e.g. "en", "pt-BR"
@@ -126,6 +126,15 @@ interface LyricsDocument {           // schema_version 1
   sections?: LyricsSection[];        // ≤ 64; at most one entry per plan section
 }
 ```
+
+**Size limits (checked after normalization, reported as `422 document_invalid` issues — see §4).** The per-field limits above alone would allow megabytes per version, so two totals apply on top of them:
+
+| Limit | Value | Issue code (path) |
+|---|---|---|
+| Lyrics text — the sum of `text` over **all** lines of all sections, in Unicode code points | **20,000** | `lyrics_too_long` (`sections`) |
+| Any document (plan or lyrics) as compact UTF-8 JSON — what is stored and hashed | **131,072** bytes (128 KiB) | `document_too_large` (`""`, the document root) |
+
+20,000 characters is about four times Suno's own Lyrics box. Cyrillic text costs about 2 bytes per character (20,000 characters in 400 lines ≈ 52 KB), so the character limit is the one a normal lyricist meets first; `document_too_large` is for pathological shapes (thousands of 1–4-character lines, or very large plans). Both limits are measured on the *normalized* form, so padding whitespace does not count. A document exactly at a limit is accepted.
 
 ### 2.2 Versions
 
@@ -205,6 +214,11 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `duplicate_section` | lyrics list the same section twice |
    | `instrumental_section_has_lines` | lyrics on an instrumental section |
    | `syllable_range_inverted` | `line_syllables.min > max` |
+   | `lyrics_too_long` | the lyrics' line text totals more than 20,000 characters (path `sections`) |
+   | `document_too_large` | the normalized document is larger than 131,072 bytes as compact JSON (path `""`, the root) |
+   | `requires_make_current` | `incompatible_lyrics: "detach"` was sent with `make_current: false` (path `incompatible_lyrics`); checked first, before anything else is read |
+
+   The size codes are collected together with every other issue; they never short-circuit validation.
 
    Wire-level violations (lengths, ranges, unknown fields, bad enum, malformed union) are `400`.
 3. **Idempotency.** A version is identified by `(track, kind, parent_version_id, normalized content [, based_on_plan_version_id])`.
@@ -230,7 +244,7 @@ A track has at most one current plan and one current lyrics. Invariants the serv
 | Action | Rule |
 |---|---|
 | Create **lyrics**, `make_current: true` | needs a current plan (`409 plan_required`); checked against the **current** plan, not only its base (`409 lyrics_incompatible_with_plan`, `detail.issues`). With `make_current: false` it is stored without checks against the current plan. |
-| Create **plan**, `make_current: true` | if the current lyrics no longer fit: `incompatible_lyrics: "reject"` (default) → `409 lyrics_incompatible_with_plan`; `"detach"` → the plan becomes current, the **lyrics pointer is cleared** (the lyrics version itself is kept) and the response has `lyrics_detached: true`. With compatible lyrics `detach` changes nothing. |
+| Create **plan**, `make_current: true` | if the current lyrics no longer fit: `incompatible_lyrics: "reject"` (default) → `409 lyrics_incompatible_with_plan`; `"detach"` → the plan becomes current, the **lyrics pointer is cleared** (the lyrics version itself is kept) and the response has `lyrics_detached: true`. With compatible lyrics `detach` changes nothing. `"detach"` **requires `make_current: true`**: with `make_current: false` there is no change to the pair, so the request is refused with `422 document_invalid` (`{path: "incompatible_lyrics", code: "requires_make_current"}`) and nothing is written. |
 | `PUT …/current` | each given id must be a version of this track **of the matching kind** (`404` otherwise). Omitted fields keep their pointer; `lyrics_version_id: null` detaches the lyrics. The resulting pair must be compatible. To move to a plan with different sections send `{plan_version_id: X, lyrics_version_id: null}`. |
 
 There is deliberately **no silent auto-detach**: dropping the lyrics is always the caller's explicit choice.
@@ -275,7 +289,16 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 
 `GET /v1/studio/tracks/{id}/exports/suno[?plan_version_id=&lyrics_version_id=]` — a pure render: it reads, never writes, and the same input yields byte-identical output.
 
-- Defaults to the track's current plan and lyrics. `409 plan_required` if no plan. A plan alone renders the section skeleton. Explicit ids must be versions of this track and the right kind (`404`); the chosen lyrics must fit the chosen plan (`409 lyrics_incompatible_with_plan`) — including when the lyrics come from the track's current pointer.
+- **The plan and the lyrics are chosen as a pair.** The track's current lyrics were written for its current plan, so they are used *only* when you name no plan:
+
+  | `plan_version_id` | `lyrics_version_id` | Rendered |
+  |---|---|---|
+  | omitted | omitted | the track's current plan **and** current lyrics (no current lyrics → the section skeleton) |
+  | given | omitted | that plan **alone** (the section skeleton, `lyrics_version_id: null`); the current lyrics are not borrowed |
+  | omitted | given | the track's current plan with those lyrics |
+  | given | given | exactly that pair — the caller's choice, even across plans |
+
+  `409 plan_required` if no plan is determined (no `plan_version_id` and no current plan). Explicit ids must be versions of this track and the right kind (`404`). Whatever lyrics are rendered are checked against the plan they are rendered with (`409 lyrics_incompatible_with_plan`), so an explicit pair that does not fit is refused. The response's `lyrics_version_id` is always exactly the lyrics that were rendered (`null` when none).
 
 ```ts
 interface SunoExport {
@@ -295,7 +318,7 @@ interface SunoExport {
 **Rendering rules**
 
 - `style` = plan `global_style.tags`, then the project artist's `style_tags`, de-duplicated case-insensitively (first occurrence wins), then `"<tempo> BPM"`. `exclude` = plan `global_style.avoid` then artist `global_avoid`, same de-duplication.
-- `lyrics` = one block per plan section, in plan order, separated by a blank line. Header `[Label]` or `[Label: descriptors]` where descriptors are the section's `delivery` then its `style.tags`. Label = the section's `label`, else the kind's name (`Pre-Chorus`, `Post-Chorus`, otherwise title-case); a defaulted label is numbered (`Verse 1`, `Verse 2`) when the kind occurs more than once — except `chorus`, `pre_chorus`, `post_chorus` and `hook`, which stay unnumbered. A line with `delivery` is preceded by its own `[d1, d2]` line. **No parentheses are ever generated** (Suno sings them as backing vocals); `(…)` appears only if you typed it.
+- `lyrics` = one block per plan section, in plan order, separated by a blank line. Header `[Label]` or `[Label: descriptors]` where descriptors are the section's `delivery` then its `style.tags`. Label = the section's `label`, else the kind's name (`Pre-Chorus`, `Post-Chorus`, otherwise title-case); a defaulted label is numbered (`Verse 1`, `Verse 2`) when the kind occurs more than once — except `chorus`, `pre_chorus`, `post_chorus` and `hook`, which stay unnumbered. A line with `delivery` is preceded by its own `[d1, d2]` line. **An instrumental section is never rendered without a cue:** a section with `instrumental: true` whose kind is not `instrumental` gets the descriptor `instrumental` **first** in its header (`[Drop: instrumental, heavy bass]`), de-duplicated case-insensitively against its own delivery and style tags, so a long tag list cannot push it out of sight; a section of kind `instrumental` is already headed `[Instrumental]` and gets no extra cue. **No parentheses are ever generated** (Suno sings them as backing vocals); `(…)` appears only if you typed it.
 - **Never exported:** `references`, `idea`, section `notes`, `duration_seconds`, section-local `avoid`, the artist's `persona`, `voice_notes` and `aesthetic_references`.
 
 **Limits are information, not errors.** Suno publishes no limits; the values below were measured on the v6 web UI and may change. The export **never truncates and never fails on length** — the full text is returned and `within_limit: false` tells you to cut:
@@ -328,3 +351,4 @@ interface SunoExport {
 - **Optimistic UI is safe.** Because create is idempotent, a double submit yields one version.
 - **Positions** can have gaps after a track delete; use `position` for ordering only and call the order endpoint to compact.
 - The studio profile's `artist_id` change (via `PUT`) affects the *next* export immediately — exports always read the artist's current style.
+- **Artist names are compared with `lower()`, not `casefold()`** (the same rule as library project names; PostgreSQL has no `casefold`). Plain case differences collide (`Nova` / `NOVA`, and non-ASCII letters such as `Рок` / `рок` under the default UTF-8 database locale), but a few characters that only casefold equates stay distinct: `Straße` and `STRASSE` are two valid names. Tags, labels and the other free-text lists use `casefold` (`duplicate_tag` catches `ß` / `SS`). This is a known, accepted deviation; do not rely on name uniqueness being casefold-strict.
