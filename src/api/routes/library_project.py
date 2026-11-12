@@ -5,7 +5,8 @@ Endpoints:
   POST   /v1/library/projects          — create a project
   GET    /v1/library/projects/{id}     — project detail
   PATCH  /v1/library/projects/{id}     — rename/redescribe
-  DELETE /v1/library/projects/{id}     — delete (204; assets are unassigned via ON DELETE SET NULL, P2)
+  DELETE /v1/library/projects/{id}     — delete (204; assets are unassigned via ON DELETE SET NULL, P2;
+                                         409 project_in_use while e.g. studio tracks exist)
 """
 
 from __future__ import annotations
@@ -49,6 +50,16 @@ _CONFLICT_RESPONSES = {
     409: ResponseSpec(
         data_container=ErrorEnvelope,
         description="A project with this name already exists for the caller (case-insensitive).",
+    )
+}
+
+_IN_USE_RESPONSES = {
+    409: ResponseSpec(
+        data_container=ErrorEnvelope,
+        description=(
+            "project_in_use: another feature still depends on the project (e.g. studio tracks); "
+            'detail.blockers lists {"code", "count"} per blocker.'
+        ),
     )
 }
 
@@ -157,7 +168,12 @@ class LibraryProjectController(Controller):
             raise NotFoundException(detail=_PROJECT_NOT_FOUND)
         return Response(content=project)
 
-    @delete("/{project_id:uuid}", status_code=HTTP_204_NO_CONTENT, raises=[NotFoundException])
+    @delete(
+        "/{project_id:uuid}",
+        status_code=HTTP_204_NO_CONTENT,
+        raises=[NotFoundException],
+        responses=_IN_USE_RESPONSES,
+    )
     async def delete_project(
         self,
         current_user_id: UUID,
@@ -166,7 +182,10 @@ class LibraryProjectController(Controller):
         session: AsyncSession,
         library_project_service: LibraryProjectService,
     ) -> None:
-        """Delete a project. Assigned assets survive, unassigned via ON DELETE SET NULL (P2)."""
+        """Delete a project. Assigned assets survive, unassigned via ON DELETE SET NULL (P2).
+
+        Refused with 409 ``project_in_use`` while another feature (e.g. studio tracks) holds it.
+        """
         deleted = await library_project_service.delete(
             project_id, current_user_id, product_id, session=session
         )

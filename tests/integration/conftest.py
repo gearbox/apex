@@ -24,9 +24,11 @@ import pytest_asyncio
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, create_async_engine
 from sqlalchemy.pool import NullPool
 
+from src.core.uid import new_id
 from src.db.models.auth_tokens import EmailVerificationToken, PasswordResetToken
 from src.db.models.billing import Organization, TokenAccount
 from src.db.models.gpu_session import GpuSession
+from src.db.models.library import LibraryProject
 from src.db.models.storage import GenerationJob, UserImage
 from src.db.models.user import User
 from src.db.repositories.auth_tokens import AuthTokenRepository
@@ -37,6 +39,7 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
+from tests.studio_world import StudioWorld
 
 # ---------------------------------------------------------------------------
 # Test database URL
@@ -612,3 +615,59 @@ async def make_reset_token(db_session: AsyncSession, make_user: UserFactory) -> 
         return token, raw
 
     return _factory
+
+
+# ---------------------------------------------------------------------------
+# Media Project Studio fixtures
+# ---------------------------------------------------------------------------
+
+LibraryProjectFactory = Callable[..., Coroutine[Any, Any, LibraryProject]]
+
+
+@pytest_asyncio.fixture
+async def make_library_project(
+    db_session: AsyncSession, make_user: UserFactory
+) -> LibraryProjectFactory:
+    """Factory fixture: create a LibraryProject row and flush it."""
+
+    async def _factory(
+        *,
+        user: User | None = None,
+        name: str | None = None,
+        product_id: str = "vex",
+    ) -> LibraryProject:
+        if user is None:
+            user = await make_user(
+                email=f"proj-{uuid4().hex[:8]}@example.com", product_id=product_id
+            )
+        # new_id() (UUIDv7, strictly increasing in-process) matches the production default. The
+        # studio profile keyset falls back to ``library_project_id DESC`` when two profiles share
+        # a transaction timestamp, so a random uuid4() here made "newest first" non-deterministic.
+        project = LibraryProject(
+            id=new_id(),
+            product_id=product_id,
+            user_id=user.id,
+            name=name or f"Project {uuid4().hex[:8]}",
+        )
+        db_session.add(project)
+        await db_session.flush()
+        return project
+
+    return _factory
+
+
+@pytest_asyncio.fixture
+async def studio(
+    db_session: AsyncSession, make_user: UserFactory, make_library_project: LibraryProjectFactory
+) -> StudioWorld:
+    """A vex user with one library project (studio *not* yet enabled) and all studio services."""
+    user = await make_user(email=f"studio-{uuid4().hex[:8]}@example.com")
+    project = await make_library_project(user=user)
+    return StudioWorld(session=db_session, user=user, library_project=project)
+
+
+@pytest_asyncio.fixture
+async def enabled_studio(studio: StudioWorld) -> StudioWorld:
+    """Same as ``studio`` with the studio profile already enabled on the project."""
+    await studio.enable()
+    return studio

@@ -46,7 +46,7 @@ async def library_repo(db_session: AsyncSession) -> LibraryRepository:
 
 @pytest_asyncio.fixture
 async def project_service(db_session: AsyncSession) -> LibraryProjectService:
-    return LibraryProjectService(session=db_session)
+    return LibraryProjectService(session=db_session, deletion_guards=())
 
 
 @pytest_asyncio.fixture

@@ -61,6 +61,9 @@ from src.api.routes.provisioning import ProvisioningController
 from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
+from src.api.routes.studio_artists import StudioArtistController
+from src.api.routes.studio_projects import StudioProjectController
+from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
 from src.api.schemas.errors import ErrorEnvelope
@@ -87,12 +90,16 @@ from src.api.services.legal.errors import (
     LegalVersionStaleError,
 )
 from src.api.services.library import LibraryBulkTagCapError
-from src.api.services.library_project import LibraryProjectNameConflictError
+from src.api.services.library_project import (
+    LibraryProjectInUseError,
+    LibraryProjectNameConflictError,
+)
 from src.api.services.library_tag import LibraryTagNameConflictError
 from src.api.services.unified_jobs import JobInProgressError
 from src.core.config import Settings, get_settings
 from src.core.logging import configure_logging
 from src.core.product_registry import PRODUCT_REGISTRY
+from src.studio.errors import StudioError
 
 logger = structlog.get_logger(__name__)
 
@@ -309,6 +316,23 @@ def library_project_name_conflict_handler(
 ) -> Response[Any]:
     _log_handler_event("library.project_name_conflict", request, HTTP_409_CONFLICT, name=exc.name)
     return _error("project_name_conflict", str(exc), HTTP_409_CONFLICT)
+
+
+def library_project_in_use_handler(
+    request: Request[Any, Any, Any],
+    exc: LibraryProjectInUseError,
+) -> Response[Any]:
+    blockers = [{"code": b.code, "count": b.count} for b in exc.blockers]
+    _log_handler_event(
+        "library.project_in_use", request, HTTP_409_CONFLICT, blockers=[b["code"] for b in blockers]
+    )
+    return _error("project_in_use", str(exc), HTTP_409_CONFLICT, {"blockers": blockers})
+
+
+def studio_error_handler(request: Request[Any, Any, Any], exc: StudioError) -> Response[Any]:
+    # Only the stable code is logged — never document text, names or ids from the payload.
+    _log_handler_event("studio.error", request, exc.status_code, code=exc.code)
+    return _error(exc.code, exc.message, exc.status_code, exc.detail)
 
 
 def library_tag_name_conflict_handler(
@@ -532,7 +556,7 @@ def create_app() -> Litestar:
         allow_origins=[],  # must be empty — origin matching is done by allow_origin_regex
         allow_origin_regex=_origin_regex,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Authorization",
             "Content-Type",
@@ -583,6 +607,10 @@ def create_app() -> Litestar:
             LibraryController,
             LibraryProjectController,
             LibraryTagController,
+            # Media Project Studio (404 unless STUDIO_ENABLED and the product has "studio")
+            StudioArtistController,
+            StudioProjectController,
+            StudioTrackController,
             # Content proxy
             ContentProxyController,
             # Web Push
@@ -607,9 +635,11 @@ def create_app() -> Litestar:
             OrganizationPermissionError: organization_permission_handler,
             OrganizationBalanceError: organization_balance_handler,
             LibraryProjectNameConflictError: library_project_name_conflict_handler,
+            LibraryProjectInUseError: library_project_in_use_handler,
             LibraryTagNameConflictError: library_tag_name_conflict_handler,
             LibraryBulkTagCapError: library_bulk_tag_cap_handler,
             JobInProgressError: job_in_progress_handler,
+            StudioError: studio_error_handler,
             IdempotencyConflictError: idempotency_conflict_handler,
             LegalDocumentNotFoundError: legal_document_not_found_handler,
             LegalSubmissionIncompleteError: legal_submission_incomplete_handler,

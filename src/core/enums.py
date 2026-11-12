@@ -940,3 +940,62 @@ class OAuthErrorCode(StrEnum):
     IDENTITY_CONFLICT = "identity_conflict"  # user already linked to a different subject
     INVALID_HANDOFF = "invalid_handoff"
     INVALID_SIGNUP_TICKET = "invalid_signup_ticket"
+
+
+# ---------------------------------------------------------------------------
+# Media Project Studio (src/studio) — values are wire-stable and CHECK-constrained
+# ---------------------------------------------------------------------------
+
+
+class StudioReleaseKind(StrEnum):
+    """What a studio project releases."""
+
+    SINGLE = "single"
+    EP = "ep"
+    ALBUM = "album"
+
+
+class StudioDocumentKind(StrEnum):
+    """The two independently versioned documents of a track."""
+
+    PLAN = "plan"
+    LYRICS = "lyrics"
+
+
+class StudioDocumentOrigin(StrEnum):
+    """Who produced a document version."""
+
+    USER = "user"
+    LLM = "llm"  # written by the planner (P2); declared now so the CHECK needs no migration
+    IMPORT = "import"  # written by the Suno-text importer (P1b); same reason
+
+
+class StudioIncompatibleLyricsPolicy(StrEnum):
+    """What a plan create does when the track's current lyrics no longer fit the new plan."""
+
+    REJECT = "reject"
+    DETACH = "detach"
+
+
+class StudioSectionKind(StrEnum):
+    """Structural role of a plan section."""
+
+    INTRO = "intro"
+    VERSE = "verse"
+    PRE_CHORUS = "pre_chorus"
+    CHORUS = "chorus"
+    POST_CHORUS = "post_chorus"
+    HOOK = "hook"
+    BRIDGE = "bridge"
+    BUILD = "build"
+    DROP = "drop"
+    BREAKDOWN = "breakdown"
+    INSTRUMENTAL = "instrumental"
+    INTERLUDE = "interlude"
+    OUTRO = "outro"
+
+
+class StudioExportTarget(StrEnum):
+    """Third-party tool a track can be rendered for."""
+
+    SUNO = "suno"

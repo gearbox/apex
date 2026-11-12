@@ -80,7 +80,7 @@ VEX_CONFIG = ProductConfig(
         upload_per_user="200/hour",
         api_global="2000/minute",
     ),
-    features=frozenset(),
+    features=frozenset({"studio"}),
     cookie_domain="vex.pics",
     required_legal_documents=frozenset(
         {
@@ -149,7 +149,7 @@ SYNTHARA_CONFIG = ProductConfig(
         upload_per_user="500/hour",
         api_global="5000/minute",
     ),
-    features=frozenset({"organizations"}),
+    features=frozenset({"organizations", "studio"}),
     cookie_domain="synthara.app",
     # required_legal_documents deliberately left empty: synthara legal documents
     # are a named follow-up (see docs/contracts/legal-documents-contract.md).

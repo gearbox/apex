@@ -38,7 +38,7 @@ def _build_cors_config(debug: bool = False) -> CORSConfig:
         allow_origins=[],  # must be empty — origin matching is done by allow_origin_regex
         allow_origin_regex=origin_regex,
         allow_credentials=True,
-        allow_methods=["GET", "POST", "PATCH", "DELETE", "OPTIONS"],
+        allow_methods=["GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"],
         allow_headers=[
             "Authorization",
             "Content-Type",
