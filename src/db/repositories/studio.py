@@ -138,6 +138,24 @@ class StudioArtistRepository:
         )
         return result.scalar_one_or_none()
 
+    async def lock(self, artist_id: UUID, *, user_id: UUID, product_id: str) -> StudioArtist | None:
+        """``SELECT … FOR UPDATE`` the artist: serializes read-modify-write PATCHes.
+
+        ``populate_existing`` matters: without it the identity map could hand back a stale
+        artist that an earlier read in the same session loaded, defeating the lock.
+        """
+        result = await self._session.execute(
+            select(StudioArtist)
+            .where(
+                StudioArtist.id == artist_id,
+                StudioArtist.user_id == user_id,
+                StudioArtist.product_id == product_id,
+            )
+            .with_for_update()
+            .execution_options(**_FRESH)
+        )
+        return result.scalar_one_or_none()
+
     async def list_page(
         self,
         *,

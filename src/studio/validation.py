@@ -7,6 +7,10 @@ Every function here is free of I/O. Validation **collects all issues** and raise
 Normalization (P1-15): Unicode NFC, trim, collapse internal whitespace — for every tag, label and
 line. Case-insensitive comparisons use ``str.casefold()`` (covers non-ASCII, e.g. Cyrillic).
 Issue paths address the offending field (``sections[2].style.tags[1]``) and never contain text.
+
+NFC can *expand* a value (U+0958 becomes 2 code points, U+FB2C 3), so every limit declared on the
+wire Structs is **re-checked after normalization** (RD6, ``src/studio/constraints.py``):
+limits are counted in code points of the normalized value.
 """
 
 from __future__ import annotations
@@ -20,6 +24,7 @@ from uuid import UUID  # noqa: TC003 — runtime: used in type hints evaluated b
 import msgspec
 
 from src.core.enums import StudioDocumentKind, StudioSectionKind
+from src.studio.constraints import collect_length_issues
 from src.studio.documents import (
     LyricLine,
     LyricsDocument,
@@ -39,6 +44,7 @@ __all__ = [
     "MAX_TOTAL_DURATION_SECONDS",
     "NormalizedArtistStyle",
     "check_pair_compatible",
+    "collect_artist_style",
     "content_hash",
     "is_instrumental",
     "normalize_artist_style",
@@ -175,8 +181,9 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
 
     Raises:
         StudioDocumentInvalid: With every issue found (empty text, duplicate section ids or
-            tags, tag conflicts, reserved characters, total duration over the cap, and a
-            normalized document above :data:`MAX_DOCUMENT_BYTES`).
+            tags, tag conflicts, reserved characters, total duration over the cap, a value that
+            normalization pushed past its declared limit, and a normalized document above
+            :data:`MAX_DOCUMENT_BYTES`).
     """
     issues: list[DocumentIssue] = []
 
@@ -233,6 +240,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
         references=references,
         sections=tuple(sections),
     )
+    collect_length_issues(normalized, issues)
     _check_document_size(normalized, issues)
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
@@ -273,8 +281,9 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
 
     Raises:
         StudioDocumentInvalid: With every issue found, including ``lyrics_too_long`` (total
-            normalized line text above :data:`MAX_LYRICS_TEXT_CHARS` code points) and
-            ``document_too_large`` (normalized document above :data:`MAX_DOCUMENT_BYTES`).
+            normalized line text above :data:`MAX_LYRICS_TEXT_CHARS` code points),
+            ``too_long_after_normalization`` (one value past its declared limit once normalized)
+            and ``document_too_large`` (normalized document above :data:`MAX_DOCUMENT_BYTES`).
     """
     issues: list[DocumentIssue] = []
 
@@ -315,6 +324,7 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
     normalized = LyricsDocument(
         language=lyrics.language, line_syllables=lyrics.line_syllables, sections=tuple(sections)
     )
+    collect_length_issues(normalized, issues)
     issues.extend(check_pair_compatible(plan, normalized))
     _check_document_size(normalized, issues)
     if issues:
@@ -331,6 +341,32 @@ class NormalizedArtistStyle:
     aesthetic_references: tuple[str, ...]
 
 
+def collect_artist_style(
+    *,
+    style_tags: Sequence[str],
+    global_avoid: Sequence[str],
+    aesthetic_references: Sequence[str] = (),
+    issues: list[DocumentIssue],
+) -> NormalizedArtistStyle:
+    """Validate an artist's tag lists like a ``StyleSpec``, appending to ``issues`` (never raises).
+
+    The returned value is best-effort when ``issues`` grew; callers must check before using it.
+    """
+    tags, avoid = _normalize_tag_pair(
+        style_tags, global_avoid, "style_tags", "global_avoid", issues
+    )
+    references = _normalize_tokens(
+        aesthetic_references,
+        "aesthetic_references",
+        issues,
+        check_reserved=False,
+        check_duplicates=False,
+    )
+    return NormalizedArtistStyle(
+        style_tags=tags, global_avoid=avoid, aesthetic_references=references
+    )
+
+
 def normalize_artist_style(
     *,
     style_tags: Sequence[str],
@@ -343,21 +379,15 @@ def normalize_artist_style(
         StudioDocumentInvalid: With every issue found (paths ``style_tags[i]`` etc.).
     """
     issues: list[DocumentIssue] = []
-    tags, avoid = _normalize_tag_pair(
-        style_tags, global_avoid, "style_tags", "global_avoid", issues
-    )
-    references = _normalize_tokens(
-        aesthetic_references,
-        "aesthetic_references",
-        issues,
-        check_reserved=False,
-        check_duplicates=False,
+    style = collect_artist_style(
+        style_tags=style_tags,
+        global_avoid=global_avoid,
+        aesthetic_references=aesthetic_references,
+        issues=issues,
     )
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
-    return NormalizedArtistStyle(
-        style_tags=tags, global_avoid=avoid, aesthetic_references=references
-    )
+    return style
 
 
 def to_content(document: PlanDocument | LyricsDocument) -> dict[str, object]:

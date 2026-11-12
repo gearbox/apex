@@ -797,6 +797,122 @@ class TestOpenApi:
         assert "oneOf" in str(body)  # the tagged union is rendered
 
 
+QA = "\u0958"  # NFC expands it to 2 code points: 101 of them pass the wire cap of 200, then are 202
+
+
+def _issue_set(resp: Any) -> set[tuple[str, str]]:
+    return {(i["path"], i["code"]) for i in resp.json()["detail"]["issues"]}
+
+
+class TestLimitsAfterNormalizationOverHttp:
+    """RF1: the wire accepts it, normalization expands it, the API answers 422 (never 201 / 500)."""
+
+    async def test_plan_title_is_a_422_and_the_track_stays_readable(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        h = owner.headers
+        await _enable(client, owner)
+        track_id = await _track(client, owner)
+
+        resp = await client.post(
+            f"{S}/tracks/{track_id}/versions",
+            headers=h,
+            json=_plan_body(make_plan(title=QA * 101)),
+        )
+
+        assert resp.status_code == 422
+        assert resp.json()["error"] == "document_invalid"
+        assert _issue_set(resp) == {("title", "too_long_after_normalization")}
+        assert QA not in resp.text  # paths and codes only, never the text
+        # Nothing was stored, and the reads that used to 500 forever still work.
+        assert (await client.get(f"{S}/tracks/{track_id}", headers=h)).status_code == 200
+        assert (await client.get(f"{S}/tracks/{track_id}/versions", headers=h)).json()[
+            "items"
+        ] == []
+        async with session_factory() as session:
+            count = (
+                await session.execute(select(func.count()).select_from(StudioDocumentVersion))
+            ).scalar_one()
+        assert count == 0
+
+    async def test_a_title_exactly_at_the_limit_after_expansion_is_created_and_readable(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        h = owner.headers
+        await _enable(client, owner)
+        track_id = await _track(client, owner)
+        created = await client.post(
+            f"{S}/tracks/{track_id}/versions",
+            headers=h,
+            json=_plan_body(make_plan(title=QA * 100)),
+        )
+        assert created.status_code == 201
+        version_id = created.json()["version"]["id"]
+        for url in (
+            f"{S}/versions/{version_id}",
+            f"{S}/tracks/{track_id}",
+            f"{S}/tracks/{track_id}/exports/suno",
+        ):
+            assert (await client.get(url, headers=h)).status_code == 200, url
+
+    async def test_track_title_is_a_422_on_create_and_patch(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        h = owner.headers
+        await _enable(client, owner)
+        created = await client.post(
+            f"{S}/projects/{owner.project_id}/tracks", headers=h, json={"title": QA * 101}
+        )
+        assert created.status_code == 422
+        assert _issue_set(created) == {("title", "too_long_after_normalization")}
+
+        track_id = await _track(client, owner, "Original")
+        patched = await client.patch(f"{S}/tracks/{track_id}", headers=h, json={"title": QA * 101})
+        assert patched.status_code == 422
+        assert (await client.get(f"{S}/tracks/{track_id}", headers=h)).json()["title"] == "Original"
+
+    async def test_artist_fields_are_a_422_and_nothing_is_stored_or_truncated(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        h = owner.headers
+        created = await client.post(
+            f"{S}/artists",
+            headers=h,
+            json={"name": "Nova", "style_tags": ["ok", QA * 31], "persona": QA * 2001},
+        )
+        assert created.status_code == 422
+        assert _issue_set(created) == {
+            ("style_tags[1]", "too_long_after_normalization"),
+            ("persona", "too_long_after_normalization"),
+        }
+        assert (await client.get(f"{S}/artists", headers=h)).json()["items"] == []
+
+        artist = await client.post(
+            f"{S}/artists", headers=h, json={"name": "Nova", "style_tags": ["ok"]}
+        )
+        assert artist.status_code == 201
+        patched = await client.patch(
+            f"{S}/artists/{artist.json()['id']}", headers=h, json={"style_tags": [QA * 31]}
+        )
+        assert patched.status_code == 422
+        assert _issue_set(patched) == {("style_tags[0]", "too_long_after_normalization")}
+        unchanged = await client.get(f"{S}/artists/{artist.json()['id']}", headers=h)
+        assert unchanged.json()["style_tags"] == ["ok"]
+
+    async def test_project_concept_is_a_422(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        resp = await _enable(client, owner, concept=QA * 4001)
+        assert resp.status_code == 422
+        assert _issue_set(resp) == {("concept", "too_long_after_normalization")}
+        assert (
+            await client.get(f"{S}/projects/{owner.project_id}", headers=owner.headers)
+        ).status_code == 404  # studio was not enabled
+
+
 class TestErrorLogging:
     async def test_error_responses_and_logs_never_echo_document_text(
         self, client: AsyncTestClient[Litestar], owner: SimpleNamespace

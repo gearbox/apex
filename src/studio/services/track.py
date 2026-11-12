@@ -7,12 +7,13 @@ from typing import TYPE_CHECKING, Final
 import msgspec
 import structlog
 
-from src.api.schemas.studio import TrackDetail, TrackOut
+from src.api.schemas.studio import TrackCreate, TrackDetail, TrackOut, TrackPatch
 from src.db.repositories.studio import (
     StudioDocumentVersionRepository,
     StudioProjectRepository,
     StudioTrackRepository,
 )
+from src.studio.constraints import collect_length_issues
 from src.studio.errors import (
     DocumentIssue,
     StudioDocumentInvalid,
@@ -34,8 +35,6 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.api.schemas.studio import TrackPatch
-
 __all__ = ["MAX_TRACKS_PER_PROJECT", "TrackService"]
 
 logger = structlog.get_logger(__name__)
@@ -43,10 +42,20 @@ logger = structlog.get_logger(__name__)
 MAX_TRACKS_PER_PROJECT: Final = 64
 
 
-def _normalize_title(raw: str) -> str:
+def _normalize_title(raw: str, request_type: type[TrackCreate] | type[TrackPatch]) -> str:
+    """NFC / trim / collapse ``raw``; refuse an empty result or one past the wire limit (RD6).
+
+    The limit is read from ``request_type`` (the Struct that declares ``title``), never repeated
+    here: NFC can expand a title past ``varchar(200)`` after the wire check passed.
+    """
     title = normalize_text(raw)
+    issues: list[DocumentIssue] = []
     if not title:
-        raise StudioDocumentInvalid((DocumentIssue("title", "empty_after_normalization"),))
+        issues.append(DocumentIssue("title", "empty_after_normalization"))
+    else:
+        collect_length_issues(request_type(title=title), issues)
+    if issues:
+        raise StudioDocumentInvalid(tuple(issues))
     return title
 
 
@@ -62,7 +71,7 @@ class TrackService:
     async def create(
         self, library_project_id: UUID, user_id: UUID, product_id: str, title: str
     ) -> TrackOut:
-        normalized = _normalize_title(title)
+        normalized = _normalize_title(title, TrackCreate)
         # The profile lock serializes position allocation and the cap against concurrent creates,
         # reorders and project deletion.
         profile = await self._profiles.lock(
@@ -175,7 +184,10 @@ class TrackService:
         if data.title is msgspec.UNSET:
             return track_out(track)
         updated = await self._tracks.update_title(
-            track_id, user_id=user_id, product_id=product_id, title=_normalize_title(data.title)
+            track_id,
+            user_id=user_id,
+            product_id=product_id,
+            title=_normalize_title(data.title, TrackPatch),
         )
         if updated is None:
             raise StudioNotFound

@@ -26,7 +26,12 @@ from src.api.schemas.studio import (
 )
 from src.core.enums import StudioDocumentKind, StudioDocumentOrigin, StudioIncompatibleLyricsPolicy
 from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTrackRepository
-from src.studio.documents import CURRENT_SCHEMA_VERSION, LyricsDocument, PlanDocument
+from src.studio.documents import (
+    CURRENT_SCHEMA_VERSION,
+    LyricsDocument,
+    PlanDocument,
+    decode_stored,
+)
 from src.studio.errors import (
     DocumentIssue,
     InvalidCursor,
@@ -241,6 +246,8 @@ class DocumentVersionService:
         else:
             if await self._versions.count(track_id, kind) >= MAX_VERSIONS_PER_KIND:
                 raise VersionLimitReached
+            content = to_content(document)
+            self._assert_decodes(kind, content)
             row, created = await self._versions.insert_or_get_sibling(
                 user_id=user_id,
                 product_id=product_id,
@@ -251,7 +258,7 @@ class DocumentVersionService:
                 based_on_plan_version_id=based_on,
                 schema_version=CURRENT_SCHEMA_VERSION[kind],
                 origin=StudioDocumentOrigin.USER.value,
-                content=to_content(document),
+                content=content,
                 content_hash=digest,
             )
 
@@ -273,6 +280,24 @@ class DocumentVersionService:
             ),
             created,
         )
+
+    @staticmethod
+    def _assert_decodes(kind: StudioDocumentKind, content: dict[str, object]) -> None:
+        """Invariant: every stored version decodes (RD7).
+
+        Decodes the exact JSONB ``content`` that is about to be inserted, with the strict read
+        path. Normalization + the length re-check are meant to make a failure impossible; this is
+        the backstop for a limit they missed — one unreadable row would 500 every read of its
+        version, its track and its export for good.
+
+        Raises:
+            RuntimeError: ``content`` would not decode. A bug, never a client error; nothing has
+                been written (no row, no version number).
+        """
+        try:
+            decode_stored(kind, CURRENT_SCHEMA_VERSION[kind], content)
+        except msgspec.ValidationError as exc:
+            raise RuntimeError("studio document would not decode after normalization") from exc
 
     async def _check_plan_against_current_lyrics(
         self,

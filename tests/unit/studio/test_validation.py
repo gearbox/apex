@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import unicodedata
+from uuid import UUID
 
 import msgspec
 import pytest
@@ -14,6 +15,7 @@ from src.studio.documents import (
     LyricsDocument,
     LyricsSection,
     PlanDocument,
+    PlanSection,
     SyllableRange,
 )
 from src.studio.errors import DocumentIssue, StudioDocumentInvalid
@@ -21,6 +23,7 @@ from src.studio.validation import (
     MAX_DOCUMENT_BYTES,
     MAX_LYRICS_TEXT_CHARS,
     check_pair_compatible,
+    collect_artist_style,
     is_instrumental,
     normalize_artist_style,
     normalize_block,
@@ -301,13 +304,29 @@ def _encoded_size(document: PlanDocument | LyricsDocument) -> int:
 
 
 def _plan_of_size(target_bytes: int) -> PlanDocument:
-    """A plan whose normalized compact JSON is exactly ``target_bytes`` (padded ``idea``).
+    """A wire-valid plan whose normalized compact JSON is exactly ``target_bytes``.
 
-    The padded plan is already in normalized form, so its own encoding is the measured size —
-    no ``normalize_plan`` call, which would itself reject targets above the cap.
+    Bulk comes from sections that each carry a full list of 40 distinct 60-char tags; the padded
+    ``idea`` (<= 4000 chars, the wire cap) absorbs the remainder to the byte. The result is
+    already in normalized form, so its own encoding is the measured size — no ``normalize_plan``
+    call, which would itself reject targets above the cap. Every field respects its wire limit,
+    because the limits are re-checked after normalization (RD6).
     """
-    probe = _encoded_size(make_plan(idea="x"))
-    plan = make_plan(idea="x" * (1 + target_bytes - probe))
+
+    def loaded_section(index: int) -> PlanSection:
+        tags = [f"{index:02d}-{n:02d}".ljust(60, "t") for n in range(40)]
+        return make_section(K.VERSE, section_id=UUID(int=index + 1), tags=tags)
+
+    sections: list[PlanSection] = []
+    while True:
+        grown = [*sections, loaded_section(len(sections))]
+        if len(grown) > 64 or _encoded_size(make_plan(*grown, idea="x")) > target_bytes:
+            break
+        sections = grown
+    probe = _encoded_size(make_plan(*sections, idea="x"))
+    idea_chars = 1 + target_bytes - probe
+    assert 1 <= idea_chars <= 4000, "the remainder must fit in `idea`"
+    plan = make_plan(*sections, idea="x" * idea_chars)
     assert _encoded_size(plan) == target_bytes
     return plan
 
@@ -473,3 +492,120 @@ class TestArtistStyle:
             style_tags=(), global_avoid=(), aesthetic_references=("[a]", "[a]")
         )
         assert out.aesthetic_references == ("[a]", "[a]")
+
+
+# U+0958 (DEVANAGARI LETTER QA) is a composition exclusion: NFC turns it into 2 code points
+# (U+0915 U+093C) and never recomposes. U+FB2C (HEBREW LETTER SHIN WITH DAGESH AND SHIN DOT)
+# turns into 3. A value within its wire limit as sent can leave normalization past it.
+QA = "\u0958"
+SHIN = "\ufb2c"
+TOO_LONG = "too_long_after_normalization"
+
+
+class TestLimitsAreRecheckedAfterNormalization:
+    """Invariant 31: no stored value exceeds the limit its wire Struct declares."""
+
+    def test_the_premise_nfc_expands_these_characters(self) -> None:
+        assert len(normalize_text(QA)) == 2
+        assert len(normalize_text(SHIN)) == 3
+        assert normalize_text(normalize_text(QA)) == normalize_text(QA)  # idempotent: stays long
+
+    def test_plan_title_that_expands_past_200_is_refused(self) -> None:
+        raw = make_plan(title=QA * 101)
+        assert len(raw.title) == 101  # within the wire limit as sent
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(raw)
+        assert _issues(exc) == {("title", TOO_LONG)}
+
+    def test_plan_title_at_exactly_the_limit_after_expansion_passes(self) -> None:
+        out = normalize_plan(make_plan(title=QA * 100))
+        assert len(out.title) == 200
+
+    def test_lyric_line_that_expands_past_300_is_refused(self) -> None:
+        verse = make_section(K.VERSE)
+        lyrics = make_lyrics((verse.id, [SHIN * 101]))
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, make_plan(verse))
+        assert _issues(exc) == {("sections[0].lines[0].text", TOO_LONG)}
+
+    def test_lyric_line_at_exactly_the_limit_after_expansion_passes(self) -> None:
+        verse = make_section(K.VERSE)
+        out = normalize_lyrics(make_lyrics((verse.id, [SHIN * 100])), make_plan(verse))
+        assert len(out.sections[0].lines[0].text) == 300
+
+    def test_every_plan_field_that_normalization_touches_is_rechecked(self) -> None:
+        # Each value is within its wire limit as sent and over it once normalized.
+        verse = make_section(
+            K.VERSE,
+            label=QA * 31,  # 60
+            tags=("fine", QA * 31),  # 60
+            avoid=(SHIN * 21,),  # 63
+            delivery=(QA * 21,),  # 40
+            notes=QA * 501,  # 1000
+        )
+        plan = make_plan(
+            make_section(K.CHORUS),
+            verse,
+            title="ok",
+            idea=QA * 2001,  # 4000
+            references=("ok", QA * 101),  # 200
+            tags=(QA * 31,),
+            avoid=(SHIN * 21,),
+        )
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(plan)
+        assert _issues(exc) == {
+            ("idea", TOO_LONG),
+            ("references[1]", TOO_LONG),
+            ("global_style.tags[0]", TOO_LONG),
+            ("global_style.avoid[0]", TOO_LONG),
+            ("sections[1].label", TOO_LONG),
+            ("sections[1].style.tags[1]", TOO_LONG),
+            ("sections[1].style.avoid[0]", TOO_LONG),
+            ("sections[1].delivery[0]", TOO_LONG),
+            ("sections[1].notes", TOO_LONG),
+        }
+
+    def test_lyric_delivery_tags_are_rechecked(self) -> None:
+        verse = make_section(K.VERSE)
+        lyrics = make_lyrics((verse.id, [LyricLine(text="ok", delivery=(QA * 21,))]))
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, make_plan(verse))
+        assert _issues(exc) == {("sections[0].lines[0].delivery[0]", TOO_LONG)}
+
+    def test_it_is_collected_with_every_other_issue(self) -> None:
+        plan = make_plan(
+            make_section(K.VERSE, tags=("a", "A")),
+            title=QA * 101,
+            tags=(" ",),
+        )
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(plan)
+        assert _issues(exc) == {
+            ("title", TOO_LONG),
+            ("global_style.tags[0]", "empty_after_normalization"),
+            ("sections[0].style.tags[1]", "duplicate_tag"),
+        }
+
+    def test_a_value_that_shrinks_below_its_limit_is_accepted(self) -> None:
+        # The check is on the normalized value: 250 raw characters collapse to 100.
+        # (Raw 250 would be refused by the wire; the walker only sees the normalized form.)
+        out = normalize_plan(make_plan(title=" ".join(["ab"] * 40)))
+        assert len(out.title) == 119
+
+    def test_issue_paths_stay_text_free(self) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(title=QA * 101))
+        assert all(QA not in repr(i) for i in exc.value.issues)
+
+    def test_collect_artist_style_collects_instead_of_raising(self) -> None:
+        issues: list[DocumentIssue] = []
+        style = collect_artist_style(
+            style_tags=("a", "A"), global_avoid=("a",), aesthetic_references=(" ",), issues=issues
+        )
+        assert {(i.path, i.code) for i in issues} == {
+            ("style_tags[1]", "duplicate_tag"),
+            ("global_avoid[0]", "tag_conflict"),
+            ("aesthetic_references[0]", "empty_after_normalization"),
+        }
+        assert style.style_tags == ("a", "A")

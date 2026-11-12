@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
+import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
@@ -14,7 +15,15 @@ from src.db.repositories.studio import (
     StudioProjectRepository,
     StudioTrackRepository,
 )
-from src.studio.errors import ArtistNotFound, InvalidCursor, ProjectHasTracks, StudioNotFound
+from src.studio.constraints import collect_length_issues
+from src.studio.errors import (
+    ArtistNotFound,
+    DocumentIssue,
+    InvalidCursor,
+    ProjectHasTracks,
+    StudioDocumentInvalid,
+    StudioNotFound,
+)
 from src.studio.services.mappers import project_out
 from src.studio.validation import normalize_block
 
@@ -49,9 +58,16 @@ class StudioProjectService:
             ``(profile, created)`` — the route answers 201 / 200.
 
         Raises:
+            StudioDocumentInvalid: ``concept`` is past its limit once normalized (RD6).
             StudioNotFound: The library project does not exist or is not the caller's.
             ArtistNotFound: ``artist_id`` is not one of the caller's artists.
         """
+        concept = normalize_block(data.concept)
+        issues: list[DocumentIssue] = []
+        # NFC can expand the concept past the limit the wire already checked.
+        collect_length_issues(msgspec.structs.replace(data, concept=concept), issues)
+        if issues:
+            raise StudioDocumentInvalid(tuple(issues))
         project = await self._library_projects.get(
             library_project_id, user_id=user_id, product_id=product_id
         )
@@ -69,7 +85,7 @@ class StudioProjectService:
                     product_id=product_id,
                     artist_id=data.artist_id,
                     release_kind=data.release_kind.value,
-                    concept=normalize_block(data.concept),
+                    concept=concept,
                 )
         except IntegrityError as exc:
             # A foreign key failed: the library project or the artist was deleted after the

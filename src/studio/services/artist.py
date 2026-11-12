@@ -12,6 +12,7 @@ from sqlalchemy.exc import IntegrityError
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.owner_scoped_names import normalize_owner_scoped_name
 from src.db.repositories.studio import StudioArtistRepository
+from src.studio.constraints import TOO_LONG, collect_length_issues
 from src.studio.errors import (
     ArtistInUse,
     ArtistLimitReached,
@@ -22,7 +23,7 @@ from src.studio.errors import (
     StudioDocumentInvalid,
 )
 from src.studio.services.mappers import artist_out
-from src.studio.validation import normalize_artist_style, normalize_block
+from src.studio.validation import collect_artist_style, normalize_block
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -37,13 +38,21 @@ logger = structlog.get_logger(__name__)
 
 MAX_ARTISTS_PER_OWNER: Final = 50
 _NAME_MAX: Final = 100
+_EMPTY: Final = "empty_after_normalization"
 
 
-def _normalize_name(raw: str) -> str:
+def _normalize_name(raw: str, issues: list[DocumentIssue]) -> str:
+    """The normalized name, or ``""`` after recording why it is not acceptable.
+
+    ``normalize_owner_scoped_name`` re-checks the length *after* NFC, so an expanding character
+    cannot push a name past ``varchar(100)``; the two ways it can fail get their own code.
+    """
+    composed = unicodedata.normalize("NFC", raw)
     try:
-        return normalize_owner_scoped_name(unicodedata.normalize("NFC", raw), max_length=_NAME_MAX)
-    except ValueError as exc:
-        raise StudioDocumentInvalid((DocumentIssue("name", "empty_after_normalization"),)) from exc
+        return normalize_owner_scoped_name(composed, max_length=_NAME_MAX)
+    except ValueError:
+        issues.append(DocumentIssue("name", TOO_LONG if composed.split() else _EMPTY))
+        return ""
 
 
 class ArtistService:
@@ -84,12 +93,31 @@ class ArtistService:
         return artist_out(artist)
 
     async def create(self, user_id: UUID, product_id: str, data: ArtistCreate) -> ArtistOut:
-        name = _normalize_name(data.name)
-        style = normalize_artist_style(
+        issues: list[DocumentIssue] = []
+        name = _normalize_name(data.name, issues)
+        style = collect_artist_style(
             style_tags=data.style_tags,
             global_avoid=data.global_avoid,
             aesthetic_references=data.aesthetic_references,
+            issues=issues,
         )
+        persona = normalize_block(data.persona)
+        voice_notes = normalize_block(data.voice_notes)
+        # RD6: NFC can expand a value past the limit the wire already checked.
+        collect_length_issues(
+            msgspec.structs.replace(
+                data,
+                name=name,
+                persona=persona,
+                voice_notes=voice_notes,
+                aesthetic_references=list(style.aesthetic_references),
+                style_tags=list(style.style_tags),
+                global_avoid=list(style.global_avoid),
+            ),
+            issues,
+        )
+        if issues:
+            raise StudioDocumentInvalid(tuple(issues))
         # A soft cap: two simultaneous creates at 49 artists may both pass this check. That is
         # accepted — the cap bounds abuse, it is not an integrity rule, so no lock is taken.
         if (
@@ -103,8 +131,8 @@ class ArtistService:
                     user_id=user_id,
                     product_id=product_id,
                     name=name,
-                    persona=normalize_block(data.persona),
-                    voice_notes=normalize_block(data.voice_notes),
+                    persona=persona,
+                    voice_notes=voice_notes,
                     default_language=data.default_language,
                     aesthetic_references=style.aesthetic_references,
                     style_tags=style.style_tags,
@@ -118,19 +146,39 @@ class ArtistService:
     async def patch(
         self, artist_id: UUID, user_id: UUID, product_id: str, data: ArtistPatch
     ) -> ArtistOut:
-        artist = await self._repo.get(artist_id, user_id=user_id, product_id=product_id)
+        """Apply a PATCH as a locked read-modify-write (RD8).
+
+        The artist row is locked (``SELECT … FOR UPDATE``) before the stored lists are read, the
+        merge is validated and the columns are written, and the lock is held until the request
+        transaction commits. Without it two overlapping PATCHes of different list fields would
+        each write all three list columns from a stale read: the later writer would revert the
+        other's field, and a tag added by one and an avoid entry added by the other could persist
+        a ``tag_conflict`` that validation forbids.
+
+        Lock order: this locks only the artist row, and no studio path locks an artist and then
+        anything else (profiles reference artists, never the reverse), so no cycle is possible.
+
+        Raises:
+            ArtistNotFound: No such artist for the caller.
+            StudioDocumentInvalid: With every issue found (including values that normalization
+                pushed past their limit).
+            ArtistNameConflict: The new name collides case-insensitively.
+        """
+        artist = await self._repo.lock(artist_id, user_id=user_id, product_id=product_id)
         if artist is None:
             raise ArtistNotFound
 
+        issues: list[DocumentIssue] = []
         changes: dict[str, object] = {}
         if data.name is not msgspec.UNSET:
-            changes["name"] = _normalize_name(data.name)
+            changes["name"] = _normalize_name(data.name, issues)
         if data.persona is not msgspec.UNSET:
             changes["persona"] = normalize_block(data.persona)
         if data.voice_notes is not msgspec.UNSET:
             changes["voice_notes"] = normalize_block(data.voice_notes)
         if data.default_language is not msgspec.UNSET:
             changes["default_language"] = data.default_language
+        sent = dict(changes)  # what the client set, normalized: the RD6 length re-check input
 
         # tags / avoid are validated as a pair: a new tag may now clash with the stored avoid list
         if (
@@ -138,7 +186,7 @@ class ArtistService:
             or data.global_avoid is not msgspec.UNSET
             or data.aesthetic_references is not msgspec.UNSET
         ):
-            style = normalize_artist_style(
+            style = collect_artist_style(
                 style_tags=artist.style_tags
                 if data.style_tags is msgspec.UNSET
                 else data.style_tags,
@@ -148,10 +196,21 @@ class ArtistService:
                 aesthetic_references=artist.aesthetic_references
                 if data.aesthetic_references is msgspec.UNSET
                 else data.aesthetic_references,
+                issues=issues,
             )
-            changes["style_tags"] = list(style.style_tags)
-            changes["global_avoid"] = list(style.global_avoid)
-            changes["aesthetic_references"] = list(style.aesthetic_references)
+            for column, merged in (
+                ("style_tags", style.style_tags),
+                ("global_avoid", style.global_avoid),
+                ("aesthetic_references", style.aesthetic_references),
+            ):
+                changes[column] = list(merged)
+                if getattr(data, column) is not msgspec.UNSET:
+                    sent[column] = list(merged)
+
+        # RD6: only the fields the client sent are re-checked; stored values were checked on write.
+        collect_length_issues(msgspec.structs.replace(data, **sent), issues)
+        if issues:
+            raise StudioDocumentInvalid(tuple(issues))
 
         try:
             async with self._session.begin_nested():
@@ -160,13 +219,13 @@ class ArtistService:
                 )
         except IntegrityError as exc:
             raise ArtistNameConflict from exc
-        if updated is None:  # deleted between the read and the update
+        if updated is None:  # pragma: no cover - the row lock above rules out a concurrent delete
             raise ArtistNotFound
         logger.info(
             "studio.artist_updated",
             artist_id=str(artist_id),
             user_id=str(user_id),
-            fields=sorted(changes),
+            fields=[f for f in data.__struct_fields__ if getattr(data, f) is not msgspec.UNSET],
         )
         return artist_out(updated)
 

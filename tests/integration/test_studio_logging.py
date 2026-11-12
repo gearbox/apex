@@ -121,3 +121,47 @@ async def test_validation_failures_log_nothing_from_the_document(
         await w.plan(track, make_plan(title=f"{MARK}", tags=(f"{MARK}-tag", f"{MARK.lower()}-tag")))
     for entry in logs:
         assert MARK.lower() not in repr(entry).lower(), entry
+
+
+class TestArtistUpdatedLogsTheFieldsTheClientSet:
+    """Invariant 35: ``studio.artist_updated`` logs exactly the fields the client set."""
+
+    async def _patched_fields(
+        self, w: StudioWorld, patch: ArtistPatch, **create: object
+    ) -> list[str]:
+        artist = await w.artists.create(
+            w.user_id,
+            w.product_id,
+            ArtistCreate(name="Nova", **create),  # type: ignore[arg-type]
+        )
+        with capture_logs() as logs:
+            await w.artists.patch(artist.id, w.user_id, w.product_id, patch)
+        (entry,) = [e for e in logs if e["event"] == "studio.artist_updated"]
+        _assert_clean([entry])
+        assert set(entry) >= {"artist_id", "user_id", "fields"}
+        fields = entry["fields"]
+        assert isinstance(fields, list)
+        return fields
+
+    async def test_a_list_field_does_not_drag_the_other_two_into_the_log(
+        self, studio: StudioWorld
+    ) -> None:
+        # The service rewrites all three list columns when any one changes; the log must not say so.
+        fields = await self._patched_fields(
+            studio,
+            ArtistPatch(style_tags=[f"{MARK}-tag"]),
+            global_avoid=["avoid"],
+            aesthetic_references=["ref"],
+        )
+        assert fields == ["style_tags"]
+
+    async def test_scalar_fields_are_logged_by_name_in_declaration_order(
+        self, studio: StudioWorld
+    ) -> None:
+        fields = await self._patched_fields(
+            studio, ArtistPatch(global_avoid=["x"], persona=None, name=f"{MARK}-renamed")
+        )
+        assert fields == ["name", "persona", "global_avoid"]  # struct order, not request order
+
+    async def test_an_empty_patch_logs_no_fields(self, studio: StudioWorld) -> None:
+        assert await self._patched_fields(studio, ArtistPatch()) == []
