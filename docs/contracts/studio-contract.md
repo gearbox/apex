@@ -136,6 +136,8 @@ interface LyricsDocument {           // schema_version 1
 
 20,000 characters is about four times Suno's own Lyrics box. Cyrillic text costs about 2 bytes per character (20,000 characters in 400 lines ≈ 52 KB), so the character limit is the one a normal lyricist meets first; `document_too_large` is for pathological shapes (thousands of 1–4-character lines, or very large plans). Both limits are measured on the *normalized* form, so padding whitespace does not count. A document exactly at a limit is accepted.
 
+**Every per-field limit above is counted in Unicode code points *after* NFC normalization.** The wire check sees the text as sent; NFC can then make some characters longer (U+0958 becomes 2 code points, U+FB2C becomes 3), so a value that was within its limit on the wire can be over it once normalized. Such a value is refused with `too_long_after_normalization` at the field's path, together with every other issue — it is never stored and never truncated. The same re-check applies to artist, track and project-profile fields (`name`, `persona`, `voice_notes`, `aesthetic_references[i]`, `style_tags[i]`, `global_avoid[i]`, track `title`, `concept`): those requests answer `422 document_invalid` with the same `detail.issues` shape. Text that is already NFC (nearly all Latin, Cyrillic, CJK) is unaffected.
+
 ### 2.2 Versions
 
 ```ts
@@ -216,9 +218,10 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `syllable_range_inverted` | `line_syllables.min > max` |
    | `lyrics_too_long` | the lyrics' line text totals more than 20,000 characters (path `sections`) |
    | `document_too_large` | the normalized document is larger than 131,072 bytes as compact JSON (path `""`, the root) |
+   | `too_long_after_normalization` | a value is longer than its documented limit once normalized (NFC can expand characters); path is the value's own, e.g. `title`, `sections[2].style.tags[1]`, `style_tags[0]` |
    | `requires_make_current` | `incompatible_lyrics: "detach"` was sent with `make_current: false` (path `incompatible_lyrics`); checked first, before anything else is read |
 
-   The size codes are collected together with every other issue; they never short-circuit validation.
+   The size codes and `too_long_after_normalization` are collected together with every other issue; they never short-circuit validation.
 
    Wire-level violations (lengths, ranges, unknown fields, bad enum, malformed union) are `400`.
 3. **Idempotency.** A version is identified by `(track, kind, parent_version_id, normalized content [, based_on_plan_version_id])`.
@@ -280,7 +283,7 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 409 | `project_has_tracks` | disabling studio on a project with tracks |
 | 409 | `track_limit_reached` | 64 tracks |
 | 422 | `track_order_mismatch` | `track_ids` is not exactly the project's track set (missing, extra or duplicate id) |
-| 422 | `document_invalid` | §4 |
+| 422 | `document_invalid` | §4 — also artist / track / project-profile requests (empty or over-long once normalized, tag conflicts, …) |
 | 428 | `legal_acceptance_required` | stale legal acceptance on a mutation |
 
 ---
@@ -321,9 +324,9 @@ interface SunoExport {
 - `lyrics` = one block per plan section, in plan order, separated by a blank line. Header `[Label]` or `[Label: descriptors]` where descriptors are the section's `delivery` then its `style.tags`. Label = the section's `label`, else the kind's name (`Pre-Chorus`, `Post-Chorus`, otherwise title-case); a defaulted label is numbered (`Verse 1`, `Verse 2`) when the kind occurs more than once — except `chorus`, `pre_chorus`, `post_chorus` and `hook`, which stay unnumbered. A line with `delivery` is preceded by its own `[d1, d2]` line. **An instrumental section is never rendered without a cue:** a section with `instrumental: true` whose kind is not `instrumental` gets the descriptor `instrumental` **first** in its header (`[Drop: instrumental, heavy bass]`), de-duplicated case-insensitively against its own delivery and style tags, so a long tag list cannot push it out of sight; a section of kind `instrumental` is already headed `[Instrumental]` and gets no extra cue. **No parentheses are ever generated** (Suno sings them as backing vocals); `(…)` appears only if you typed it.
 - **Never exported:** `references`, `idea`, section `notes`, `duration_seconds`, section-local `avoid`, the artist's `persona`, `voice_notes` and `aesthetic_references`.
 
-**Limits are information, not errors.** Suno publishes no limits; the values below were measured on the v6 web UI and may change. The export **never truncates and never fails on length** — the full text is returned and `within_limit: false` tells you to cut:
+**Limits are information, not errors.** Suno publishes no limits; the values below were measured on the live Suno v6 web UI and verified there on 2026-11-12. They may change. The export **never truncates and never fails on length** — the full text is returned and `within_limit: false` tells you to cut:
 
-| Field | `limit` |
+| Field | `limit` (verified on the live Suno v6 web UI, 2026-11-12) |
 |---|---|
 | `title` | `null` (unknown) |
 | `style` | 1000 |
@@ -350,5 +353,6 @@ interface SunoExport {
 - **Branching history:** every version has `parent_version_id`; a "version tree" view is a straightforward render of `GET /tracks/{id}/versions?kind=…`. Deleting a leaf is allowed; deleting a node with children is not.
 - **Optimistic UI is safe.** Because create is idempotent, a double submit yields one version.
 - **Positions** can have gaps after a track delete; use `position` for ordering only and call the order endpoint to compact.
+- **Artist PATCHes are serialized per artist.** Two overlapping `PATCH /artists/{id}` calls both succeed and neither loses the other's fields; the later one waits for the earlier one to commit and validates against the result (so a tag added by one and the same entry added to `global_avoid` by the other end as a `422 tag_conflict` for whichever runs second).
 - The studio profile's `artist_id` change (via `PUT`) affects the *next* export immediately — exports always read the artist's current style.
 - **Artist names are compared with `lower()`, not `casefold()`** (the same rule as library project names; PostgreSQL has no `casefold`). Plain case differences collide (`Nova` / `NOVA`, and non-ASCII letters such as `Рок` / `рок` under the default UTF-8 database locale), but a few characters that only casefold equates stay distinct: `Straße` and `STRASSE` are two valid names. Tags, labels and the other free-text lists use `casefold` (`duplicate_tag` catches `ß` / `SS`). This is a known, accepted deviation; do not rely on name uniqueness being casefold-strict.

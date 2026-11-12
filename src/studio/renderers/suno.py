@@ -40,8 +40,8 @@ __all__ = [
 VERSION: Final = "suno-v6.2026-11"
 
 # Suno publishes no limits. These are unofficial measurements of the v6 web UI taken from the
-# P1 design (Style 1000, Exclude 1000, Lyrics 5000, 2026-11-11). They drive `within_limit`, never
-# an error. NOT re-verified against the live UI when this was implemented: re-check before merge.
+# P1 design (Style 1000, Exclude 1000, Lyrics 5000). They drive `within_limit`, never an error.
+# Verified on the live Suno v6 web UI on 2026-11-12.
 STYLE_LIMIT: Final = 1000
 EXCLUDE_LIMIT: Final = 1000
 LYRICS_LIMIT: Final = 5000
