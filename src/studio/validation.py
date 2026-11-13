@@ -34,6 +34,7 @@ from src.studio.documents import (
     StyleSpec,
 )
 from src.studio.errors import DocumentIssue, StudioDocumentInvalid
+from src.studio.section_names import is_header_text
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -76,6 +77,9 @@ _RESERVED: Final = frozenset("[]")
 """Characters that would break Suno meta-tags ``[Verse]`` if they appeared inside one."""
 
 _EMPTY: Final = "empty_after_normalization"
+
+_INSTRUMENTAL_WORD: Final = "instrumental"
+"""The descriptor the renderer writes for an instrumental section (``[Drop: instrumental]``)."""
 
 
 def normalize_text(value: str) -> str:
@@ -153,6 +157,21 @@ def _normalize_style(style: StyleSpec, path: str, issues: list[DocumentIssue]) -
     return StyleSpec(tags=tags, avoid=avoid)
 
 
+def _flag_reserved_descriptors(
+    values: Sequence[str], path: str, issues: list[DocumentIssue]
+) -> None:
+    """Flag a (normalized) section descriptor that spells the ``instrumental`` cue.
+
+    The cue is the section's ``instrumental`` flag in a Suno header; a tag with that word would be
+    indistinguishable from it when the header is read back, so the flag is the only way to say it.
+    """
+    issues.extend(
+        DocumentIssue(f"{path}[{index}]", "reserved_descriptor")
+        for index, value in enumerate(values)
+        if value.casefold() == _INSTRUMENTAL_WORD
+    )
+
+
 def _check_document_size(
     document: PlanDocument | LyricsDocument, issues: list[DocumentIssue]
 ) -> None:
@@ -181,7 +200,8 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
 
     Raises:
         StudioDocumentInvalid: With every issue found (empty text, duplicate section ids or
-            tags, tag conflicts, reserved characters, total duration over the cap, a value that
+            tags, tag conflicts, reserved characters, a section delivery / tag spelling
+            ``instrumental`` (``reserved_descriptor``), total duration over the cap, a value that
             normalization pushed past its declared limit, and a normalized document above
             :data:`MAX_DOCUMENT_BYTES`).
     """
@@ -213,16 +233,20 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
             elif _has_reserved(label):
                 issues.append(DocumentIssue(f"{base}.label", "reserved_characters"))
 
+        style = _normalize_style(section.style, f"{base}.style", issues)
+        delivery = _normalize_tokens(
+            section.delivery, f"{base}.delivery", issues, check_reserved=True
+        )
+        _flag_reserved_descriptors(delivery, f"{base}.delivery", issues)
+        _flag_reserved_descriptors(style.tags, f"{base}.style.tags", issues)
         sections.append(
             PlanSection(
                 id=section.id,
                 kind=section.kind,
                 label=label,
                 duration_seconds=section.duration_seconds,
-                style=_normalize_style(section.style, f"{base}.style", issues),
-                delivery=_normalize_tokens(
-                    section.delivery, f"{base}.delivery", issues, check_reserved=True
-                ),
+                style=style,
+                delivery=delivery,
                 instrumental=section.instrumental,
                 notes=normalize_block(section.notes),
             )
@@ -236,6 +260,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
         title=title,
         idea=normalize_block(plan.idea),
         tempo_bpm=plan.tempo_bpm,
+        instrumental=plan.instrumental,
         global_style=global_style,
         references=references,
         sections=tuple(sections),
@@ -254,12 +279,15 @@ def check_pair_compatible(plan: PlanDocument, lyrics: LyricsDocument) -> tuple[D
     (plan, lyrics) pair must never violate it.
 
     Returns:
-        ``unknown_section`` for lyrics sections the plan does not have, and
-        ``instrumental_section_has_lines`` for lyrics on an instrumental plan section. Empty
-        when the pair is compatible.
+        ``unknown_section`` for lyrics sections the plan does not have,
+        ``instrumental_section_has_lines`` for lyrics on an instrumental plan section, and one
+        ``instrumental_plan_has_lines`` (path ``sections``) when the plan itself is instrumental
+        and the lyrics have any line at all. Empty when the pair is compatible.
     """
     by_id = {section.id: section for section in plan.sections}
     issues: list[DocumentIssue] = []
+    if plan.instrumental and any(section.lines for section in lyrics.sections):
+        issues.append(DocumentIssue("sections", "instrumental_plan_has_lines"))
     for index, lyrics_section in enumerate(lyrics.sections):
         plan_section = by_id.get(lyrics_section.section_id)
         if plan_section is None:
@@ -280,7 +308,8 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
         The normalized copy.
 
     Raises:
-        StudioDocumentInvalid: With every issue found, including ``lyrics_too_long`` (total
+        StudioDocumentInvalid: With every issue found, including ``reserved_delivery_tag`` (a
+            line's delivery that would read back as a section header), ``lyrics_too_long`` (total
             normalized line text above :data:`MAX_LYRICS_TEXT_CHARS` code points),
             ``too_long_after_normalization`` (one value past its declared limit once normalized)
             and ``document_too_large`` (normalized document above :data:`MAX_DOCUMENT_BYTES`).
@@ -308,14 +337,13 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
                 issues.append(DocumentIssue(f"{line_base}.text", _EMPTY))
             elif _has_reserved(text):
                 issues.append(DocumentIssue(f"{line_base}.text", "reserved_characters"))
-            lines.append(
-                LyricLine(
-                    text=text,
-                    delivery=_normalize_tokens(
-                        line.delivery, f"{line_base}.delivery", issues, check_reserved=True
-                    ),
-                )
+            delivery = _normalize_tokens(
+                line.delivery, f"{line_base}.delivery", issues, check_reserved=True
             )
+            if delivery and is_header_text(", ".join(delivery)):
+                # Written as ``[<delivery>]`` it would read back as a section header.
+                issues.append(DocumentIssue(f"{line_base}.delivery", "reserved_delivery_tag"))
+            lines.append(LyricLine(text=text, delivery=delivery))
         sections.append(LyricsSection(section_id=section.section_id, lines=tuple(lines)))
 
     if total_chars > MAX_LYRICS_TEXT_CHARS:

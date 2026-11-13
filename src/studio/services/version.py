@@ -24,7 +24,7 @@ from src.api.schemas.studio import (
     VersionCreateOut,
     VersionSummary,
 )
-from src.core.enums import StudioDocumentKind, StudioDocumentOrigin, StudioIncompatibleLyricsPolicy
+from src.core.enums import StudioDocumentKind, StudioIncompatibleLyricsPolicy
 from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTrackRepository
 from src.studio.documents import (
     CURRENT_SCHEMA_VERSION,
@@ -69,6 +69,7 @@ if TYPE_CHECKING:
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
+    from src.core.enums import StudioDocumentOrigin
     from src.db.models.studio import StudioDocumentVersion, StudioTrack
 
 __all__ = ["MAX_VERSIONS_PER_KIND", "DocumentVersionService"]
@@ -148,13 +149,27 @@ class DocumentVersionService:
     # -- create ------------------------------------------------------------------------------
 
     async def create(
-        self, track_id: UUID, request: VersionCreate, user_id: UUID, product_id: str
+        self,
+        track_id: UUID,
+        request: VersionCreate,
+        user_id: UUID,
+        product_id: str,
+        *,
+        origin: StudioDocumentOrigin,
     ) -> tuple[VersionCreateOut, bool]:
         """Create a version — or replay it.
 
         Create is naturally idempotent: an identical sibling (same track, kind, parent and
         normalized content) is returned instead of duplicated, and ``make_current`` is still
         applied, so the call means "this version exists and, if asked, is current".
+
+        Args:
+            track_id: Track to write to.
+            request: The plan or lyrics version to create.
+            user_id: Owner scope.
+            product_id: Product scope.
+            origin: Who produced the content (stored on a new row; required so no caller can
+                forget to say — the public route passes ``user``, the Suno importer ``import``).
 
         Returns:
             ``(response, created)`` — the route answers 201 when a row was written, 200 on replay.
@@ -257,7 +272,7 @@ class DocumentVersionService:
                 parent_version_id=request.parent_version_id,
                 based_on_plan_version_id=based_on,
                 schema_version=CURRENT_SCHEMA_VERSION[kind],
-                origin=StudioDocumentOrigin.USER.value,
+                origin=origin.value,
                 content=content,
                 content_hash=digest,
             )

@@ -64,16 +64,22 @@ class PlanSection(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True)
 
 
 class PlanDocument(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
-    """The structural plan of a track (schema_version 1)."""
+    """The structural plan of a track (schema_version 2).
+
+    ``instrumental`` is a property of the *track*: independent of the sections and of the lyrics,
+    versioned with the plan. A plan may have no sections at all (a track that is only a title and
+    a style). The field order is the canonical encoding order frozen by migration 056.
+    """
 
     title: Annotated[str, Meta(min_length=1, max_length=200)]
     idea: Annotated[str, Meta(max_length=4000)] | None = None  # never exported
     tempo_bpm: Annotated[int, Meta(ge=40, le=240)] | None = None
+    instrumental: bool = False
     global_style: StyleSpec = StyleSpec()
     references: Annotated[
         tuple[Annotated[str, Meta(min_length=1, max_length=200)], ...], Meta(max_length=20)
     ] = ()  # NEVER exported (real-artist names are not sent to providers)
-    sections: Annotated[tuple[PlanSection, ...], Meta(min_length=1, max_length=64)]
+    sections: Annotated[tuple[PlanSection, ...], Meta(min_length=0, max_length=64)] = ()
 
 
 class SyllableRange(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
@@ -102,7 +108,7 @@ class LyricsDocument(Struct, frozen=True, kw_only=True, forbid_unknown_fields=Tr
 
 
 CURRENT_SCHEMA_VERSION: Final[Mapping[StudioDocumentKind, int]] = {
-    StudioDocumentKind.PLAN: 1,
+    StudioDocumentKind.PLAN: 2,
     StudioDocumentKind.LYRICS: 1,
 }
 

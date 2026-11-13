@@ -19,7 +19,11 @@ from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
 from src.api.schemas.studio import PlanVersionCreate
-from src.core.enums import StudioDocumentKind, StudioIncompatibleLyricsPolicy
+from src.core.enums import (
+    StudioDocumentKind,
+    StudioDocumentOrigin,
+    StudioIncompatibleLyricsPolicy,
+)
 from src.core.enums import StudioSectionKind as K
 from src.db.models.library import LibraryProject
 from src.db.models.studio import StudioDocumentVersion, StudioTrack
@@ -199,6 +203,7 @@ class TestConcurrency:
                     PlanVersionCreate(content=make_plan(title=title), make_current=False),
                     user.id,
                     "vex",
+                    origin=StudioDocumentOrigin.USER,
                 )
                 await session.commit()
                 return out.version.version_number, created
@@ -214,7 +219,11 @@ class TestConcurrency:
         async def create() -> tuple[UUID, bool]:
             async with factory() as session:
                 out, created = await DocumentVersionService(session).create(
-                    track_id, PlanVersionCreate(content=plan), user.id, "vex"
+                    track_id,
+                    PlanVersionCreate(content=plan),
+                    user.id,
+                    "vex",
+                    origin=StudioDocumentOrigin.USER,
                 )
                 await session.commit()
                 return out.version.id, created
@@ -257,6 +266,7 @@ class TestConcurrency:
                         PlanVersionCreate(content=make_plan(title="blocked"), make_current=False),
                         user.id,
                         "vex",
+                        origin=StudioDocumentOrigin.USER,
                     )
                     await session.commit()
                     return out.version.version_number

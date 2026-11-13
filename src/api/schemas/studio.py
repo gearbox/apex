@@ -35,13 +35,17 @@ __all__ = [
     "CurrentPut",
     "ExportFieldOut",
     "ExportWarningOut",
+    "ImportWarningOut",
     "LyricsVersionCreate",
     "LyricsVersionDetail",
     "PlanVersionCreate",
     "PlanVersionDetail",
     "ProjectProfileOut",
     "ProjectProfilePut",
+    "RoundTripOut",
     "SunoExportOut",
+    "SunoImportOut",
+    "SunoImportRequest",
     "TrackCreate",
     "TrackDetail",
     "TrackOrderPut",
@@ -274,7 +278,64 @@ class SunoExportOut(msgspec.Struct, kw_only=True):
     style: str
     exclude: str
     lyrics: str
+    instrumental: bool
+    """The plan's track-level flag. Suno has no text for it: switch its "Instrumental" toggle on
+    and paste the Lyrics field (section headers only) as is."""
     fields: dict[str, ExportFieldOut]
     """Per-field size report for ``title`` / ``style`` / ``exclude`` / ``lyrics``. The limits are
     unofficial measurements: ``within_limit=false`` is information, never an error."""
     warnings: list[ExportWarningOut]
+
+
+# ---------------------------------------------------------------------------
+# Import
+# ---------------------------------------------------------------------------
+
+
+class SunoImportRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """The three text boxes of a Suno song, pasted back into the studio."""
+
+    title: _TrackTitle | None = None
+    """Plan title; defaults to the track's title."""
+    style: Annotated[str, Meta(max_length=1000)] = ""
+    exclude: Annotated[str, Meta(max_length=1000)] = ""
+    lyrics: Annotated[str, Meta(max_length=20_000)] = ""
+    instrumental: bool = False
+    """Never inferred from the text: a Lyrics box with headers only is not an instrumental."""
+    language: LanguageTag | None = None
+    """Lyrics language; defaults to the current lyrics', then the artist's default."""
+    dry_run: bool = False
+    """Parse and report, write nothing."""
+
+
+class ImportWarningOut(msgspec.Struct, kw_only=True):
+    code: str
+    line: int | None
+    """1-based line of the pasted Lyrics; ``null`` for Style / Exclude / whole-import warnings."""
+
+
+class RoundTripOut(msgspec.Struct, kw_only=True):
+    """Whether rendering the imported documents reproduces each pasted box (canonicalised)."""
+
+    style: bool
+    exclude: bool
+    lyrics: bool
+
+
+class SunoImportOut(msgspec.Struct, kw_only=True):
+    dry_run: bool
+    plan: PlanDocument
+    """The normalized plan the text stands for (what is, or on a dry run would be, stored)."""
+    lyrics: LyricsDocument | None
+    """``null`` when the pasted Lyrics have no lyric line."""
+    plan_unchanged: bool
+    lyrics_unchanged: bool
+    warnings: list[ImportWarningOut]
+    round_trip: RoundTripOut
+    plan_version: VersionSummary | None
+    """The plan version that is current after the import; ``null`` on a dry run."""
+    lyrics_version: VersionSummary | None
+    """The lyrics version that is current after the import; ``null`` on a dry run, or when the
+    song has no lyrics."""
+    created: bool
+    """Whether any version row was written."""

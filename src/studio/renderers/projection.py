@@ -22,6 +22,7 @@ def to_renderable_plan(plan: PlanDocument) -> RenderablePlan:
     return RenderablePlan(
         title=plan.title,
         tempo_bpm=plan.tempo_bpm,
+        instrumental=plan.instrumental,
         global_style=plan.global_style,
         sections=tuple(
             RenderableSection(

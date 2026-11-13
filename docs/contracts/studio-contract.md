@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1: Studio Foundation)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b: Studio Foundation + Suno import)
 
-> **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export).
-> **Backend source:** branch `feat/studio-foundation` (migration `055_studio_foundation`).
+> **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`) and `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export. **No LLM planner, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). **No LLM planner, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -15,6 +15,8 @@
 - **Version create is idempotent by content.** Re-sending the same content under the same parent returns the existing version (`200`) instead of creating a duplicate (`201`). You may retry freely.
 - The current **(plan, lyrics) pair is always compatible**. The server refuses (`409`) any action that would make an incompatible pair current, and a refused action writes nothing.
 - `GET …/exports/suno` renders Suno's **Title / Style / Exclude / Lyrics** fields. It always renders; it never truncates; limits are reported, not enforced.
+- `POST …/imports/suno` is the inverse: paste Suno's Style / Exclude / Lyrics boxes back and the server turns them into the track's next plan and lyrics versions (`origin: "import"`). Deterministic, no LLM, free; `dry_run` previews without writing (§10).
+- A plan has a track-level **`instrumental`** flag (independent of its sections and of the lyrics) and may have **no sections** at all (plan **schema v2**, §2.1).
 - Everything sits behind a feature flag: when studio is off for the product (or globally) **every** `/v1/studio/*` route answers `404`, even before authentication.
 
 ---
@@ -42,7 +44,7 @@ type ISODateTime = string;
 
 type ReleaseKind = "single" | "ep" | "album";
 type DocumentKind = "plan" | "lyrics";
-type DocumentOrigin = "user" | "llm" | "import";   // only "user" is written in this phase
+type DocumentOrigin = "user" | "llm" | "import";   // "user" (typed) and "import" (§10) are written; "llm" arrives later
 type SectionKind =
   | "intro" | "verse" | "pre_chorus" | "chorus" | "post_chorus" | "hook" | "bridge"
   | "build" | "drop" | "breakdown" | "instrumental" | "interlude" | "outro";
@@ -109,13 +111,14 @@ interface PlanSection {
   instrumental?: boolean;            // default false; an instrumental section carries no lyrics
   notes?: string | null;             // ≤ 1000 — NEVER exported
 }
-interface PlanDocument {             // schema_version 1; unknown fields → 400
+interface PlanDocument {             // schema_version 2; unknown fields → 400
   title: string;                     // 1–200
   idea?: string | null;              // ≤ 4000 — NEVER exported
   tempo_bpm?: number | null;         // 40–240
+  instrumental?: boolean;            // default false; the TRACK is wordless — see below
   global_style?: StyleSpec;
   references?: string[];             // ≤ 20 × (1–200) — NEVER exported (real-artist names)
-  sections: PlanSection[];           // 1–64
+  sections?: PlanSection[];          // 0–64 (default []); a plan may be only a title and a style
 }
 
 interface LyricLine { text: string /* 1–300 */; delivery?: string[] /* ≤ 6 × (1–40) */ }
@@ -126,6 +129,8 @@ interface LyricsDocument {           // schema_version 1
   sections?: LyricsSection[];        // ≤ 64; at most one entry per plan section
 }
 ```
+
+**Plan schema v2 (migration 056).** `instrumental` is a property of the *track*: it is versioned with the plan and is independent of every section's own `instrumental` flag and of the lyrics. It is **never inferred** — an empty Lyrics box or a plan of headers only is not an instrumental. A plan marked `instrumental` cannot be paired with lyrics that have any line (§5); lyrics with no lines are fine. `sections` used to need at least one entry and is now optional. Versions stored before this release were rewritten by the migration (`instrumental: false`) and carry `schema_version: 2`; clients that do not send `instrumental` get `false`.
 
 **Size limits (checked after normalization, reported as `422 document_invalid` issues — see §4).** The per-field limits above alone would allow megabytes per version, so two totals apply on top of them:
 
@@ -191,6 +196,7 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | DELETE | `/versions/{id}` | 204 | see §6 |
 | PUT | `/tracks/{id}/current` | 200 `Track` | body `{plan_version_id?, lyrics_version_id?}` — see §5 |
 | GET | `/tracks/{id}/exports/suno` | 200 `SunoExport` | `?plan_version_id=&lyrics_version_id=` — see §8 |
+| POST | `/tracks/{id}/imports/suno` | **201** written / **200** not | paste Suno's boxes back, `dry_run` to preview — see §10 |
 
 Also: deleting a **library project** that still has studio tracks is refused — `409 project_in_use` with
 `detail: {"blockers": [{"code": "studio_tracks", "count": n}]}`. Delete (or move) the tracks first. A studio project without tracks deletes normally (its profile goes with it).
@@ -211,6 +217,9 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `duplicate_tag` | same tag twice in one list (case-insensitive, also non-ASCII) |
    | `tag_conflict` | a tag is in both `tags` and `avoid` of the same style |
    | `reserved_characters` | `[` or `]` in a tag, delivery tag, label or lyric line (they would break Suno meta-tags) |
+   | `reserved_descriptor` | a section's `delivery` or `style.tags` item is the word `instrumental` (any case; path `sections[i].delivery[j]` / `sections[i].style.tags[j]`). Use the section's `instrumental` flag: the export writes the cue itself, and a tag with that word could not be told apart from it when a header is read back (§10) |
+   | `reserved_delivery_tag` | a lyric line's delivery, written as the bracket line `[d1, d2]`, would read as a **section header** — its text before the first `:` is a section name such as `Verse`, `Chorus 2`, `Refrain`, `Fade Out` (path `sections[i].lines[j].delivery`). Pick another word |
+   | `instrumental_plan_has_lines` | the plan is `instrumental` and the lyrics have at least one line (path `sections`; one issue, besides the per-section ones) |
    | `total_duration_exceeded` | planned section durations sum to more than 1800 s |
    | `unknown_section` | lyrics refer to a section the plan does not have |
    | `duplicate_section` | lyrics list the same section twice |
@@ -222,6 +231,8 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `requires_make_current` | `incompatible_lyrics: "detach"` was sent with `make_current: false` (path `incompatible_lyrics`); checked first, before anything else is read |
 
    The size codes and `too_long_after_normalization` are collected together with every other issue; they never short-circuit validation.
+
+   `reserved_descriptor` and `reserved_delivery_tag` apply to **new writes only**: versions stored earlier that contain such values still load, render and export.
 
    Wire-level violations (lengths, ranges, unknown fields, bad enum, malformed union) are `400`.
 3. **Idempotency.** A version is identified by `(track, kind, parent_version_id, normalized content [, based_on_plan_version_id])`.
@@ -241,7 +252,7 @@ Retry rule: any network failure can be retried verbatim — the worst case is a 
 A track has at most one current plan and one current lyrics. Invariants the server enforces for you:
 
 - Lyrics are never current without a plan (`409 plan_required`).
-- The current pair is always **compatible**: every lyrics section exists in the plan and none sits on an instrumental section.
+- The current pair is always **compatible**: every lyrics section exists in the plan, none sits on an instrumental section, and — if the plan itself is `instrumental` — the lyrics have **no line at all** (`instrumental_plan_has_lines`, alongside the per-section `instrumental_section_has_lines`). Creating lyrics with lines for an instrumental plan is `422`; making such a plan current over lyrics that have lines is `409 lyrics_incompatible_with_plan` (or a detach, §5 table); `PUT …/current` and the export refuse it with the same `409`.
 - A `409` here is **atomic** — nothing is written (no row, no number, no pointer).
 
 | Action | Rule |
@@ -284,6 +295,7 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 409 | `track_limit_reached` | 64 tracks |
 | 422 | `track_order_mismatch` | `track_ids` is not exactly the project's track set (missing, extra or duplicate id) |
 | 422 | `document_invalid` | §4 — also artist / track / project-profile requests (empty or over-long once normalized, tag conflicts, …) |
+| 422 | `import_invalid` | §10 — pasted Suno text that cannot become valid documents; issues carry the pasted line they come from |
 | 428 | `legal_acceptance_required` | stale legal acceptance on a mutation |
 
 ---
@@ -313,6 +325,7 @@ interface SunoExport {
   style: string;                     // paste into Suno "Style of Music"
   exclude: string;                   // paste into "Exclude styles"
   lyrics: string;                    // paste into "Lyrics"
+  instrumental: boolean;             // the plan's track-level flag — see below
   fields: { title | style | exclude | lyrics: { length: number; limit: number | null; within_limit: boolean } };
   warnings: { code: string; section_id: UUID | null }[];
 }
@@ -322,6 +335,7 @@ interface SunoExport {
 
 - `style` = plan `global_style.tags`, then the project artist's `style_tags`, de-duplicated case-insensitively (first occurrence wins), then `"<tempo> BPM"`. `exclude` = plan `global_style.avoid` then artist `global_avoid`, same de-duplication.
 - `lyrics` = one block per plan section, in plan order, separated by a blank line. Header `[Label]` or `[Label: descriptors]` where descriptors are the section's `delivery` then its `style.tags`. Label = the section's `label`, else the kind's name (`Pre-Chorus`, `Post-Chorus`, otherwise title-case); a defaulted label is numbered (`Verse 1`, `Verse 2`) when the kind occurs more than once — except `chorus`, `pre_chorus`, `post_chorus` and `hook`, which stay unnumbered. A line with `delivery` is preceded by its own `[d1, d2]` line. **An instrumental section is never rendered without a cue:** a section with `instrumental: true` whose kind is not `instrumental` gets the descriptor `instrumental` **first** in its header (`[Drop: instrumental, heavy bass]`), de-duplicated case-insensitively against its own delivery and style tags, so a long tag list cannot push it out of sight; a section of kind `instrumental` is already headed `[Instrumental]` and gets no extra cue. **No parentheses are ever generated** (Suno sings them as backing vocals); `(…)` appears only if you typed it.
+- **`instrumental`** is the plan's track-level flag, reported next to the text because Suno takes an "Instrumental" toggle rather than a tag: switch it on and paste `lyrics` as is. It adds **no** cue to any header (section cues stay driven by each section's own flag). A plan without sections renders `lyrics: ""` (length `0`, within the limit).
 - **Never exported:** `references`, `idea`, section `notes`, `duration_seconds`, section-local `avoid`, the artist's `persona`, `voice_notes` and `aesthetic_references`.
 
 **Limits are information, not errors.** Suno publishes no limits; the values below were measured on the live Suno v6 web UI and verified there on 2026-11-12. They may change. The export **never truncates and never fails on length** — the full text is returned and `within_limit: false` tells you to cut:
@@ -354,5 +368,101 @@ interface SunoExport {
 - **Optimistic UI is safe.** Because create is idempotent, a double submit yields one version.
 - **Positions** can have gaps after a track delete; use `position` for ordering only and call the order endpoint to compact.
 - **Artist PATCHes are serialized per artist.** Two overlapping `PATCH /artists/{id}` calls both succeed and neither loses the other's fields; the later one waits for the earlier one to commit and validates against the result (so a tag added by one and the same entry added to `global_avoid` by the other end as a `422 tag_conflict` for whichever runs second).
+- **The import is the export's inverse** (§10): `export → paste into Suno → paste back` of an unchanged song is a no-op (`200`, nothing written). Offer "import from Suno" as a text area per box with a **Preview** (`dry_run: true`) before **Import**.
 - The studio profile's `artist_id` change (via `PUT`) affects the *next* export immediately — exports always read the artist's current style.
 - **Artist names are compared with `lower()`, not `casefold()`** (the same rule as library project names; PostgreSQL has no `casefold`). Plain case differences collide (`Nova` / `NOVA`, and non-ASCII letters such as `Рок` / `рок` under the default UTF-8 database locale), but a few characters that only casefold equates stay distinct: `Straße` and `STRASSE` are two valid names. Tags, labels and the other free-text lists use `casefold` (`duplicate_tag` catches `ß` / `SS`). This is a known, accepted deviation; do not rely on name uniqueness being casefold-strict.
+
+---
+
+## 10. Suno import
+
+`POST /v1/studio/tracks/{id}/imports/suno` — paste Suno's three boxes back and the server reads them as the track's next plan and lyrics. **Deterministic** (no LLM; the same text over the same track always gives the same result), **free** (no billing), same guards as the rest of studio (`404` when off, `401`, `428` on a stale legal acceptance).
+
+```ts
+interface SunoImportRequest {        // unknown fields → 400
+  title?: string | null;             // 1–200; plan title. Default: the track's title
+  style?: string;                    // ≤ 1000 ("" default)
+  exclude?: string;                  // ≤ 1000
+  lyrics?: string;                   // ≤ 20,000
+  instrumental?: boolean;            // false. NEVER inferred from the text — send true to mark the track instrumental
+  language?: string | null;          // lyrics language (same format as LyricsDocument.language)
+  dry_run?: boolean;                 // false. Parse, validate, report; write nothing
+}
+interface SunoImportResult {
+  dry_run: boolean;
+  plan: PlanDocument;                // the NORMALIZED plan the text stands for (stored, or on a dry run, would be)
+  lyrics: LyricsDocument | null;     // null when the Lyrics box has no lyric line
+  plan_unchanged: boolean;           // equal to the current plan: no row written
+  lyrics_unchanged: boolean;
+  warnings: { code: string; line: number | null }[];
+  round_trip: { style: boolean; exclude: boolean; lyrics: boolean };
+  plan_version: VersionSummary | null;     // current after the import; null on a dry run
+  lyrics_version: VersionSummary | null;   // null on a dry run, or when the song has no lyrics
+  created: boolean;                  // any version row was written
+}
+```
+
+**Status:** `201` when a version row was written, `200` otherwise — a dry run, or a paste that changes nothing. "Nothing changed" is never a `409`.
+
+### What an import does
+
+- A real import writes the plan version and, if the Lyrics box has lyric lines, the lyrics version, both with `origin: "import"`, **both made current**, in **one transaction**: if any step fails nothing is kept. They are written like typed versions (§4), so the same rules apply, and the new versions are **children of the track's current plan / lyrics**.
+- **Unchanged** (`*_unchanged: true`): the result equals the current version → no row, no version number used. The lyrics version records the plan version it was written for, so lyrics are unchanged only when the plan is unchanged too: changing only Style (say) writes a new plan version **and** a new lyrics version with the same lines, based on the new plan.
+- **A dry run** returns the same `plan`, `lyrics`, `warnings`, `round_trip` and `*_unchanged` as the real import would, and **writes nothing** — no row, no pointer, no version number — and takes no lock. Use it to preview.
+- **No lyric lines** (`lyrics: null`): the plan keeps the pasted headers as sections, no lyrics version is written and, if the track had current lyrics, the **lyrics pointer is cleared** (the old lyrics versions are kept). A headers-only paste on a track that is not instrumental is reported as `no_lyric_lines`; an empty Lyrics box is simply a plan with no sections.
+
+### How the text is read
+
+- **Style / Exclude:** split on `,`, each item NFC-normalized and trimmed, empty items skipped, repeats removed case-insensitively (first wins, `duplicate_style_item`). In Style, the **first** item like `120 BPM` / `120bpm` (40–240) becomes `tempo_bpm`; later ones stay tags (`duplicate_tempo`); anything out of range (`300 BPM`) is an ordinary tag. The **project artist's tags are taken back out** — the exact inverse of the export's merge — so they are not copied into the plan; if the current plan's own tags already render to the pasted text they are kept as they are.
+- **Lyrics:** lines are NFC-normalized and trimmed; `\r\n` and `\r` are line breaks. A **bracket line** (`[…]`) is a *section header* if it opens a blank-line-separated block, or if what it holds reads as a header (its text before the first `:` is a known section name, optionally followed by a number: `Verse`, `Verse 2`, `Pre-Chorus`, `Refrain`, `Fade Out`, `Break`, `Solo`, …). Any other bracket line is the **delivery of the next text line**. A text line belongs to the current section; a blank line then a text line (not a header) continues it.
+- **Header → section.** `[Name: a, b]` splits at the **first** `:`; the descriptors are split on `,`. The name becomes the section's `kind` (via the alias table; an unknown name becomes `interlude` with the name kept as its label and the warning `unknown_section_name`). The `label` is `null` exactly when the name equals the header the export would write by default for that position (case-sensitive), otherwise the name is kept. A descriptor `instrumental` (any case, any position) sets the section's `instrumental` flag and is removed — a section of kind `instrumental` does **not** set it by itself. Every other descriptor becomes a section style tag (the delivery/tag split of the export is not recoverable from text).
+- **Section ids (stable).** Each pasted section reuses the id of the first not-yet-used section of the *current plan* whose rendered header name equals the pasted one; a section with no counterpart gets the deterministic id `uuid5(track_id, "suno-import:<ordinal>:<header name>")` (ordinal = 0-based position among the pasted sections), so importing the same text twice gives the same ids. Lyrics therefore keep pointing at the right sections across edits.
+- **What the text cannot say is carried over from the current plan/lyrics**, so `export → Suno → import` of an unchanged song changes nothing: a matched section whose **whole header line is identical** to the current plan's is copied verbatim (kind, label, the delivery/tag split, instrumental, local avoid list, planned duration, notes); any other matched section keeps its planned duration, notes and local `avoid`; the plan keeps its `idea` and `references`; the lyrics keep `line_syllables`. Pasting into a track with no plan creates everything from the text alone.
+- **Language** (needed only when there are lyric lines): the request's `language`, else the current lyrics' language, else the project artist's `default_language`, else `422 language_required`.
+- **Never silent, never guessed:** parentheses are kept as typed; `instrumental` is only what you send; every guess is a warning.
+
+### Warnings
+
+| Code | `line` | Meaning |
+|---|---|---|
+| `no_section_headers` | first text line | lyric lines but no header at all: read as one `verse` |
+| `text_before_first_header` | first such line | text above the first header: read as an implicit `verse` |
+| `dangling_delivery` | the bracket line | a delivery line with no text line after it (or replaced by a second one): dropped |
+| `unknown_section_name` | the header | the header name is not a known section: kind `interlude`, label kept |
+| `duplicate_descriptor` | the header / delivery line | a repeated descriptor (case-insensitive): collapsed |
+| `no_lyric_lines` | — | headers only, no lyric line, and `instrumental` was not set |
+| `duplicate_style_item` | — | a repeated Style / Exclude item (case-insensitive): dropped |
+| `duplicate_tempo` | — | a second BPM item in Style: kept as an ordinary tag |
+
+Every warning has a `code`; ones that come from the Lyrics box carry the **1-based line** of the pasted Lyrics, the others `null`.
+
+### `round_trip`
+
+For each box: after canonicalisation (NFC, `\n` line ends, lines trimmed, runs of blank lines collapsed and the ends trimmed; for Style / Exclude: split on `,`, trimmed, rejoined with `", "`), does **rendering the imported documents give back exactly what was pasted**? `false` is information, never an error: `120bpm` is written back as `120 BPM`, a dropped dangling bracket is gone, a repeated descriptor (`[Verse: soft, Soft]`) or Style item is collapsed, an empty item (`a,,b`) is skipped. Show a "this will be normalized as…" hint for any `false`.
+
+### `422 import_invalid`
+
+```json
+{ "error": "import_invalid",
+  "detail": { "issues": [{ "path": "plan.sections[1].label", "code": "reserved_characters" }],
+              "source_lines": { "plan.sections[1].label": 4 } } }
+```
+
+`issues` lists **every** problem; `source_lines` maps a path to the 1-based line of the pasted Lyrics it comes from (a number; a list of numbers for `instrumental_with_lyric_lines`). Neither ever contains pasted text. Nothing is written. Codes:
+
+| Code | Path | Meaning |
+|---|---|---|
+| `unsupported_inline_tag` | `lyrics[<line>]` | a lyric line contains `[` or `]` but is not a whole bracket line (e.g. `la [soft] la`); one issue per such line |
+| `instrumental_with_lyric_lines` | `lyrics` | `instrumental: true` and the Lyrics box has lyric lines; `source_lines.lyrics` lists them all |
+| `language_required` | `language` | there are lyric lines and no language could be determined |
+| any §4 code | `plan.<path>` / `lyrics.<path>` | the imported plan / lyrics failed validation, e.g. `plan.sections[2].label` `reserved_characters`, `plan.global_style.avoid[0]` `tag_conflict`, `lyrics.sections[1]` `instrumental_section_has_lines` (a lyric line under `[Instrumental]`), `lyrics.sections[0].lines[3].text` `too_long_after_normalization`. Style / Exclude issues have no `source_lines` entry |
+| `too_many_items` | `plan.global_style.tags`, `plan.sections`, `lyrics.sections[i].lines`, … | more items than the document allows (40 tags, 64 sections, 64 lines per section, …) |
+
+Other statuses: `404` (not your track, any product mismatch, studio off), `400` (malformed body or a limit above), `428`, and the `409`s of §4/§5 for a version-create that cannot proceed (e.g. `version_limit_reached`) — in which case, as always, nothing is written.
+
+### Things to know
+
+- A label containing `:` is read back as a name plus descriptors (`[Bridge: key: C]`); only the part *before* the first `:` decides whether a bracket line inside a block is a header, so `[soft: verse]` in the middle of a block is a delivery. (A bracket line that **opens** a block is always a header, known name or not.)
+- Importing over an `instrumental` track **resets the flag unless you send `instrumental: true` again** — the flag is the request's, not the text's.
+- The import does not change the track's title, only the plan's.
+

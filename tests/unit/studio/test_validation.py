@@ -609,3 +609,173 @@ class TestLimitsAreRecheckedAfterNormalization:
             ("aesthetic_references[0]", "empty_after_normalization"),
         }
         assert style.style_tags == ("a", "A")
+
+
+class TestReservedNames:
+    """P1b (I4): names the Suno importer would read back as something else are refused."""
+
+    @pytest.mark.parametrize("word", ["instrumental", "Instrumental", "INSTRUMENTAL"])
+    def test_instrumental_in_a_section_delivery_is_reserved(self, word: str) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(make_section(K.DROP, delivery=("loud", word))))
+        assert _issues(exc) == {("sections[0].delivery[1]", "reserved_descriptor")}
+
+    @pytest.mark.parametrize("word", ["instrumental", "Instrumental", "INSTRUMENTAL"])
+    def test_instrumental_in_a_section_style_tag_is_reserved(self, word: str) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(make_section(K.DROP, tags=(word,))))
+        assert _issues(exc) == {("sections[0].style.tags[0]", "reserved_descriptor")}
+
+    def test_it_is_the_whole_word_that_is_reserved(self) -> None:
+        plan = normalize_plan(
+            make_plan(make_section(K.DROP, tags=("instrumentals", "non-instrumental")))
+        )
+        assert plan.sections[0].style.tags == ("instrumentals", "non-instrumental")
+
+    def test_the_global_style_and_the_avoid_list_are_not_affected(self) -> None:
+        plan = normalize_plan(
+            make_plan(make_section(K.VERSE, avoid=("instrumental",)), tags=("instrumental",))
+        )
+        assert plan.global_style.tags == ("instrumental",)
+
+    def test_the_word_is_checked_after_normalization(self) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(make_section(K.DROP, tags=("  Instrumental ",))))
+        assert _issues(exc) == {("sections[0].style.tags[0]", "reserved_descriptor")}
+
+    def test_it_is_collected_with_every_other_issue(self) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(
+                make_plan(make_section(K.DROP, tags=("instrumental", "a[b]")), title="  ")
+            )
+        assert _issues(exc) == {
+            ("title", "empty_after_normalization"),
+            ("sections[0].style.tags[0]", "reserved_descriptor"),
+            ("sections[0].style.tags[1]", "reserved_characters"),
+        }
+
+    @pytest.mark.parametrize(
+        "delivery",
+        [
+            ("Verse",),
+            ("chorus",),
+            ("Pre-Chorus 2",),
+            ("Refrain",),
+            ("fade out",),
+            ("BREAK",),
+            ("Verse: whispered",),
+        ],
+    )
+    def test_a_line_delivery_that_reads_as_a_header_is_reserved(
+        self, delivery: tuple[str, ...]
+    ) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse))
+        lyrics = make_lyrics((verse.id, [LyricLine(text="la", delivery=delivery)]))
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, plan)
+        assert _issues(exc) == {("sections[0].lines[0].delivery", "reserved_delivery_tag")}
+
+    @pytest.mark.parametrize(
+        "delivery",
+        [
+            ("whispered",),
+            ("soft", "close"),
+            ("Verse x",),
+            ("end of line",),
+            ("Verse", "soft"),  # written "[Verse, soft]": the name part is "Verse, soft"
+        ],
+    )
+    def test_ordinary_delivery_is_fine(self, delivery: tuple[str, ...]) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse))
+        lyrics = make_lyrics((verse.id, [LyricLine(text="la", delivery=delivery)]))
+        assert normalize_lyrics(lyrics, plan).sections[0].lines[0].delivery == delivery
+
+    def test_the_issue_is_at_the_line_and_is_collected_with_others(self) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse))
+        lyrics = make_lyrics(
+            (
+                verse.id,
+                [
+                    LyricLine(text="ok", delivery=("soft",)),
+                    LyricLine(text="la", delivery=("Chorus",)),
+                    LyricLine(text="a[b]"),
+                ],
+            )
+        )
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(lyrics, plan)
+        assert _issues(exc) == {
+            ("sections[0].lines[1].delivery", "reserved_delivery_tag"),
+            ("sections[0].lines[2].text", "reserved_characters"),
+        }
+
+    def test_stored_rows_with_these_values_still_decode(self) -> None:
+        """Only new writes are refused: the decode path never applies the semantic rules."""
+        from src.core.enums import StudioDocumentKind
+        from src.studio.documents import decode_stored
+
+        content = {
+            "title": "Old",
+            "sections": [
+                {
+                    "id": str(new_id()),
+                    "kind": "drop",
+                    "delivery": ["Instrumental"],
+                    "style": {"tags": ["instrumental"], "avoid": []},
+                }
+            ],
+        }
+        plan = decode_stored(StudioDocumentKind.PLAN, 2, content)
+        assert isinstance(plan, PlanDocument)
+        assert plan.sections[0].delivery == ("Instrumental",)
+        lyrics = {
+            "language": "en",
+            "sections": [
+                {"section_id": str(new_id()), "lines": [{"text": "la", "delivery": ["Chorus"]}]}
+            ],
+        }
+        decode_stored(StudioDocumentKind.LYRICS, 1, lyrics)
+
+
+class TestInstrumentalPlanAndEmptyPlan:
+    def test_the_flag_is_normalized_through(self) -> None:
+        assert normalize_plan(make_plan(instrumental=True)).instrumental is True
+        assert normalize_plan(make_plan()).instrumental is False
+
+    def test_a_plan_may_have_no_sections(self) -> None:
+        plan = normalize_plan(make_plan(empty=True, tags=("lofi",)))
+        assert plan.sections == ()
+
+    def test_an_instrumental_plan_refuses_lyrics_with_lines(self) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse, instrumental=True))
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(make_lyrics((verse.id, ["la"])), plan)
+        assert _issues(exc) == {("sections", "instrumental_plan_has_lines")}
+
+    def test_it_is_one_issue_besides_the_per_section_ones(self) -> None:
+        drop = make_section(K.DROP, instrumental=True)
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(drop, verse, instrumental=True))
+        lyrics = make_lyrics((drop.id, ["a"]), (verse.id, ["b", "c"]))
+        issues = check_pair_compatible(plan, lyrics)
+        assert [(i.path, i.code) for i in issues] == [
+            ("sections", "instrumental_plan_has_lines"),
+            ("sections[0]", "instrumental_section_has_lines"),
+        ]
+
+    def test_an_instrumental_plan_accepts_lyrics_without_lines(self) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse, instrumental=True))
+        assert normalize_lyrics(LyricsDocument(language="en"), plan).sections == ()
+        assert check_pair_compatible(plan, LyricsDocument(language="en")) == ()
+
+    def test_a_plan_without_sections_accepts_lyrics_only_without_sections(self) -> None:
+        plan = normalize_plan(make_plan(empty=True))
+        assert normalize_lyrics(LyricsDocument(language="en"), plan).sections == ()
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_lyrics(make_lyrics((new_id(), ["la"])), plan)
+        assert _issues(exc) == {("sections[0].section_id", "unknown_section")}

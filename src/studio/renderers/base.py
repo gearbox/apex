@@ -47,10 +47,11 @@ class RenderableSection:
 
 @dataclass(frozen=True, slots=True)
 class RenderablePlan:
-    """A plan as a renderer may see it: nothing but title, tempo, global style and sections."""
+    """A plan as a renderer may see it: title, tempo, instrumental flag, global style, sections."""
 
     title: str
     tempo_bpm: int | None
+    instrumental: bool
     global_style: StyleSpec
     sections: tuple[RenderableSection, ...]
 
@@ -95,12 +96,17 @@ class RenderedField:
 
 @dataclass(frozen=True, slots=True)
 class RenderedExport:
-    """Output of a renderer. Text is always complete — never truncated, never an error."""
+    """Output of a renderer. Text is always complete — never truncated, never an error.
+
+    ``instrumental`` is the track-level flag of the plan. It is reported next to the fields
+    because the target has no text for it (Suno takes an "Instrumental" toggle, not a tag).
+    """
 
     target: StudioExportTarget
     renderer_version: str
     fields: Mapping[str, RenderedField]
     warnings: tuple[ExportWarning, ...]
+    instrumental: bool
 
 
 class TargetRenderer(Protocol):
