@@ -371,15 +371,24 @@ class TestIsolation:
 
     async def test_creating_versions_on_a_foreign_track_is_hidden(self, populated) -> None:
         from src.api.schemas.studio import PlanVersionCreate
+        from src.core.enums import StudioDocumentOrigin
 
         w, track, *_ = populated
         with pytest.raises(StudioNotFound):
             await w.versions.create(
-                track, PlanVersionCreate(content=make_plan()), uuid4(), w.product_id
+                track,
+                PlanVersionCreate(content=make_plan()),
+                uuid4(),
+                w.product_id,
+                origin=StudioDocumentOrigin.USER,
             )
         with pytest.raises(StudioNotFound):
             await w.versions.create(
-                track, PlanVersionCreate(content=make_plan()), w.user_id, "synthara"
+                track,
+                PlanVersionCreate(content=make_plan()),
+                w.user_id,
+                "synthara",
+                origin=StudioDocumentOrigin.USER,
             )
 
     async def test_nothing_leaked_or_changed(self, populated) -> None:

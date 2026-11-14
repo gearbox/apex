@@ -11,7 +11,10 @@ nothing here can leak content into logs or error bodies.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import ClassVar
+from typing import TYPE_CHECKING, ClassVar
+
+if TYPE_CHECKING:
+    from collections.abc import Mapping
 
 __all__ = [
     "ArtistInUse",
@@ -19,6 +22,7 @@ __all__ = [
     "ArtistNameConflict",
     "ArtistNotFound",
     "DocumentIssue",
+    "ImportInvalid",
     "InvalidCursor",
     "LyricsIncompatibleWithPlan",
     "ParentVersionNotFound",
@@ -118,6 +122,34 @@ class StudioDocumentInvalid(StudioError):
     def __init__(self, issues: tuple[DocumentIssue, ...]) -> None:
         super().__init__(_issues_detail(issues))
         self.issues = issues
+
+
+class ImportInvalid(StudioError):
+    """Pasted Suno text cannot become a plan / lyrics; carries *all* issues and where they are.
+
+    ``issues`` addresses the offending value (``lyrics[7]``, ``plan.sections[2].label``,
+    ``plan.global_style.tags[1]``, ``lyrics.sections[0].lines[3].text``, ``language``). Where the
+    value came from a line of the pasted Lyrics, ``source_lines`` maps the same path to that
+    1-based line: an ``int``, or a list of them when one issue stands for several lines
+    (``instrumental_with_lyric_lines``). Neither ever contains pasted text.
+    """
+
+    code = "import_invalid"
+    status_code = 422
+    message = "The pasted text cannot be imported."
+
+    def __init__(
+        self,
+        issues: tuple[DocumentIssue, ...],
+        source_lines: Mapping[str, int | tuple[int, ...]] | None = None,
+    ) -> None:
+        lines = {
+            path: list(line) if isinstance(line, tuple) else line
+            for path, line in (source_lines or {}).items()
+        }
+        super().__init__({**_issues_detail(issues), "source_lines": lines})
+        self.issues = issues
+        self.source_lines = dict(source_lines or {})
 
 
 class TrackOrderMismatch(StudioError):

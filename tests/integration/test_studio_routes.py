@@ -38,6 +38,7 @@ from src.api.dependencies.common import (
     get_studio_project_service,
     get_studio_track_service,
     get_studio_version_service,
+    get_suno_import_service,
 )
 from src.api.routes.library_project import LibraryProjectController
 from src.api.routes.studio_artists import StudioArtistController
@@ -113,6 +114,7 @@ def _build_app(
             "studio_track_service": dep(get_studio_track_service),
             "studio_version_service": dep(get_studio_version_service),
             "studio_export_service": dep(get_studio_export_service),
+            "studio_suno_import_service": dep(get_suno_import_service),
             "library_project_service": dep(get_library_project_service),
         },
         exception_handlers={
@@ -242,7 +244,7 @@ class TestFeatureGating:
         self, session_factory: async_sessionmaker[AsyncSession]
     ) -> None:
         requests = _every_studio_request(_build_app(session_factory))
-        assert len(requests) == 21  # 2+3+1+3+2+1+3+2+2+1+1 — the endpoint table in the contract
+        assert len(requests) == 22  # 2+3+1+3+2+1+3+2+2+1+1+1 — the endpoint table in the contract
 
     async def test_kill_switch_hides_every_method_before_auth_and_db(
         self,
@@ -432,7 +434,7 @@ class TestJourney:
         track_id = await _track(client, owner)
         for payload in (
             {"kind": "nonsense", "content": {}},
-            {"kind": "plan", "content": {"title": "x", "sections": []}},
+            {"kind": "plan", "content": {"title": "", "sections": []}},  # a title is required
             {
                 "kind": "plan",
                 "content": {"title": "x", "sections": [{"id": str(uuid4()), "kind": "verse"}]},
@@ -790,6 +792,7 @@ class TestOpenApi:
             "/v1/studio/tracks/{track_id}/versions",
             "/v1/studio/tracks/{track_id}/current",
             "/v1/studio/tracks/{track_id}/exports/suno",
+            "/v1/studio/tracks/{track_id}/imports/suno",
             "/v1/studio/versions/{version_id}",
         ):
             assert path in paths, path

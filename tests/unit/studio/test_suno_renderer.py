@@ -248,7 +248,9 @@ class TestSectionDescriptors:
         by_delivery = make_section(K.DROP, instrumental=True, delivery=(typed,))
         by_tag = make_section(K.DROP, instrumental=True, tags=(typed,))
         for section in (by_delivery, by_tag):
-            export = _render(normalize_plan(make_plan(section)))
+            # Not normalized on purpose: new writes can no longer carry the word (it is a
+            # reserved descriptor), but stored schema-v1 rows still can and must render well.
+            export = _render(make_plan(section))
             assert _text(export, "lyrics") == "[Drop: instrumental]"  # the cue was first
 
     def test_the_cue_applies_to_vocal_kinds_and_custom_labels(self) -> None:
@@ -367,3 +369,37 @@ class TestProtocol:
         export = _render(normalize_plan(make_plan()))
         with pytest.raises(dataclasses.FrozenInstanceError):
             export.renderer_version = "x"  # type: ignore[misc]
+
+
+class TestInstrumentalAndEmptyPlans:
+    """P1b (C1): the track-level flag is reported, never written into the text."""
+
+    def test_the_flag_is_reported_and_adds_no_cue_to_any_header(self) -> None:
+        verse = make_section(K.VERSE)
+        plan = normalize_plan(make_plan(verse, instrumental=True, title="Wordless"))
+        export = _render(plan)
+        assert export.instrumental is True
+        assert _text(export, "lyrics") == "[Verse]"  # section cues come from section flags only
+
+    def test_it_defaults_to_false(self) -> None:
+        assert _render(normalize_plan(make_plan())).instrumental is False
+
+    def test_a_section_flag_still_cues_its_own_header(self) -> None:
+        plan = normalize_plan(make_plan(make_section(K.DROP, instrumental=True), instrumental=True))
+        export = _render(plan)
+        assert _text(export, "lyrics") == "[Drop: instrumental]"
+
+    def test_a_plan_without_sections_renders_an_empty_lyrics_field(self) -> None:
+        export = _render(normalize_plan(make_plan(empty=True, tags=("lofi",), tempo_bpm=90)))
+        assert _text(export, "lyrics") == ""
+        assert _text(export, "style") == "lofi, 90 BPM"
+        assert export.fields["lyrics"].report.length == 0
+        assert export.fields["lyrics"].report.within_limit
+
+    def test_render_header_is_the_header_the_renderer_writes(self) -> None:
+        from src.studio.renderers.suno import render_header
+
+        section = make_section(K.DROP, instrumental=True, delivery=("big",), tags=("Big", "wide"))
+        plan = normalize_plan(make_plan(section))
+        assert render_header(plan.sections[0], "Drop") == "[Drop: instrumental, big, wide]"
+        assert _text(_render(plan), "lyrics") == "[Drop: instrumental, big, wide]"

@@ -10,6 +10,7 @@ Endpoints:
   DELETE /v1/studio/versions/{id}                  — delete a non-current, childless version
   PUT    /v1/studio/tracks/{id}/current            — switch the current plan / lyrics
   GET    /v1/studio/tracks/{id}/exports/suno       — deterministic Suno rendering (pure GET)
+  POST   /v1/studio/tracks/{id}/imports/suno       — paste Suno's boxes back: 201 written, 200 not
 """
 
 from __future__ import annotations
@@ -31,6 +32,8 @@ from src.api.schemas.studio import (
     LyricsVersionDetail,
     PlanVersionDetail,
     SunoExportOut,
+    SunoImportOut,
+    SunoImportRequest,
     TrackDetail,
     TrackOut,
     TrackPatch,
@@ -40,8 +43,9 @@ from src.api.schemas.studio import (
 )
 from src.api.security import auth_guard
 from src.api.security.studio import studio_feature_guard
-from src.core.enums import StudioDocumentKind
+from src.core.enums import StudioDocumentKind, StudioDocumentOrigin
 from src.studio.services.export import ExportService
+from src.studio.services.importer import SunoImportService
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 
@@ -60,7 +64,10 @@ _ERRORS = {
     ),
     422: ResponseSpec(
         data_container=ErrorEnvelope,
-        description="document_invalid — every issue is listed in detail.issues.",
+        description=(
+            "document_invalid or import_invalid — every issue is listed in detail.issues "
+            "(import_invalid also maps them to pasted lines in detail.source_lines)."
+        ),
     ),
 }
 
@@ -142,7 +149,7 @@ class StudioTrackController(Controller):
         ``200`` instead of duplicated, and ``make_current`` is still applied.
         """
         out, created = await studio_version_service.create(
-            track_id, data, current_user_id, product_id
+            track_id, data, current_user_id, product_id, origin=StudioDocumentOrigin.USER
         )
         return Response(content=out, status_code=HTTP_201_CREATED if created else HTTP_200_OK)
 
@@ -206,6 +213,29 @@ class StudioTrackController(Controller):
             plan_version_id=plan_version_id,
             lyrics_version_id=lyrics_version_id,
         )
+
+    # -- import ------------------------------------------------------------------------------
+
+    @post("/tracks/{track_id:uuid}/imports/suno", status_code=HTTP_201_CREATED, responses=_ERRORS)
+    async def import_suno(
+        self,
+        current_user_id: UUID,
+        product_id: str,
+        track_id: UUID,
+        data: SunoImportRequest,
+        studio_suno_import_service: SunoImportService,
+    ) -> Response[SunoImportOut]:
+        """Paste Suno's Style / Exclude / Lyrics back as the track's current plan and lyrics.
+
+        Imported versions are children of the current ones; content that equals the current
+        version is reported as ``unchanged`` instead of failing. ``dry_run`` parses, validates
+        and reports without writing. Answers ``201`` when a version row was written, ``200``
+        otherwise (a dry run, or nothing changed).
+        """
+        out = await studio_suno_import_service.import_suno(
+            track_id, data, current_user_id, product_id
+        )
+        return Response(content=out, status_code=HTTP_201_CREATED if out.created else HTTP_200_OK)
 
 
 __all__ = ["StudioTrackController"]

@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.52.0"
+version = "0.52.1"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -59,6 +59,7 @@ dev = [
     "httpx>=0.28.1",                # For test client
     "psycopg2-binary>=2.9.12",       # For alembic sync migrations in test bootstrap
     "watchfiles>=1.2.0",
+    "hypothesis>=6",
 ]
 
 [project.scripts]

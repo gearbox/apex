@@ -10,7 +10,7 @@ References, ideas, notes and personas are not in the render context at all (see 
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Protocol
 
 from src.core.enums import StudioExportTarget, StudioSectionKind
 from src.studio.renderers.base import (
@@ -21,11 +21,13 @@ from src.studio.renderers.base import (
     RenderedField,
     dedupe_ci,
 )
+from src.studio.section_names import rendered_labels
+from src.studio.tempo import tempo_token
 
 if TYPE_CHECKING:
-    from collections.abc import Mapping
     from uuid import UUID
 
+    from src.studio.documents import StyleSpec
     from src.studio.renderers.base import RenderableSection
 
 __all__ = [
@@ -35,6 +37,7 @@ __all__ = [
     "STYLE_LIMIT",
     "VERSION",
     "SunoRenderer",
+    "render_header",
 ]
 
 VERSION: Final = "suno-v6.2026-11"
@@ -48,24 +51,21 @@ LYRICS_LIMIT: Final = 5000
 LYRICS_RECOMMENDED_LENGTH: Final = 3000
 """Suno tends to rush through longer lyrics; above this a warning is raised (not an error)."""
 
-# Kinds that repeat by design: an unlabeled second chorus is still just "Chorus".
-_UNNUMBERED_KINDS: Final = frozenset(
-    {
-        StudioSectionKind.CHORUS,
-        StudioSectionKind.PRE_CHORUS,
-        StudioSectionKind.POST_CHORUS,
-        StudioSectionKind.HOOK,
-    }
-)
 
-_DISPLAY_NAMES: Final[Mapping[StudioSectionKind, str]] = {
-    StudioSectionKind.PRE_CHORUS: "Pre-Chorus",
-    StudioSectionKind.POST_CHORUS: "Post-Chorus",
-}
+class _HeaderSource(Protocol):
+    """What a section header is made of: a ``RenderableSection`` or a ``PlanSection``."""
 
+    @property
+    def kind(self) -> StudioSectionKind: ...
 
-def _display_name(kind: StudioSectionKind) -> str:
-    return _DISPLAY_NAMES.get(kind) or kind.value.replace("_", " ").title()
+    @property
+    def style(self) -> StyleSpec: ...
+
+    @property
+    def delivery(self) -> tuple[str, ...]: ...
+
+    @property
+    def instrumental(self) -> bool: ...
 
 
 def _field(text: str, limit: int | None) -> RenderedField:
@@ -78,34 +78,10 @@ def _field(text: str, limit: int | None) -> RenderedField:
     )
 
 
-def _section_labels(sections: tuple[RenderableSection, ...]) -> list[str]:
-    """Header label per section: the explicit label, else the kind's name (numbered if repeated).
-
-    ``n`` is the 1-based occurrence of the *kind* among all plan sections of that kind, whether
-    or not the others carry a custom label.
-    """
-    totals: dict[StudioSectionKind, int] = {}
-    for section in sections:
-        totals[section.kind] = totals.get(section.kind, 0) + 1
-
-    seen: dict[StudioSectionKind, int] = {}
-    labels: list[str] = []
-    for section in sections:
-        seen[section.kind] = seen.get(section.kind, 0) + 1
-        if section.label:
-            labels.append(section.label)
-            continue
-        name = _display_name(section.kind)
-        if totals[section.kind] > 1 and section.kind not in _UNNUMBERED_KINDS:
-            name = f"{name} {seen[section.kind]}"
-        labels.append(name)
-    return labels
-
-
 _INSTRUMENTAL_CUE: Final = "instrumental"
 
 
-def _instrumental_cue(section: RenderableSection) -> list[str]:
+def _instrumental_cue(section: _HeaderSource) -> list[str]:
     """The ``instrumental`` descriptor for a flagged section whose header does not say so.
 
     A section of kind ``instrumental`` is already headed ``[Instrumental]``; any other kind with
@@ -120,6 +96,20 @@ def _instrumental_cue(section: RenderableSection) -> list[str]:
 
 def _meta_tag(label: str, descriptors: list[str]) -> str:
     return f"[{label}: {', '.join(descriptors)}]" if descriptors else f"[{label}]"
+
+
+def render_header(section: _HeaderSource, label: str) -> str:
+    """The whole header line of a section, e.g. ``[Drop: instrumental, riser]``.
+
+    The one place a header is written: the renderer uses it to write lyrics, the importer to
+    recognise a header it would write itself, so the two can never drift apart.
+
+    Args:
+        section: A plan section (or its renderable projection).
+        label: The header label, i.e. the explicit label or the default one.
+    """
+    descriptors = dedupe_ci([*_instrumental_cue(section), *section.delivery, *section.style.tags])
+    return _meta_tag(label, descriptors)
 
 
 class SunoRenderer:
@@ -138,7 +128,7 @@ class SunoRenderer:
         )
         style_items = [*style_tags]
         if plan.tempo_bpm:
-            style_items.append(f"{plan.tempo_bpm} BPM")
+            style_items.append(tempo_token(plan.tempo_bpm))
         exclude_items = dedupe_ci(
             [*plan.global_style.avoid, *(artist.global_avoid if artist is not None else ())]
         )
@@ -148,13 +138,10 @@ class SunoRenderer:
             if ctx.lyrics is not None
             else {}
         )
-        labels = _section_labels(plan.sections)
+        labels = rendered_labels((section.kind, section.label) for section in plan.sections)
         blocks: list[str] = []
         for section, label in zip(plan.sections, labels, strict=True):
-            descriptors = dedupe_ci(
-                [*_instrumental_cue(section), *section.delivery, *section.style.tags]
-            )
-            block = [_meta_tag(label, descriptors)]
+            block = [render_header(section, label)]
             for line in lines_by_section.get(section.id, ()):
                 if line.delivery:
                     block.append(f"[{', '.join(line.delivery)}]")
@@ -180,6 +167,7 @@ class SunoRenderer:
                 exclude_items=exclude_items,
                 lyrics_length=len(lyrics_text),
             ),
+            instrumental=plan.instrumental,
         )
 
     @staticmethod

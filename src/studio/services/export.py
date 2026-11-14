@@ -169,6 +169,7 @@ def _suno_out(
         style=fields["style"].text,
         exclude=fields["exclude"].text,
         lyrics=fields["lyrics"].text,
+        instrumental=rendered.instrumental,
         fields={
             name: ExportFieldOut(
                 length=field.report.length,

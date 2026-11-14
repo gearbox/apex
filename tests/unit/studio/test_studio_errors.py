@@ -26,6 +26,7 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.ParentVersionNotFound, 404, "parent_version_not_found"),
     (e.PlanVersionNotFound, 404, "plan_version_not_found"),
     (e.InvalidCursor, 400, "invalid_cursor"),
+    (lambda: e.ImportInvalid(_ISSUES, {"plan.sections[0].label": 3}), 422, "import_invalid"),
     (lambda: e.StudioDocumentInvalid(_ISSUES), 422, "document_invalid"),
     (e.TrackOrderMismatch, 422, "track_order_mismatch"),
     (e.ArtistNameConflict, 409, "artist_name_conflict"),

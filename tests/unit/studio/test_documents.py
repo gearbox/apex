@@ -70,7 +70,6 @@ class TestPlanBounds:
             _plan(references=["r"] * 21),
             _plan(references=["r" * 201]),
             _plan(references=[""]),
-            _plan(sections=[]),
             _plan(sections=[_section() for _ in range(65)]),
             _plan(sections=[_section(duration_seconds=0)]),
             _plan(sections=[_section(duration_seconds=601)]),
@@ -171,7 +170,7 @@ class TestLyricsBounds:
 class TestDecodeStored:
     def test_round_trips_builtins(self) -> None:
         plan = _decode_plan(_plan(tempo_bpm=100))
-        again = decode_stored(StudioDocumentKind.PLAN, 1, msgspec.to_builtins(plan))
+        again = decode_stored(StudioDocumentKind.PLAN, 2, msgspec.to_builtins(plan))
         assert again == plan
 
     def test_lyrics_round_trip(self) -> None:
@@ -179,7 +178,7 @@ class TestDecodeStored:
         assert decode_stored(StudioDocumentKind.LYRICS, 1, msgspec.to_builtins(lyrics)) == lyrics
 
     @pytest.mark.parametrize("kind", list(StudioDocumentKind))
-    @pytest.mark.parametrize("version", [0, 2, 99])
+    @pytest.mark.parametrize("version", [0, 3, 99])
     def test_unknown_schema_version_raises_loudly(
         self, kind: StudioDocumentKind, version: int
     ) -> None:
@@ -187,6 +186,11 @@ class TestDecodeStored:
         with pytest.raises(StudioDocumentSchemaError):
             decode_stored(kind, version, {})
 
+    def test_a_v1_plan_is_refused_not_shimmed(self) -> None:
+        # D5: a breaking change is a data migration (056), never a read-time fallback.
+        with pytest.raises(StudioDocumentSchemaError):
+            decode_stored(StudioDocumentKind.PLAN, 1, {"title": "x", "sections": []})
+
     def test_mismatching_content_is_not_silently_repaired(self) -> None:
         with pytest.raises(msgspec.ValidationError):
-            decode_stored(StudioDocumentKind.PLAN, 1, {"title": "x"})
+            decode_stored(StudioDocumentKind.PLAN, 2, {"sections": []})  # no title

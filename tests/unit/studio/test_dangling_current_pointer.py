@@ -16,8 +16,10 @@ from unittest.mock import AsyncMock, MagicMock
 import msgspec
 import pytest
 
+from src.core.enums import StudioDocumentKind
 from src.core.enums import StudioSectionKind as K
 from src.core.uid import new_id
+from src.studio.documents import CURRENT_SCHEMA_VERSION
 from src.studio.errors import LyricsIncompatibleWithPlan
 from src.studio.services.mappers import DANGLING_CURRENT_POINTER, require_current_row
 from src.studio.services.track import TrackService
@@ -49,7 +51,10 @@ def _track(*, plan: UUID | None = None, lyrics: UUID | None = None) -> SimpleNam
 
 def _row(kind: str, document: Any, row_id: UUID | None = None) -> SimpleNamespace:
     return SimpleNamespace(
-        id=row_id or new_id(), kind=kind, schema_version=1, content=to_json(document)
+        id=row_id or new_id(),
+        kind=kind,
+        schema_version=CURRENT_SCHEMA_VERSION[StudioDocumentKind(kind)],
+        content=to_json(document),
     )
 
 

@@ -25,10 +25,13 @@ from src.studio.errors import DocumentIssue
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["TOO_LONG", "collect_length_issues"]
+__all__ = ["TOO_LONG", "TOO_MANY", "collect_count_issues", "collect_length_issues"]
 
 TOO_LONG: Final = "too_long_after_normalization"
 """Issue code: a value is within its wire limit as sent, but past it once normalized."""
+
+TOO_MANY: Final = "too_many_items"
+"""Issue code: a list or tuple holds more items than its declared ``max_length``."""
 
 
 @functools.cache
@@ -52,14 +55,30 @@ def collect_length_issues(
             order. Nothing is raised, so the caller can report them with all other issues.
         path: Prefix of every reported path (the wire path of ``value``; ``""`` for the root).
     """
-    _walk(value, _struct_type(type(value)), path, issues)
+    _walk(value, _struct_type(type(value)), path, issues, counts=False)
+
+
+def collect_count_issues(
+    value: msgspec.Struct, issues: list[DocumentIssue], path: str = ""
+) -> None:
+    """Re-check every array ``max_length`` declared on ``type(value)`` (the item *counts*).
+
+    Normalization never changes how many items a request holds, so a document that came off the
+    wire needs no such check. A document **built in code** (the Suno importer) skips msgspec's
+    decoding altogether and must not be able to store more tags or sections than the schema
+    allows. The same walker, the same single source of limits; one ``DocumentIssue(path,
+    TOO_MANY)`` per offending array, at the array's own path.
+    """
+    _walk(value, _struct_type(type(value)), path, issues, counts=True)
 
 
 def _join(path: str, name: str) -> str:
     return f"{path}.{name}" if path else name
 
 
-def _walk(value: object, info: mi.Type, path: str, issues: list[DocumentIssue]) -> None:
+def _walk(
+    value: object, info: mi.Type, path: str, issues: list[DocumentIssue], *, counts: bool
+) -> None:
     # PATCH fields: ``type_info`` drops ``UnsetType`` from the declared type, so an unset field
     # reports a bare ``StrType`` / ``ListType``. Skip it by identity *before* any type dispatch.
     if value is msgspec.UNSET or value is None:
@@ -70,19 +89,28 @@ def _walk(value: object, info: mi.Type, path: str, issues: list[DocumentIssue]) 
             # optional struct both as ``None`` and as itself.
             branch = _branch_for(value, branches)
             if branch is not None:
-                _walk(value, branch, path, issues)
+                _walk(value, branch, path, issues, counts=counts)
         case mi.StructType(fields=fields):
             for field in fields:
                 _walk(
-                    getattr(value, field.name), field.type, _join(path, field.encode_name), issues
+                    getattr(value, field.name),
+                    field.type,
+                    _join(path, field.encode_name),
+                    issues,
+                    counts=counts,
                 )
         case mi.StrType(max_length=limit) if limit is not None:
-            if isinstance(value, str) and len(value) > limit:
+            if not counts and isinstance(value, str) and len(value) > limit:
                 issues.append(DocumentIssue(path, TOO_LONG))
-        case mi.ListType(item_type=item) | mi.VarTupleType(item_type=item):
+        case (
+            mi.ListType(item_type=item, max_length=limit)
+            | mi.VarTupleType(item_type=item, max_length=limit)
+        ):
             if isinstance(value, list | tuple):
+                if counts and limit is not None and len(value) > limit:
+                    issues.append(DocumentIssue(path, TOO_MANY))
                 for index, element in enumerate(value):
-                    _walk(element, item, f"{path}[{index}]", issues)
+                    _walk(element, item, f"{path}[{index}]", issues, counts=counts)
         case _:
             # int / UUID / enum / bool / ...: untouched by normalization.
             return

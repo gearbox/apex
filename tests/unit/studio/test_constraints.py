@@ -21,7 +21,7 @@ from src.api.schemas.studio import (
     TrackCreate,
     TrackPatch,
 )
-from src.studio.constraints import TOO_LONG, collect_length_issues
+from src.studio.constraints import TOO_LONG, TOO_MANY, collect_count_issues, collect_length_issues
 from src.studio.documents import LyricsDocument, PlanDocument
 from src.studio.errors import DocumentIssue
 
@@ -320,3 +320,49 @@ class TestEveryDeclaredLimitIsVisited:
         self, root: type[msgspec.Struct]
     ) -> None:
         assert _issues(root()) == []
+
+
+class TestItemCounts:
+    """``collect_count_issues``: the array ``max_length`` of a document built in code."""
+
+    def test_the_code_is_stable(self) -> None:
+        assert TOO_MANY == "too_many_items"
+
+    def test_an_array_within_its_limit_has_no_issue(self) -> None:
+        leaves = tuple(_Leaf(word="a") for _ in range(4))
+        issues: list[DocumentIssue] = []
+        collect_count_issues(_Shape(name="a", leaves=leaves), issues)
+        assert issues == []
+
+    def test_an_array_past_its_limit_is_reported_at_its_own_path(self) -> None:
+        issues: list[DocumentIssue] = []
+        collect_count_issues(
+            _Shape(name="a", leaves=tuple(_Leaf(word="a") for _ in range(5))), issues
+        )
+        assert issues == [DocumentIssue("leaves", TOO_MANY)]
+
+    def test_strings_are_not_this_walker_business(self) -> None:
+        issues: list[DocumentIssue] = []
+        collect_count_issues(_Shape(name="far too long"), issues)
+        assert issues == []
+
+    def test_nested_arrays_get_indexed_paths_and_a_prefix(self) -> None:
+        class Outer(Struct, frozen=True, kw_only=True):
+            groups: tuple[_Shape, ...] = ()
+
+        over = tuple(_Leaf(word="a") for _ in range(5))
+        issues: list[DocumentIssue] = []
+        collect_count_issues(
+            Outer(groups=(_Shape(name="a"), _Shape(name="b", leaves=over))), issues, "content"
+        )
+        assert issues == [DocumentIssue("content.groups[1].leaves", TOO_MANY)]
+
+    def test_the_real_plan_and_lyrics_limits_are_read_from_the_wire_structs(self) -> None:
+        from src.studio.documents import PlanDocument, StyleSpec
+
+        plan = PlanDocument(
+            title="x", global_style=StyleSpec(tags=tuple(str(i) for i in range(41)))
+        )
+        issues: list[DocumentIssue] = []
+        collect_count_issues(plan, issues)
+        assert issues == [DocumentIssue("global_style.tags", TOO_MANY)]

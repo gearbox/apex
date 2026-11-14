@@ -125,6 +125,7 @@ from src.db.repositories import (
 )
 from src.studio.services.artist import ArtistService
 from src.studio.services.export import ExportService
+from src.studio.services.importer import SunoImportService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
 from src.studio.services.track import TrackService
@@ -792,6 +793,11 @@ def get_studio_version_service(session: AsyncSession) -> DocumentVersionService:
 def get_studio_export_service(session: AsyncSession) -> ExportService:
     """Provide the studio ExportService per-request."""
     return ExportService(session)
+
+
+def get_suno_import_service(session: AsyncSession) -> SunoImportService:
+    """Provide the studio SunoImportService per-request (same session, so one transaction)."""
+    return SunoImportService(session, versions=DocumentVersionService(session))
 
 
 def get_feedback_service(session: AsyncSession) -> FeedbackService:
@@ -2057,6 +2063,7 @@ dependencies = {
     "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
     "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),
     "studio_export_service": Provide(get_studio_export_service, sync_to_thread=False),
+    "studio_suno_import_service": Provide(get_suno_import_service, sync_to_thread=False),
     # In-product problem reports
     "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
     # Idempotency

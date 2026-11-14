@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 
 from sqlalchemy import func, select
 
@@ -11,12 +11,19 @@ from src.api.schemas.studio import (
     LyricsVersionCreate,
     PlanVersionCreate,
     ProjectProfilePut,
+    SunoImportOut,
+    SunoImportRequest,
     VersionCreateOut,
 )
-from src.core.enums import StudioIncompatibleLyricsPolicy, StudioReleaseKind
+from src.core.enums import (
+    StudioDocumentOrigin,
+    StudioIncompatibleLyricsPolicy,
+    StudioReleaseKind,
+)
 from src.db.models.studio import StudioDocumentVersion, StudioTrack
 from src.studio.services.artist import ArtistService
 from src.studio.services.export import ExportService
+from src.studio.services.importer import SunoImportService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
@@ -44,6 +51,7 @@ class StudioWorld:
     tracks: TrackService = field(init=False)
     versions: DocumentVersionService = field(init=False)
     exports: ExportService = field(init=False)
+    imports: SunoImportService = field(init=False)
 
     def __post_init__(self) -> None:
         self.artists = ArtistService(self.session)
@@ -51,6 +59,7 @@ class StudioWorld:
         self.tracks = TrackService(self.session)
         self.versions = DocumentVersionService(self.session)
         self.exports = ExportService(self.session)
+        self.imports = SunoImportService(self.session, versions=self.versions)
 
     @property
     def user_id(self) -> UUID:
@@ -81,6 +90,7 @@ class StudioWorld:
         parent: UUID | None = None,
         make_current: bool = True,
         incompatible: StudioIncompatibleLyricsPolicy = StudioIncompatibleLyricsPolicy.REJECT,
+        origin: StudioDocumentOrigin = StudioDocumentOrigin.USER,
     ) -> tuple[VersionCreateOut, bool]:
         return await self.versions.create(
             track_id,
@@ -92,6 +102,7 @@ class StudioWorld:
             ),
             self.user_id,
             self.product_id,
+            origin=origin,
         )
 
     async def lyrics(
@@ -102,6 +113,7 @@ class StudioWorld:
         *,
         parent: UUID | None = None,
         make_current: bool = True,
+        origin: StudioDocumentOrigin = StudioDocumentOrigin.USER,
     ) -> tuple[VersionCreateOut, bool]:
         return await self.versions.create(
             track_id,
@@ -113,6 +125,13 @@ class StudioWorld:
             ),
             self.user_id,
             self.product_id,
+            origin=origin,
+        )
+
+    async def import_suno(self, track_id: UUID, **fields: Any) -> SunoImportOut:
+        """Import pasted Suno text (``style=``, ``exclude=``, ``lyrics=``, ``dry_run=``...)."""
+        return await self.imports.import_suno(
+            track_id, SunoImportRequest(**fields), self.user_id, self.product_id
         )
 
     async def track_row(self, track_id: UUID) -> StudioTrack:

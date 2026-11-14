@@ -28,7 +28,13 @@ def _fields(cls: type) -> set[str]:
 
 
 def test_renderable_plan_has_exactly_the_allowed_fields() -> None:
-    assert _fields(RenderablePlan) == {"title", "tempo_bpm", "global_style", "sections"}
+    assert _fields(RenderablePlan) == {
+        "title",
+        "tempo_bpm",
+        "instrumental",
+        "global_style",
+        "sections",
+    }
 
 
 def test_renderable_section_has_exactly_the_allowed_fields() -> None:

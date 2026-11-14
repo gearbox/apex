@@ -45,4 +45,4 @@ def test_lyrics_content_is_decoded_as_lyrics() -> None:
 
 def test_content_of_the_wrong_shape_is_refused() -> None:
     with pytest.raises(RuntimeError, match="would not decode"):
-        DocumentVersionService._assert_decodes(PLAN, {"title": "no sections"})
+        DocumentVersionService._assert_decodes(PLAN, {"sections": []})  # no title
