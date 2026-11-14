@@ -150,13 +150,13 @@ def build_documents(
             ``instrumental_with_lyric_lines`` (the plan is, or was asked to be, instrumental and
             the Lyrics have lines) or ``language_required`` (lines, and no language to give them).
     """
-    if parent_plan is not None and (legacy := tuple(
-        DocumentIssue(
-            f"plan.global_style.tags[{index}]", "reserved_tempo_tag"
+    if parent_plan is not None and (
+        legacy := tuple(
+            DocumentIssue(f"plan.global_style.tags[{index}]", "reserved_tempo_tag")
+            for index, tag in enumerate(parent_plan.global_style.tags)
+            if tempo_of(tag) is not None
         )
-        for index, tag in enumerate(parent_plan.global_style.tags)
-        if tempo_of(tag) is not None
-    )):
+    ):
         raise ImportInvalid(legacy)
 
     if title is None:

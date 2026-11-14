@@ -12,7 +12,6 @@ artist tags built by the artist validator that overlap the plan's. ``derandomize
 the ``@example`` pins run on every CI run regardless.
 """
 
-
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, NamedTuple
@@ -316,8 +315,7 @@ def test_invariant_2_over_the_song_itself_nothing_changes(
     assert plan2 == plan
     assert lyrics2 == lyrics
     assert all(
-        w.code not in {"text_before_first_header", "no_section_headers"}
-        for w in built.warnings
+        w.code not in {"text_before_first_header", "no_section_headers"} for w in built.warnings
     )
 
 
