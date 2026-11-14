@@ -4,14 +4,19 @@
 current versions:
 
 * **Section ids** (I3). A section keeps the id of the first still-unused section of the current
-  plan whose rendered label equals the imported header name, so the lyrics, and everything that
-  will refer to a section later, survive an edit. A section with no counterpart gets a
-  deterministic ``uuid5`` — importing the same text twice gives the same ids.
+  plan that it continues — first by the **whole header line** (a label may itself contain ``:``,
+  and an unchanged header must reclaim its own section even after a reorder), then by the
+  rendered label equal to the imported header name — so the lyrics, and everything that will
+  refer to a section later, survive an edit. A section with no counterpart gets a deterministic
+  ``uuid5`` — importing the same text twice gives the same ids.
 * **Carry-over** (I3a). Export -> Suno -> import must be a no-op for an unchanged song, so what a
   header cannot say is taken from the current plan: a section whose *whole header line* is
   byte-identical to the current plan's is copied verbatim; any other matched section keeps the
   current plan's duration, notes and local avoid list; the plan keeps its idea and references; the
   lyrics keep their syllable range.
+* **Title and flag** (I9). What the request leaves out is the current plan's, not a default: the
+  title falls back to the current plan's, then the track's; ``instrumental`` to the current
+  plan's, then ``false``.
 * **Artist tags** are taken back out of Style / Exclude (:func:`subtract_artist_tags`).
 
 The documents returned are *not normalized*: the service runs ``normalize_plan`` /
@@ -41,6 +46,7 @@ from src.studio.importers.suno import ImportWarning
 from src.studio.renderers.base import dedupe_ci
 from src.studio.renderers.suno import render_header
 from src.studio.section_names import default_labels, rendered_labels
+from src.studio.tempo import tempo_of
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -116,8 +122,9 @@ def build_documents(
     parsed: ParsedSuno,
     *,
     track_id: UUID,
-    title: str,
-    instrumental: bool,
+    track_title: str,
+    title: str | None,
+    instrumental: bool | None,
     language: str | None,
     parent_plan: PlanDocument | None,
     parent_lyrics: LyricsDocument | None,
@@ -128,17 +135,35 @@ def build_documents(
     Args:
         parsed: The parse of the pasted boxes.
         track_id: The track; seeds the ids of sections that have no counterpart.
-        title: Plan title (the request's, else the track's).
-        instrumental: The request's switch. Never inferred from the text (I7).
+        track_title: The track's title, the last fallback for the plan title.
+        title: The request's plan title; ``None`` keeps the current plan's, else the track's.
+        instrumental: The request's switch; ``None`` keeps the current plan's, else ``False``.
+            Never inferred from the text (I7).
         language: Lyrics language, already resolved (request -> current lyrics -> artist).
         parent_plan: The track's current plan, if any.
         parent_lyrics: The track's current lyrics, if any.
         artist: The project artist's exportable style, if any.
 
     Raises:
-        ImportInvalid: ``instrumental_with_lyric_lines`` (``instrumental`` was asked for and the
-            Lyrics have lines) or ``language_required`` (lines, and no language to give them).
+        ImportInvalid: ``reserved_tempo_tag`` (the current plan holds a global tag the importer
+            reads as a tempo, from before the tag was reserved: fix the plan first),
+            ``instrumental_with_lyric_lines`` (the plan is, or was asked to be, instrumental and
+            the Lyrics have lines) or ``language_required`` (lines, and no language to give them).
     """
+    if parent_plan is not None and (legacy := tuple(
+        DocumentIssue(
+            f"plan.global_style.tags[{index}]", "reserved_tempo_tag"
+        )
+        for index, tag in enumerate(parent_plan.global_style.tags)
+        if tempo_of(tag) is not None
+    )):
+        raise ImportInvalid(legacy)
+
+    if title is None:
+        title = parent_plan.title if parent_plan is not None else track_title
+    if instrumental is None:
+        instrumental = parent_plan.instrumental if parent_plan is not None else False
+
     sections = parsed.sections
     line_numbers = tuple(line.source_line for section in sections for line in section.lines)
     if line_numbers and instrumental:
@@ -149,8 +174,15 @@ def build_documents(
         raise ImportInvalid((DocumentIssue("language", "language_required"),))
 
     parent_sections = parent_plan.sections if parent_plan is not None else ()
-    matches = _match_parent_sections(sections, parent_sections)
-    plan_sections = _build_plan_sections(track_id, sections, parent_sections, matches)
+    parent_labels = rendered_labels((s.kind, s.label) for s in parent_sections)
+    parent_headers = [
+        render_header(parent, label)
+        for parent, label in zip(parent_sections, parent_labels, strict=True)
+    ]
+    matches = _match_parent_sections(sections, parent_labels, parent_headers)
+    plan_sections = _build_plan_sections(
+        track_id, sections, parent_sections, parent_headers, matches
+    )
 
     parent_style = parent_plan.global_style if parent_plan is not None else None
     tags = _plan_tokens(
@@ -225,29 +257,40 @@ def _plan_tokens(
 
 
 def _match_parent_sections(
-    sections: Sequence[ParsedSection], parent_sections: Sequence[PlanSection]
+    sections: Sequence[ParsedSection],
+    parent_labels: Sequence[str],
+    parent_headers: Sequence[str],
 ) -> list[int | None]:
     """For each imported section, the index of the parent section it continues (I3).
 
-    Walks the imported sections in order and takes the first parent section that is not yet
-    taken and whose *rendered* label (explicit, else the default for its position) equals the
-    imported header name exactly.
+    Two passes, each taking the first parent section that is not yet taken:
+
+    1. **The whole header line.** The parent whose rendered header (``render_header``) equals the
+       imported header line exactly. A label may itself contain ``:`` (``Verse 1: The Return``),
+       which the parser reads as name + descriptor, so the name alone would never find it again;
+       and an unchanged header reclaims its own section even when sections were reordered.
+    2. **The rendered label.** For what is still unmatched, the parent whose rendered label
+       (explicit, else the default for its position) equals the imported header name exactly.
+
+    A section without a header (implicit) never matches.
     """
-    parent_labels = rendered_labels((s.kind, s.label) for s in parent_sections)
     taken: set[int] = set()
-    matches: list[int | None] = []
-    for section in sections:
+    matches: list[int | None] = [None] * len(sections)
+
+    def claim(index: int, candidates: Sequence[str], wanted: str) -> None:
         found = next(
-            (
-                index
-                for index, label in enumerate(parent_labels)
-                if index not in taken and label == section.header_name
-            ),
-            None,
+            (i for i, value in enumerate(candidates) if i not in taken and value == wanted), None
         )
         if found is not None:
             taken.add(found)
-        matches.append(found)
+            matches[index] = found
+
+    for index, section in enumerate(sections):
+        if section.header_line is not None:
+            claim(index, parent_headers, section.header_line)
+    for index, section in enumerate(sections):
+        if matches[index] is None and section.header_line is not None:
+            claim(index, parent_labels, section.header_name)
     return matches
 
 
@@ -255,14 +298,9 @@ def _build_plan_sections(
     track_id: UUID,
     sections: Sequence[ParsedSection],
     parent_sections: Sequence[PlanSection],
+    parent_headers: Sequence[str],
     matches: Sequence[int | None],
 ) -> list[PlanSection]:
-    parent_labels = rendered_labels((s.kind, s.label) for s in parent_sections)
-    parent_headers = [
-        render_header(parent, label)
-        for parent, label in zip(parent_sections, parent_labels, strict=True)
-    ]
-
     # I3a(a): a matched section whose whole header line is unchanged is the parent's, verbatim.
     verbatim = [
         match is not None and section.header_line == parent_headers[match]

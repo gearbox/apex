@@ -135,7 +135,8 @@ class SunoImportService:
         built = build_documents(
             parsed,
             track_id=track_id,
-            title=request.title or track.title,
+            track_title=track.title,
+            title=request.title,
             instrumental=request.instrumental,
             language=(
                 request.language

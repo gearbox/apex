@@ -57,7 +57,7 @@ interface Artist {
   voice_notes: string | null;        // ≤ 2000 — planner context only, never exported
   default_language: string | null;   // BCP-47-like, e.g. "en", "pt-BR"
   aesthetic_references: string[];    // ≤ 20 × ≤ 200 — planner context only, NEVER exported
-  style_tags: string[];              // ≤ 40 × ≤ 60 — EXPORTED (vocal type, delivery …)
+  style_tags: string[];              // ≤ 40 × ≤ 60 — EXPORTED (vocal type, delivery …); an item that reads as a tempo ("120 BPM") is refused, see `reserved_tempo_tag` (§4)
   global_avoid: string[];            // ≤ 40 × ≤ 60 — EXPORTED into Suno's Exclude
   created_at: ISODateTime;
   updated_at: ISODateTime;
@@ -114,7 +114,7 @@ interface PlanSection {
 interface PlanDocument {             // schema_version 2; unknown fields → 400
   title: string;                     // 1–200
   idea?: string | null;              // ≤ 4000 — NEVER exported
-  tempo_bpm?: number | null;         // 40–240
+  tempo_bpm?: number | null;         // 40–240; the ONLY place for a tempo: a global tag such as "120 BPM" is refused (`reserved_tempo_tag`, §4)
   instrumental?: boolean;            // default false; the TRACK is wordless — see below
   global_style?: StyleSpec;
   references?: string[];             // ≤ 20 × (1–200) — NEVER exported (real-artist names)
@@ -218,6 +218,7 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `tag_conflict` | a tag is in both `tags` and `avoid` of the same style |
    | `reserved_characters` | `[` or `]` in a tag, delivery tag, label or lyric line (they would break Suno meta-tags) |
    | `reserved_descriptor` | a section's `delivery` or `style.tags` item is the word `instrumental` (any case; path `sections[i].delivery[j]` / `sections[i].style.tags[j]`). Use the section's `instrumental` flag: the export writes the cue itself, and a tag with that word could not be told apart from it when a header is read back (§10) |
+   | `reserved_tempo_tag` | a plan `global_style.tags` item (path `global_style.tags[i]`) or an artist `style_tags` item (path `style_tags[i]`) reads as a **tempo**: `120 BPM`, `120bpm`, `120 bpm` (any case, optional space) with a value of 40–240. The tempo belongs in `tempo_bpm`, which the export writes as the last Style item and the importer (§10) reads back from the first such item — a tag with the same spelling would turn into the tempo on the way back. Only these two lists are checked (not section tags, delivery or any avoid list); `300 BPM` or `39 BPM` is an ordinary tag |
    | `reserved_delivery_tag` | a lyric line's delivery, written as the bracket line `[d1, d2]`, would read as a **section header** — its text before the first `:` is a section name such as `Verse`, `Chorus 2`, `Refrain`, `Fade Out` (path `sections[i].lines[j].delivery`). Pick another word |
    | `instrumental_plan_has_lines` | the plan is `instrumental` and the lyrics have at least one line (path `sections`; one issue, besides the per-section ones) |
    | `total_duration_exceeded` | planned section durations sum to more than 1800 s |
@@ -232,7 +233,7 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
 
    The size codes and `too_long_after_normalization` are collected together with every other issue; they never short-circuit validation.
 
-   `reserved_descriptor` and `reserved_delivery_tag` apply to **new writes only**: versions stored earlier that contain such values still load, render and export.
+   `reserved_descriptor`, `reserved_delivery_tag` and `reserved_tempo_tag` apply to **new writes only**: versions and artists stored earlier that contain such values still load, render and export. (An import over a plan that still holds a tempo-like global tag is refused with the same code, §10.)
 
    Wire-level violations (lengths, ranges, unknown fields, bad enum, malformed union) are `400`.
 3. **Idempotency.** A version is identified by `(track, kind, parent_version_id, normalized content [, based_on_plan_version_id])`.
@@ -333,7 +334,7 @@ interface SunoExport {
 
 **Rendering rules**
 
-- `style` = plan `global_style.tags`, then the project artist's `style_tags`, de-duplicated case-insensitively (first occurrence wins), then `"<tempo> BPM"`. `exclude` = plan `global_style.avoid` then artist `global_avoid`, same de-duplication.
+- `style` = plan `global_style.tags`, then the project artist's `style_tags`, de-duplicated case-insensitively (first occurrence wins), then `"<tempo> BPM"` — at most one tempo item, always **last** (no tag can read as a tempo, `reserved_tempo_tag`). `exclude` = plan `global_style.avoid` then artist `global_avoid`, same de-duplication.
 - `lyrics` = one block per plan section, in plan order, separated by a blank line. Header `[Label]` or `[Label: descriptors]` where descriptors are the section's `delivery` then its `style.tags`. Label = the section's `label`, else the kind's name (`Pre-Chorus`, `Post-Chorus`, otherwise title-case); a defaulted label is numbered (`Verse 1`, `Verse 2`) when the kind occurs more than once — except `chorus`, `pre_chorus`, `post_chorus` and `hook`, which stay unnumbered. A line with `delivery` is preceded by its own `[d1, d2]` line. **An instrumental section is never rendered without a cue:** a section with `instrumental: true` whose kind is not `instrumental` gets the descriptor `instrumental` **first** in its header (`[Drop: instrumental, heavy bass]`), de-duplicated case-insensitively against its own delivery and style tags, so a long tag list cannot push it out of sight; a section of kind `instrumental` is already headed `[Instrumental]` and gets no extra cue. **No parentheses are ever generated** (Suno sings them as backing vocals); `(…)` appears only if you typed it.
 - **`instrumental`** is the plan's track-level flag, reported next to the text because Suno takes an "Instrumental" toggle rather than a tag: switch it on and paste `lyrics` as is. It adds **no** cue to any header (section cues stay driven by each section's own flag). A plan without sections renders `lyrics: ""` (length `0`, within the limit).
 - **Never exported:** `references`, `idea`, section `notes`, `duration_seconds`, section-local `avoid`, the artist's `persona`, `voice_notes` and `aesthetic_references`.
@@ -380,11 +381,11 @@ interface SunoExport {
 
 ```ts
 interface SunoImportRequest {        // unknown fields → 400
-  title?: string | null;             // 1–200; plan title. Default: the track's title
+  title?: string | null;             // 1–200; plan title. Omitted/null: the CURRENT plan's title (a track with no plan: the track's title)
   style?: string;                    // ≤ 1000 ("" default)
   exclude?: string;                  // ≤ 1000
   lyrics?: string;                   // ≤ 20,000
-  instrumental?: boolean;            // false. NEVER inferred from the text — send true to mark the track instrumental
+  instrumental?: boolean | null;     // omitted/null: the CURRENT plan's flag (no plan: false). NEVER inferred from the text — send true/false to set it
   language?: string | null;          // lyrics language (same format as LyricsDocument.language)
   dry_run?: boolean;                 // false. Parse, validate, report; write nothing
 }
@@ -413,10 +414,10 @@ interface SunoImportResult {
 
 ### How the text is read
 
-- **Style / Exclude:** split on `,`, each item NFC-normalized and trimmed, empty items skipped, repeats removed case-insensitively (first wins, `duplicate_style_item`). In Style, the **first** item like `120 BPM` / `120bpm` (40–240) becomes `tempo_bpm`; later ones stay tags (`duplicate_tempo`); anything out of range (`300 BPM`) is an ordinary tag. The **project artist's tags are taken back out** — the exact inverse of the export's merge — so they are not copied into the plan; if the current plan's own tags already render to the pasted text they are kept as they are.
+- **Style / Exclude:** split on `,`, each item NFC-normalized and trimmed, empty items skipped, repeats removed case-insensitively (first wins, `duplicate_style_item`). In Style, the **first** item like `120 BPM` / `120bpm` (40–240, anywhere in the list) becomes `tempo_bpm`; **later tempo items are dropped** (`duplicate_tempo`) — a tag that reads as a tempo is reserved (`reserved_tempo_tag`, §4), so the plan could not hold it; anything out of range (`300 BPM`) is an ordinary tag. The export writes the tempo last, so for an unchanged song this is an exact inverse. The **project artist's tags are taken back out** — the exact inverse of the export's merge — so they are not copied into the plan; if the current plan's own tags already render to the pasted text they are kept as they are.
 - **Lyrics:** lines are NFC-normalized and trimmed; `\r\n` and `\r` are line breaks. A **bracket line** (`[…]`) is a *section header* if it opens a blank-line-separated block, or if what it holds reads as a header (its text before the first `:` is a known section name, optionally followed by a number: `Verse`, `Verse 2`, `Pre-Chorus`, `Refrain`, `Fade Out`, `Break`, `Solo`, …). Any other bracket line is the **delivery of the next text line**. A text line belongs to the current section; a blank line then a text line (not a header) continues it.
 - **Header → section.** `[Name: a, b]` splits at the **first** `:`; the descriptors are split on `,`. The name becomes the section's `kind` (via the alias table; an unknown name becomes `interlude` with the name kept as its label and the warning `unknown_section_name`). The `label` is `null` exactly when the name equals the header the export would write by default for that position (case-sensitive), otherwise the name is kept. A descriptor `instrumental` (any case, any position) sets the section's `instrumental` flag and is removed — a section of kind `instrumental` does **not** set it by itself. Every other descriptor becomes a section style tag (the delivery/tag split of the export is not recoverable from text).
-- **Section ids (stable).** Each pasted section reuses the id of the first not-yet-used section of the *current plan* whose rendered header name equals the pasted one; a section with no counterpart gets the deterministic id `uuid5(track_id, "suno-import:<ordinal>:<header name>")` (ordinal = 0-based position among the pasted sections), so importing the same text twice gives the same ids. Lyrics therefore keep pointing at the right sections across edits.
+- **Section ids (stable).** Each pasted section reuses the id of a not-yet-used section of the *current plan*, found in **two passes**, each taking the first unused match in order: (1) the section whose **whole rendered header line** equals the pasted one (so a label that itself contains `:`, like `Verse 1: The Return`, finds its section again, and an unchanged header reclaims its own section even when sections were reordered); then (2) for what is left, the section whose rendered header *name* equals the pasted name. A section with no counterpart gets the deterministic id `uuid5(track_id, "suno-import:<ordinal>:<header name>")` (ordinal = 0-based position among the pasted sections), so importing the same text twice gives the same ids. Lyrics therefore keep pointing at the right sections across edits.
 - **What the text cannot say is carried over from the current plan/lyrics**, so `export → Suno → import` of an unchanged song changes nothing: a matched section whose **whole header line is identical** to the current plan's is copied verbatim (kind, label, the delivery/tag split, instrumental, local avoid list, planned duration, notes); any other matched section keeps its planned duration, notes and local `avoid`; the plan keeps its `idea` and `references`; the lyrics keep `line_syllables`. Pasting into a track with no plan creates everything from the text alone.
 - **Language** (needed only when there are lyric lines): the request's `language`, else the current lyrics' language, else the project artist's `default_language`, else `422 language_required`.
 - **Never silent, never guessed:** parentheses are kept as typed; `instrumental` is only what you send; every guess is a warning.
@@ -432,13 +433,13 @@ interface SunoImportResult {
 | `duplicate_descriptor` | the header / delivery line | a repeated descriptor (case-insensitive): collapsed |
 | `no_lyric_lines` | — | headers only, no lyric line, and `instrumental` was not set |
 | `duplicate_style_item` | — | a repeated Style / Exclude item (case-insensitive): dropped |
-| `duplicate_tempo` | — | a second BPM item in Style: kept as an ordinary tag |
+| `duplicate_tempo` | — | a second (or later) BPM item in Style: dropped; the first one is the tempo |
 
 Every warning has a `code`; ones that come from the Lyrics box carry the **1-based line** of the pasted Lyrics, the others `null`.
 
 ### `round_trip`
 
-For each box: after canonicalisation (NFC, `\n` line ends, lines trimmed, runs of blank lines collapsed and the ends trimmed; for Style / Exclude: split on `,`, trimmed, rejoined with `", "`), does **rendering the imported documents give back exactly what was pasted**? `false` is information, never an error: `120bpm` is written back as `120 BPM`, a dropped dangling bracket is gone, a repeated descriptor (`[Verse: soft, Soft]`) or Style item is collapsed, an empty item (`a,,b`) is skipped. Show a "this will be normalized as…" hint for any `false`.
+For each box: after canonicalisation (NFC, `\n` line ends, lines trimmed, runs of blank lines collapsed and the ends trimmed; for Style / Exclude: split on `,`, trimmed, rejoined with `", "`), does **rendering the imported documents give back exactly what was pasted**? `false` is information, never an error: `120bpm` is written back as `120 BPM`, a tempo that was not the last Style item (`120 BPM, rock`) is written back last (`rock, 120 BPM`), a dropped dangling bracket is gone, a repeated descriptor (`[Verse: soft, Soft]`) or Style item is collapsed, an empty item (`a,,b`) is skipped. Show a "this will be normalized as…" hint for any `false`.
 
 ### `422 import_invalid`
 
@@ -453,7 +454,8 @@ For each box: after canonicalisation (NFC, `\n` line ends, lines trimmed, runs o
 | Code | Path | Meaning |
 |---|---|---|
 | `unsupported_inline_tag` | `lyrics[<line>]` | a lyric line contains `[` or `]` but is not a whole bracket line (e.g. `la [soft] la`); one issue per such line |
-| `instrumental_with_lyric_lines` | `lyrics` | `instrumental: true` and the Lyrics box has lyric lines; `source_lines.lyrics` lists them all |
+| `instrumental_with_lyric_lines` | `lyrics` | the track is `instrumental` (the request says so, or — when it says nothing — the current plan does) and the Lyrics box has lyric lines; `source_lines.lyrics` lists them all. To write lyrics over an instrumental track send `instrumental: false` |
+| `reserved_tempo_tag` | `plan.global_style.tags[i]` | the **current plan** still holds a global tag that reads as a tempo (stored before the tag was reserved). The import is refused rather than silently rewriting the plan: save a plan version without that tag (or with it moved to `tempo_bpm`) first |
 | `language_required` | `language` | there are lyric lines and no language could be determined |
 | any §4 code | `plan.<path>` / `lyrics.<path>` | the imported plan / lyrics failed validation, e.g. `plan.sections[2].label` `reserved_characters`, `plan.global_style.avoid[0]` `tag_conflict`, `lyrics.sections[1]` `instrumental_section_has_lines` (a lyric line under `[Instrumental]`), `lyrics.sections[0].lines[3].text` `too_long_after_normalization`. Style / Exclude issues have no `source_lines` entry |
 | `too_many_items` | `plan.global_style.tags`, `plan.sections`, `lyrics.sections[i].lines`, … | more items than the document allows (40 tags, 64 sections, 64 lines per section, …) |
@@ -462,7 +464,7 @@ Other statuses: `404` (not your track, any product mismatch, studio off), `400` 
 
 ### Things to know
 
-- A label containing `:` is read back as a name plus descriptors (`[Bridge: key: C]`); only the part *before* the first `:` decides whether a bracket line inside a block is a header, so `[soft: verse]` in the middle of a block is a delivery. (A bracket line that **opens** a block is always a header, known name or not.)
-- Importing over an `instrumental` track **resets the flag unless you send `instrumental: true` again** — the flag is the request's, not the text's.
+- A label containing `:` is read as a name plus descriptors (`[Bridge: key: C]`) — the kind and the style tags come from that split — but the section still keeps its id and its label when the whole header line is unchanged (see "Section ids"). Only the part *before* the first `:` decides whether a bracket line inside a block is a header, so `[soft: verse]` in the middle of a block is a delivery. (A bracket line that **opens** a block is always a header, known name or not.)
+- **What the request leaves out is the current plan's, not a default.** Omit `title` and `instrumental` (the usual paste of just the three boxes) and the plan keeps its own title and flag, so `export → paste back` of an unchanged song is a no-op even when the plan's title differs from the track's, or the plan is instrumental. A track with no plan yet uses the track's title and `instrumental: false`. The flag is still never inferred from the text: lyric lines pasted over an instrumental plan are `422 instrumental_with_lyric_lines` until you send `instrumental: false`.
 - The import does not change the track's title, only the plan's.
 

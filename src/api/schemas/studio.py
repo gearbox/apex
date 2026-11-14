@@ -296,12 +296,15 @@ class SunoImportRequest(msgspec.Struct, forbid_unknown_fields=True, kw_only=True
     """The three text boxes of a Suno song, pasted back into the studio."""
 
     title: _TrackTitle | None = None
-    """Plan title; defaults to the track's title."""
+    """Plan title; omitted keeps the current plan's title (a track without a plan: the track's).
+    The track's own title is never changed by an import."""
     style: Annotated[str, Meta(max_length=1000)] = ""
     exclude: Annotated[str, Meta(max_length=1000)] = ""
     lyrics: Annotated[str, Meta(max_length=20_000)] = ""
-    instrumental: bool = False
-    """Never inferred from the text: a Lyrics box with headers only is not an instrumental."""
+    instrumental: bool | None = None
+    """Omitted (or ``null``) keeps the current plan's flag (a track without a plan: ``false``).
+    Never inferred from the text: a Lyrics box with headers only is not an instrumental, and
+    pasting lyric lines over an instrumental track needs an explicit ``false``."""
     language: LanguageTag | None = None
     """Lyrics language; defaults to the current lyrics', then the artist's default."""
     dry_run: bool = False

@@ -35,6 +35,7 @@ from src.studio.documents import (
 )
 from src.studio.errors import DocumentIssue, StudioDocumentInvalid
 from src.studio.section_names import is_header_text
+from src.studio.tempo import tempo_of
 
 if TYPE_CHECKING:
     from collections.abc import Iterable, Sequence
@@ -172,6 +173,24 @@ def _flag_reserved_descriptors(
     )
 
 
+def _flag_reserved_tempo_tags(
+    values: Sequence[str], path: str, issues: list[DocumentIssue]
+) -> None:
+    """Flag a (normalized) tag that the Suno importer would read as the tempo.
+
+    The tempo lives in ``tempo_bpm`` only (:mod:`src.studio.tempo`): a Style item like ``80 BPM``
+    is read back as the tempo, so as a tag it would not survive an export -> import round trip.
+    Only the lists that are rendered into the Style box are checked (the plan's global tags and
+    an artist's ``style_tags``); nothing reads a tempo from section tags, delivery or an avoid
+    list. Out-of-range values (``300 BPM``) are ordinary tags.
+    """
+    issues.extend(
+        DocumentIssue(f"{path}[{index}]", "reserved_tempo_tag")
+        for index, value in enumerate(values)
+        if tempo_of(value) is not None
+    )
+
+
 def _check_document_size(
     document: PlanDocument | LyricsDocument, issues: list[DocumentIssue]
 ) -> None:
@@ -201,7 +220,8 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
     Raises:
         StudioDocumentInvalid: With every issue found (empty text, duplicate section ids or
             tags, tag conflicts, reserved characters, a section delivery / tag spelling
-            ``instrumental`` (``reserved_descriptor``), total duration over the cap, a value that
+            ``instrumental`` (``reserved_descriptor``), a global tag the importer would read as the
+            tempo (``reserved_tempo_tag``), total duration over the cap, a value that
             normalization pushed past its declared limit, and a normalized document above
             :data:`MAX_DOCUMENT_BYTES`).
     """
@@ -215,6 +235,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
         plan.references, "references", issues, check_reserved=False, check_duplicates=False
     )
     global_style = _normalize_style(plan.global_style, "global_style", issues)
+    _flag_reserved_tempo_tags(global_style.tags, "global_style.tags", issues)
 
     sections: list[PlanSection] = []
     seen_ids: set[UUID] = set()
@@ -378,11 +399,15 @@ def collect_artist_style(
 ) -> NormalizedArtistStyle:
     """Validate an artist's tag lists like a ``StyleSpec``, appending to ``issues`` (never raises).
 
+    A ``style_tags`` item that reads as a tempo is ``reserved_tempo_tag`` (the plan's ``tempo_bpm``
+    is the only place for one); ``global_avoid`` is not checked.
+
     The returned value is best-effort when ``issues`` grew; callers must check before using it.
     """
     tags, avoid = _normalize_tag_pair(
         style_tags, global_avoid, "style_tags", "global_avoid", issues
     )
+    _flag_reserved_tempo_tags(tags, "style_tags", issues)
     references = _normalize_tokens(
         aesthetic_references,
         "aesthetic_references",

@@ -22,6 +22,7 @@ from src.studio.renderers.base import (
     dedupe_ci,
 )
 from src.studio.section_names import rendered_labels
+from src.studio.tempo import tempo_token
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -127,7 +128,7 @@ class SunoRenderer:
         )
         style_items = [*style_tags]
         if plan.tempo_bpm:
-            style_items.append(f"{plan.tempo_bpm} BPM")
+            style_items.append(tempo_token(plan.tempo_bpm))
         exclude_items = dedupe_ci(
             [*plan.global_style.avoid, *(artist.global_avoid if artist is not None else ())]
         )

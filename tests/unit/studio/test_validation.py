@@ -740,6 +740,93 @@ class TestReservedNames:
         decode_stored(StudioDocumentKind.LYRICS, 1, lyrics)
 
 
+class TestReservedTempoTag:
+    """R1: a tag the importer would read as the tempo is reserved — the tempo is ``tempo_bpm``."""
+
+    @pytest.mark.parametrize(
+        "tag", ["80 BPM", "120bpm", "120 bpm", "  90   Bpm ", "40 BPM", "240 BPM"]
+    )
+    def test_a_plan_global_tag_that_reads_as_a_tempo_is_refused(self, tag: str) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(tags=("rock", tag)))
+        assert _issues(exc) == {("global_style.tags[1]", "reserved_tempo_tag")}
+
+    @pytest.mark.parametrize(
+        "tag", ["300 BPM", "39 BPM", "1200 BPM", "BPM 120", "120 BPMs", "5 BPM", "fast bpm"]
+    )
+    def test_anything_that_is_not_a_tempo_is_an_ordinary_tag(self, tag: str) -> None:
+        assert normalize_plan(make_plan(tags=(tag,))).global_style.tags == (tag,)
+
+    def test_the_other_lists_are_not_checked(self) -> None:
+        """Nothing reads a tempo from section tags, delivery or an avoid list."""
+        verse = make_section(K.VERSE, tags=("80 BPM",), delivery=("90 bpm",), avoid=("100 BPM",))
+        plan = normalize_plan(make_plan(verse, avoid=("120 BPM",)))
+        assert plan.global_style.avoid == ("120 BPM",)
+        assert plan.sections[0].style.tags == ("80 BPM",)
+        assert plan.sections[0].delivery == ("90 bpm",)
+        assert plan.sections[0].style.avoid == ("100 BPM",)
+
+    def test_it_is_collected_with_every_other_issue(self) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(tags=("80 BPM", "a[b]"), title="  "))
+        assert _issues(exc) == {
+            ("title", "empty_after_normalization"),
+            ("global_style.tags[0]", "reserved_tempo_tag"),
+            ("global_style.tags[1]", "reserved_characters"),
+        }
+
+    def test_the_tempo_itself_is_still_fine(self) -> None:
+        assert normalize_plan(make_plan(tags=("rock",), tempo_bpm=120)).tempo_bpm == 120
+
+    @pytest.mark.parametrize(
+        ("tags", "tempo", "path"),
+        [
+            # the reproduction table of the remediation prompt, rows 1 and 4 (plan side)
+            (("80 BPM",), 120, "global_style.tags[0]"),
+            (("120 bpm",), 120, "global_style.tags[0]"),
+        ],
+    )
+    def test_the_reproduction_rows_with_a_plan_tag_are_rejected_at_write(
+        self, tags: tuple[str, ...], tempo: int, path: str
+    ) -> None:
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_plan(make_plan(tags=tags, tempo_bpm=tempo))
+        assert _issues(exc) == {(path, "reserved_tempo_tag")}
+
+    @pytest.mark.parametrize("tag", ["80 BPM", "90bpm"])
+    def test_the_reproduction_rows_with_an_artist_tag_are_rejected_at_write(self, tag: str) -> None:
+        """Rows 2 and 3: the artist's tag is rendered into every Style box of the project."""
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            normalize_artist_style(style_tags=("rock", tag), global_avoid=())
+        assert _issues(exc) == {("style_tags[1]", "reserved_tempo_tag")}
+
+    def test_an_artists_avoid_list_and_references_are_not_checked(self) -> None:
+        style = normalize_artist_style(
+            style_tags=("300 BPM",), global_avoid=("120 BPM",), aesthetic_references=("90 BPM",)
+        )
+        assert (style.style_tags, style.global_avoid) == (("300 BPM",), ("120 BPM",))
+
+    def test_collect_artist_style_collects_it_instead_of_raising(self) -> None:
+        issues: list[DocumentIssue] = []
+        collect_artist_style(style_tags=("80 BPM",), global_avoid=(), issues=issues)
+        assert [(i.path, i.code) for i in issues] == [("style_tags[0]", "reserved_tempo_tag")]
+
+    def test_stored_rows_with_a_tempo_tag_still_decode(self) -> None:
+        """Only new writes are refused (the P1b precedent): the decode path applies no rule."""
+        from src.core.enums import StudioDocumentKind
+        from src.studio.documents import decode_stored
+
+        content = {
+            "title": "Old",
+            "tempo_bpm": 120,
+            "global_style": {"tags": ["80 BPM"], "avoid": []},
+            "sections": [],
+        }
+        plan = decode_stored(StudioDocumentKind.PLAN, 2, content)
+        assert isinstance(plan, PlanDocument)
+        assert plan.global_style.tags == ("80 BPM",)
+
+
 class TestInstrumentalPlanAndEmptyPlan:
     def test_the_flag_is_normalized_through(self) -> None:
         assert normalize_plan(make_plan(instrumental=True)).instrumental is True

@@ -23,6 +23,7 @@ from src.core.enums import StudioSectionKind
 from src.studio.errors import DocumentIssue, ImportInvalid
 from src.studio.renderers.base import dedupe_ci
 from src.studio.section_names import is_header_text, resolve_kind, split_header
+from src.studio.tempo import tempo_of
 from src.studio.validation import normalize_text
 
 __all__ = [
@@ -35,9 +36,6 @@ __all__ = [
 ]
 
 _BRACKET: Final = re.compile(r"^\[(.+)\]$")
-_BPM: Final = re.compile(r"^(\d{2,3})\s*bpm$")
-_MIN_BPM: Final = 40
-_MAX_BPM: Final = 240
 _INSTRUMENTAL: Final = "instrumental"
 
 
@@ -125,27 +123,22 @@ def _dedupe(tokens: list[str], warnings: list[ImportWarning]) -> list[str]:
     return unique
 
 
-def _bpm_of(token: str) -> int | None:
-    match = _BPM.match(token.casefold())
-    if match is None:
-        return None
-    value = int(match.group(1))
-    return value if _MIN_BPM <= value <= _MAX_BPM else None
-
-
 def _parse_style(style: str, warnings: list[ImportWarning]) -> tuple[list[str], int | None]:
-    """Style tokens without the tempo, and the tempo (the first valid ``NNN BPM`` token)."""
+    """Style tokens without the tempo, and the tempo (the first item :func:`tempo_of` reads).
+
+    Later tempo items are **dropped** (``duplicate_tempo``), never kept as tags: a tag that reads
+    as a tempo is reserved (``reserved_tempo_tag``), so the plan could not hold it.
+    """
     tempo: int | None = None
     rest: list[str] = []
     for token in split_items(style):
-        bpm = _bpm_of(token)
+        bpm = tempo_of(token)
         if bpm is None:
             rest.append(token)
         elif tempo is None:
             tempo = bpm
         else:
             warnings.append(ImportWarning("duplicate_tempo"))
-            rest.append(token)
     return _dedupe(rest, warnings), tempo
 
 

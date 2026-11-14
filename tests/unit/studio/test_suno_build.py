@@ -8,10 +8,11 @@ import msgspec
 import pytest
 
 from src.core.enums import StudioSectionKind as K
-from src.studio.documents import LyricLine, SyllableRange
+from src.studio.documents import LyricLine, PlanDocument, SyllableRange
 from src.studio.errors import ImportInvalid
 from src.studio.renderers.base import ArtistRenderInput
 from src.studio.section_names import rendered_labels
+from src.studio.validation import normalize_plan
 from tests.studio_import import TRACK_ID, import_text, reimport, render_song, texts
 from tests.studio_support import (
     GOLDEN_EXCLUDE,
@@ -151,6 +152,93 @@ class TestSectionIds:
         assert ids[1] == x.id
 
 
+class TestColonLabelsAndWholeHeaderMatching:
+    """R2: a label containing ``:`` is a name plus a descriptor to the parser — it must still be
+    found again, or every round trip mints new section ids and new versions."""
+
+    def test_a_colon_label_round_trips_over_its_own_plan(self) -> None:
+        verse = make_section(K.VERSE, label="Verse 1: The Return")
+        plan = normalize_plan(make_plan(verse))
+        lyrics = make_lyrics((verse.id, ["la la"]))
+        shown = texts(render_song(plan, lyrics, None))
+        assert shown["lyrics"] == "[Verse 1: The Return]\nla la"
+
+        plan2, lyrics2, built = reimport(plan, lyrics, None, parent=True)
+
+        assert plan2 == plan  # the same section id, label, tags
+        assert lyrics2 == lyrics
+        assert plan2.sections[0].id == verse.id
+        assert built.warnings == ()
+
+    def test_a_colon_label_also_round_trips_as_text_without_a_parent(self) -> None:
+        verse = make_section(K.VERSE, label="Verse 1: The Return")
+        plan = normalize_plan(make_plan(verse))
+        lyrics = make_lyrics((verse.id, ["la la"]))
+        plan2, lyrics2, _ = reimport(plan, lyrics, None, parent=False)
+        assert texts(render_song(plan2, lyrics2, None)) == texts(render_song(plan, lyrics, None))
+
+    def test_an_unchanged_header_reclaims_its_own_section_after_a_reorder(self) -> None:
+        soft = make_section(K.CHORUS, tags=("soft",))  # [Chorus: soft]
+        plain = make_section(K.CHORUS)  # [Chorus]
+        parent = normalize_plan(make_plan(soft, plain))
+        # the same two sections, pasted in the other order
+        plan, _, _ = import_text(lyrics="[Chorus]\n\n[Chorus: soft]", parent_plan=parent)
+        assert [s.id for s in plan.sections] == [plain.id, soft.id]
+        assert plan.sections == (plain, soft)  # both verbatim: nothing else moved
+
+    def test_the_label_is_the_fallback_for_a_changed_header(self) -> None:
+        soft = make_section(K.CHORUS, tags=("soft",), notes="keep")
+        parent = normalize_plan(make_plan(soft))
+        plan, _, _ = import_text(lyrics="[Chorus: loud]", parent_plan=parent)
+        assert plan.sections[0].id == soft.id
+        assert plan.sections[0].notes == "keep"
+        assert plan.sections[0].style.tags == ("loud",)
+
+    def test_two_parents_that_render_the_same_header_line_are_matched_in_order(self) -> None:
+        """``[Verse: x]`` is both label ``Verse: x`` (no tags) and label ``Verse`` with tag ``x``."""
+        colon = make_section(K.VERSE, label="Verse: x")
+        tagged = make_section(K.VERSE, label="Verse", tags=("x",))
+        parent = normalize_plan(make_plan(colon, tagged))
+        lyrics = make_lyrics((colon.id, ["a"]), (tagged.id, ["b"]))
+        shown = texts(render_song(parent, lyrics, None))
+        assert shown["lyrics"] == "[Verse: x]\na\n\n[Verse: x]\nb"
+
+        plan, new_lyrics, _ = reimport(parent, lyrics, None, parent=True)
+
+        assert plan == parent  # first unused wins, in order: each keeps its own shape
+        assert [s.id for s in plan.sections] == [colon.id, tagged.id]
+        assert new_lyrics == lyrics
+        assert texts(render_song(plan, new_lyrics, None)) == shown
+
+    def test_a_third_section_with_the_same_header_gets_a_new_id(self) -> None:
+        colon = make_section(K.VERSE, label="Verse: x")
+        tagged = make_section(K.VERSE, label="Verse", tags=("x",))
+        parent = normalize_plan(make_plan(colon, tagged))
+        plan, _, _ = import_text(
+            lyrics="[Verse: x]\n\n[Verse: x]\n\n[Verse: x]", parent_plan=parent
+        )
+        ids = [s.id for s in plan.sections]
+        assert ids[:2] == [colon.id, tagged.id]
+        assert ids[2] not in {colon.id, tagged.id}
+        assert len(set(ids)) == 3
+
+    def test_pass_one_wins_over_the_label_of_an_earlier_section(self) -> None:
+        """``[Verse]`` first by label would take the section whose whole header is ``[Verse: x]``."""
+        tagged = make_section(K.VERSE, label="Verse", tags=("x",))  # [Verse: x]
+        bare = make_section(K.VERSE, label="Verse")  # [Verse]
+        parent = normalize_plan(make_plan(tagged, bare))
+        plan, _, _ = import_text(lyrics="[Verse: x]\n\n[Verse]", parent_plan=parent)
+        assert plan.sections == (tagged, bare)
+        # reversed paste: the headers reclaim their own sections, not the first label match
+        plan, _, _ = import_text(lyrics="[Verse]\n\n[Verse: x]", parent_plan=parent)
+        assert [s.id for s in plan.sections] == [bare.id, tagged.id]
+
+    def test_an_implicit_section_never_matches(self) -> None:
+        verse = make_section(K.VERSE)
+        plan, _, _ = import_text(lyrics="just words", parent_plan=normalize_plan(make_plan(verse)))
+        assert plan.sections[0].id == uuid5(TRACK_ID, "suno-import:0:")
+
+
 class TestCarryOver:
     def test_a_matched_section_with_a_changed_header_keeps_the_non_exportable_fields(self) -> None:
         verse = make_section(
@@ -216,6 +304,137 @@ class TestCarryOver:
         plan, _, _ = import_text(lyrics="[Verse]\na\n\n[Verse]\nb", parent_plan=make_plan(verse))
         assert plan.sections[0].id == verse.id
         assert rendered_labels((s.kind, s.label) for s in plan.sections) == ["Verse", "Verse"]
+
+
+class TestTitleAndFlagCarryOver:
+    """R3: what the request leaves out is the current plan's, not a default (I9 / I13)."""
+
+    def test_the_resolution_table(self) -> None:
+        parent = make_plan(title="Plan Title", instrumental=True)
+        # (request title, request flag, parent) -> (title, flag)
+        cases: list[tuple[str | None, bool | None, PlanDocument | None, str, bool]] = [
+            ("Asked", False, parent, "Asked", False),  # the request beats the plan
+            (None, None, parent, "Plan Title", True),  # nothing sent: the plan's own
+            (None, False, parent, "Plan Title", False),  # an explicit false over an instrumental
+            ("Asked", None, parent, "Asked", True),
+            (
+                None,
+                None,
+                None,
+                "Track Title",
+                False,
+            ),  # no plan: the track's title, not instrumental
+            ("Asked", True, None, "Asked", True),
+            (None, True, None, "Track Title", True),
+        ]
+        for title, flag, plan_parent, want_title, want_flag in cases:
+            plan, _, _ = import_text(
+                lyrics="[Drop]",
+                title=title,
+                instrumental=flag,
+                track_title="Track Title",
+                parent_plan=plan_parent,
+            )
+            assert (plan.title, plan.instrumental) == (want_title, want_flag), (title, flag)
+
+    def test_a_plan_title_that_differs_from_the_track_title_survives(self) -> None:
+        parent = make_plan(title="Plan Title", tags=("lofi",))
+        plan, _, _ = import_text(
+            style="lofi", lyrics="[Verse]", track_title="Track Title", parent_plan=parent
+        )
+        assert plan.title == "Plan Title"
+
+    def test_an_instrumental_plan_with_headers_only_stays_instrumental(self) -> None:
+        verse = make_section(K.DROP)
+        parent = normalize_plan(make_plan(verse, instrumental=True))
+        plan, lyrics, built = import_text(lyrics="[Drop]", parent_plan=parent)
+        assert (plan, lyrics, built.warnings) == (parent, None, ())
+
+    def test_lyric_lines_over_an_instrumental_plan_need_an_explicit_false(self) -> None:
+        parent = normalize_plan(make_plan(make_section(K.VERSE), instrumental=True))
+        with pytest.raises(ImportInvalid) as exc:
+            import_text(lyrics="[Verse]\nsing", parent_plan=parent)
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("lyrics", "instrumental_with_lyric_lines")
+        ]
+        plan, lyrics, _ = import_text(
+            lyrics="[Verse]\nsing", instrumental=False, parent_plan=parent
+        )
+        assert plan.instrumental is False
+        assert lyrics is not None
+
+    def test_the_flag_is_not_inferred_from_the_text_either_way(self) -> None:
+        # headers only, over a plan that is not instrumental: still not instrumental
+        parent = normalize_plan(make_plan(make_section(K.VERSE)))
+        plan, _, built = import_text(lyrics="[Verse]", parent_plan=parent)
+        assert plan.instrumental is False
+        assert [w.code for w in built.warnings] == ["no_lyric_lines"]
+
+    def test_the_round_trip_without_title_and_flag_is_a_no_op(self) -> None:
+        song = golden_song()
+        plan = msgspec.structs.replace(song.plan, title="Not The Track Title")
+        for send in (True, False):
+            plan2, lyrics2, _ = reimport(
+                plan, song.lyrics, song.artist, parent=True, send_title_and_flag=send
+            )
+            assert (plan2, lyrics2) == (plan, song.lyrics), send
+
+
+class TestLegacyTempoTags:
+    """R1: rows written before the reservation can still hold a tempo-like global tag."""
+
+    @pytest.mark.parametrize(
+        ("tags", "paths"),
+        [
+            (("80 BPM",), ["plan.global_style.tags[0]"]),
+            (
+                ("rock", "120 bpm", "90BPM"),
+                ["plan.global_style.tags[1]", "plan.global_style.tags[2]"],
+            ),
+        ],
+    )
+    def test_importing_over_such_a_plan_fails_loudly_at_the_exact_path(
+        self, tags: tuple[str, ...], paths: list[str]
+    ) -> None:
+        legacy = make_plan(tags=tags, tempo_bpm=120)  # not normalized: a stored legacy row
+        with pytest.raises(ImportInvalid) as exc:
+            import_text(style=", ".join(tags), lyrics="[Verse]", parent_plan=legacy)
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            (path, "reserved_tempo_tag") for path in paths
+        ]
+
+    def test_a_plan_with_an_out_of_range_tempo_like_tag_is_not_legacy(self) -> None:
+        parent = normalize_plan(make_plan(tags=("300 BPM",), tempo_bpm=120))
+        plan, _, _ = import_text(style="300 BPM, 120 BPM", lyrics="[Verse]", parent_plan=parent)
+        assert (plan.global_style.tags, plan.tempo_bpm) == (("300 BPM",), 120)
+
+    def test_hand_written_text_reads_the_tempo_wherever_it_stands(self) -> None:
+        plan, _, _ = import_text(style="120 BPM, rock")
+        assert (plan.tempo_bpm, plan.global_style.tags) == (120, ("rock",))
+
+    @pytest.mark.parametrize(
+        ("style", "tempo", "tags", "warnings"),
+        [
+            # the four rows of the reproduction table, pasted as text: the first tempo is the
+            # tempo, a later one is dropped (warned), and no tag ever reads as a tempo
+            ("80 BPM, 120 BPM", 80, (), ["duplicate_tempo"]),
+            ("rock, 80 BPM, 120 BPM", 80, ("rock",), ["duplicate_tempo"]),
+            ("rock, 90 BPM", 90, ("rock",), []),
+            ("120 bpm, 120 BPM", 120, (), ["duplicate_tempo"]),
+        ],
+    )
+    def test_text_that_used_to_become_tempo_like_tags_now_gives_a_valid_stable_plan(
+        self, style: str, tempo: int, tags: tuple[str, ...], warnings: list[str]
+    ) -> None:
+        plan, _, built = import_text(style=style)
+        assert (plan.tempo_bpm, plan.global_style.tags) == (tempo, tags)
+        assert [w.code for w in built.warnings] == warnings
+        normalize_plan(plan)  # a plan the validators accept
+        # ... that re-renders to text which imports back to the same plan (no drift, no new version)
+        shown = texts(render_song(plan, None, None))["style"]
+        again, _, rebuilt = import_text(style=shown, parent_plan=plan)
+        assert again == plan
+        assert rebuilt.warnings == ()
 
 
 class TestLabelsAndKinds:

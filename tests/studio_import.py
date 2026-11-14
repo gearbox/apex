@@ -37,8 +37,9 @@ def import_text(
     style: str = "",
     exclude: str = "",
     lyrics: str = "",
-    title: str = "Song",
-    instrumental: bool = False,
+    title: str | None = None,
+    instrumental: bool | None = None,
+    track_title: str = "Song",
     language: str | None = "en",
     parent_plan: PlanDocument | None = None,
     parent_lyrics: LyricsDocument | None = None,
@@ -49,6 +50,7 @@ def import_text(
     built = build_documents(
         parse_suno(style=style, exclude=exclude, lyrics=lyrics),
         track_id=track_id,
+        track_title=track_title,
         title=title,
         instrumental=instrumental,
         language=language,
@@ -66,15 +68,21 @@ def reimport(
     artist: ArtistRenderInput | None,
     *,
     parent: bool,
+    send_title_and_flag: bool = True,
 ) -> tuple[PlanDocument, LyricsDocument | None, BuiltImport]:
-    """Render ``(plan, lyrics)`` and import the text back, optionally over the song itself."""
+    """Render ``(plan, lyrics)`` and import the text back, optionally over the song itself.
+
+    With ``send_title_and_flag=False`` the request omits ``title`` and ``instrumental`` (a client
+    that pastes only the three boxes): they must then come from the current plan, so that is only
+    meaningful with ``parent=True``; without a parent the plan title falls back to the track's.
+    """
     shown = texts(render_song(plan, lyrics, artist))
     return import_text(
         style=shown["style"],
         exclude=shown["exclude"],
         lyrics=shown["lyrics"],
-        title=plan.title,
-        instrumental=plan.instrumental,
+        title=plan.title if send_title_and_flag else None,
+        instrumental=plan.instrumental if send_title_and_flag else None,
         language=lyrics.language if lyrics is not None else "en",
         parent_plan=plan if parent else None,
         parent_lyrics=lyrics if parent else None,

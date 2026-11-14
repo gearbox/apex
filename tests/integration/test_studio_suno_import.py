@@ -12,6 +12,7 @@ from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+import msgspec
 import pytest
 import pytest_asyncio
 from litestar.testing import AsyncTestClient
@@ -20,15 +21,22 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
 from src.api.schemas.studio import ArtistCreate, PlanVersionCreate
-from src.core.enums import StudioDocumentOrigin
+from src.core.enums import StudioDocumentKind, StudioDocumentOrigin
 from src.core.enums import StudioSectionKind as K
 from src.db.models.library import LibraryProject
-from src.db.models.studio import StudioDocumentVersion
+from src.db.models.studio import StudioArtist, StudioDocumentVersion
 from src.db.models.user import User
-from src.studio.documents import LyricLine
-from src.studio.errors import ImportInvalid, StudioNotFound
+from src.studio.documents import LyricLine, PlanDocument, decode_stored
+from src.studio.errors import ImportInvalid, StudioDocumentInvalid, StudioNotFound
 from src.studio.services import version as version_module
-from tests.integration.test_studio_routes import S, _bearer, _build_app
+from src.studio.validation import content_hash
+from tests.integration.test_studio_routes import (
+    S,
+    _bearer,
+    _build_app,
+    _lyrics_body,
+    _plan_body,
+)
 from tests.studio_support import (
     GOLDEN_EXCLUDE,
     GOLDEN_LYRICS,
@@ -130,6 +138,33 @@ async def _origins(w: StudioWorld, track_id: UUID) -> dict[UUID, str]:
 
 def _codes(out: SunoImportOut) -> list[tuple[str, int | None]]:
     return [(warning.code, warning.line) for warning in out.warnings]
+
+
+async def _store_legacy_tempo_tag(session: AsyncSession, version_id: UUID, tag: str) -> None:
+    """Rewrite a stored plan so that its global tags are ``[tag]``: a row from before ``80 BPM``
+    was reserved. The service refuses to write one, so the row is changed directly (its hash is
+    kept consistent with its content, as it was when P1b stored it)."""
+    row = (
+        await session.execute(
+            select(StudioDocumentVersion.content, StudioDocumentVersion.schema_version).where(
+                StudioDocumentVersion.id == version_id
+            )
+        )
+    ).one()
+    content = {**row[0], "global_style": {**row[0]["global_style"], "tags": [tag]}}
+    document = decode_stored(StudioDocumentKind.PLAN, row[1], content)
+    assert isinstance(document, PlanDocument)
+    await session.execute(
+        text(
+            "UPDATE studio_document_versions SET content = CAST(:c AS jsonb), content_hash = :h "
+            "WHERE id = :id"
+        ),
+        {
+            "c": msgspec.json.encode(content).decode(),
+            "h": content_hash(StudioDocumentKind.PLAN, None, document),
+            "id": version_id,
+        },
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -543,7 +578,7 @@ class TestDryRun:
 
         assert statements
         assert all(s.lstrip().upper().startswith("SELECT") for s in statements), statements
-        assert not any("FOR UPDATE" in s.upper() for s in statements)
+        assert all("FOR UPDATE" not in s.upper() for s in statements)
 
     async def test_a_real_import_locks_the_track_before_it_reads_the_pointers(
         self, enabled_studio: StudioWorld, db_engine: AsyncEngine
@@ -707,9 +742,12 @@ class TestOrigin:
         track = await w.new_track()
         verse = make_section(K.VERSE)
         typed, _ = await w.plan(track, make_plan(verse, title="Typed"))
-        imported = await w.import_suno(track, lyrics="[Verse]\nhello", language="en")
+        # a style the typed plan does not have: the import writes a plan version of its own (the
+        # title is the typed plan's, carried over — it no longer changes by itself)
+        imported = await w.import_suno(track, style="lofi", lyrics="[Verse]\nhello", language="en")
         assert imported.plan_version is not None
         assert imported.lyrics_version is not None
+        assert imported.plan.title == "Typed"
         origins = await _origins(w, track)
         assert origins[typed.version.id] == "user"
         assert origins[imported.plan_version.id] == "import"
@@ -860,6 +898,186 @@ class TestPlanSchemaV2Rules:
         export = await w.exports.render_suno(track, w.user_id, w.product_id)
         assert export.instrumental is True
         assert export.lyrics == "[Drop]"
+
+
+# ---------------------------------------------------------------------------
+# round 1 of the remediation: R1 (tempo-like tags), R2 (colon labels), R3 (title / flag)
+# ---------------------------------------------------------------------------
+
+
+class TestLegacyTempoTags:
+    async def test_importing_over_a_legacy_plan_with_a_tempo_tag_fails_loudly(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        """Row 1 of the reproduction table: tags ``[80 BPM]``, tempo 120 → ``80 BPM, 120 BPM``."""
+        w = enabled_studio
+        track = await w.new_track("T")
+        plan, _ = await w.plan(track, make_plan(tags=("lofi",), tempo_bpm=120))
+        await _store_legacy_tempo_tag(w.session, plan.version.id, "80 BPM")
+        exported = await w.exports.render_suno(track, w.user_id, w.product_id)
+        assert exported.style == "80 BPM, 120 BPM"  # stored rows still render and export
+        before = await _state(w, track)
+
+        for dry_run in (False, True):
+            with pytest.raises(ImportInvalid) as exc:
+                await w.import_suno(
+                    track, style=exported.style, lyrics=exported.lyrics, dry_run=dry_run
+                )
+            assert [(i.path, i.code) for i in exc.value.issues] == [
+                ("plan.global_style.tags[0]", "reserved_tempo_tag")
+            ]
+            assert exc.value.source_lines == {}
+        assert await _state(w, track) == before  # nothing was written, nothing moved
+
+    async def test_new_writes_of_such_a_plan_or_artist_are_refused(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track = await w.new_track("T")
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            await w.plan(track, make_plan(tags=("80 BPM",), tempo_bpm=120))
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("global_style.tags[0]", "reserved_tempo_tag")
+        ]
+        assert await w.version_count(track) == 0
+        with pytest.raises(StudioDocumentInvalid) as artist_exc:
+            await w.artists.create(
+                w.user_id, w.product_id, ArtistCreate(name="Nova", style_tags=["rock", "90 BPM"])
+            )
+        assert [(i.path, i.code) for i in artist_exc.value.issues] == [
+            ("style_tags[1]", "reserved_tempo_tag")
+        ]
+
+    async def test_patching_the_avoid_list_of_a_legacy_artist_fails_at_its_tempo_tag(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        from src.api.schemas.studio import ArtistPatch
+
+        w = enabled_studio
+        artist = await w.artists.create(
+            w.user_id, w.product_id, ArtistCreate(name="Nova", style_tags=["rock"])
+        )
+        await w.session.execute(
+            text("UPDATE studio_artists SET style_tags = ARRAY['80 BPM'] WHERE id = :id"),
+            {"id": artist.id},
+        )
+        stored = await w.artists.get(artist.id, w.user_id, w.product_id)
+        assert stored.style_tags == ["80 BPM"]  # a stored row still reads
+
+        with pytest.raises(StudioDocumentInvalid) as exc:
+            await w.artists.patch(
+                artist.id, w.user_id, w.product_id, ArtistPatch(global_avoid=["metal"])
+            )
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("style_tags[0]", "reserved_tempo_tag")
+        ]
+        row = (
+            await w.session.execute(
+                select(StudioArtist.global_avoid, StudioArtist.style_tags)
+                .where(StudioArtist.id == artist.id)
+                .execution_options(populate_existing=True)
+            )
+        ).one()
+        assert (row[0], row[1]) == ([], ["80 BPM"])  # nothing was written
+        # fixing the tag is the way out
+        fixed = await w.artists.patch(
+            artist.id, w.user_id, w.product_id, ArtistPatch(style_tags=["rock"])
+        )
+        assert fixed.style_tags == ["rock"]
+
+
+class TestColonLabels:
+    async def test_a_label_with_a_colon_keeps_its_section_id_and_writes_nothing(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        """R2 / invariant 19: ``[Verse 1: The Return]`` is a label, not name + descriptor."""
+        w = enabled_studio
+        track = await w.new_track("Track Title")
+        verse = make_section(K.VERSE, label="Verse 1: The Return")
+        plan, _ = await w.plan(track, make_plan(verse, title="Plan Title"))
+        lyrics, _ = await w.lyrics(track, make_lyrics((verse.id, ["la la"])), plan.version.id)
+        exported = await w.exports.render_suno(track, w.user_id, w.product_id)
+        assert exported.lyrics == "[Verse 1: The Return]\nla la"
+        before = await _state(w, track)
+
+        out = await w.import_suno(
+            track, style=exported.style, exclude=exported.exclude, lyrics=exported.lyrics
+        )
+
+        assert (out.plan_unchanged, out.lyrics_unchanged, out.created) == (True, True, False)
+        assert out.round_trip.lyrics
+        assert out.plan.sections[0].id == verse.id
+        assert out.plan.sections[0].label == "Verse 1: The Return"
+        assert out.lyrics is not None
+        assert out.lyrics.sections[0].section_id == verse.id
+        assert (out.plan_version.id, out.lyrics_version.id) == (  # type: ignore[union-attr]
+            plan.version.id,
+            lyrics.version.id,
+        )
+        assert await _state(w, track) == before
+
+
+class TestTitleAndFlagCarryOver:
+    async def _instrumental_track(self, w: StudioWorld) -> tuple[UUID, Any]:
+        track = await w.new_track("Track Title")
+        drop = make_section(K.DROP)
+        await w.plan(track, make_plan(drop, title="Plan Title", instrumental=True))
+        exported = await w.exports.render_suno(track, w.user_id, w.product_id)
+        assert (exported.instrumental, exported.lyrics) == (True, "[Drop]")
+        return track, exported
+
+    async def test_a_request_without_title_and_flag_is_a_no_op(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        """R3 / invariant 18: the plan's title and flag are not reset by what the text omits."""
+        w = enabled_studio
+        track, exported = await self._instrumental_track(w)
+        before = await _state(w, track)
+
+        for dry_run in (True, False):
+            out = await w.import_suno(
+                track,
+                style=exported.style,
+                exclude=exported.exclude,
+                lyrics=exported.lyrics,
+                dry_run=dry_run,
+            )
+            assert (out.plan_unchanged, out.lyrics_unchanged, out.created) == (True, True, False)
+            assert (out.plan.title, out.plan.instrumental) == ("Plan Title", True)
+            assert out.warnings == []
+            assert await _state(w, track) == before
+        assert (await w.track_row(track)).title == "Track Title"  # the track is never renamed
+
+    async def test_lyric_lines_over_an_instrumental_plan_need_an_explicit_false(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track, _ = await self._instrumental_track(w)
+        before = await _state(w, track)
+
+        with pytest.raises(ImportInvalid) as exc:
+            await w.import_suno(track, lyrics="[Drop]\nsing", language="en")
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("lyrics", "instrumental_with_lyric_lines")
+        ]
+        assert await _state(w, track) == before
+
+        out = await w.import_suno(track, lyrics="[Drop]\nsing", language="en", instrumental=False)
+        assert out.created
+        assert (out.plan.title, out.plan.instrumental) == ("Plan Title", False)
+        assert out.lyrics is not None
+
+    async def test_an_explicit_value_still_wins_and_a_new_track_uses_its_own_title(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track, _ = await self._instrumental_track(w)
+        out = await w.import_suno(track, title="Renamed", lyrics="[Drop]", instrumental=True)
+        assert (out.plan.title, out.plan.instrumental) == ("Renamed", True)
+        assert out.created
+        fresh = await w.new_track("Fresh Track")
+        out = await w.import_suno(fresh, lyrics="[Verse]", dry_run=True)
+        assert (out.plan.title, out.plan.instrumental) == ("Fresh Track", False)
 
 
 # ---------------------------------------------------------------------------
@@ -1185,3 +1403,143 @@ class TestOverHttp:
                 )
             ).one()
         assert tuple(after) == tuple(before)
+
+
+class TestRemediationOverHttp:
+    async def _post_version(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace, track: str, body: Any
+    ) -> dict[str, Any]:
+        resp = await client.post(f"{S}/tracks/{track}/versions", headers=owner.headers, json=body)
+        assert resp.status_code == 201, resp.text
+        return dict(resp.json())
+
+    async def test_a_legacy_tempo_tag_is_a_422_import_invalid_and_writes_nothing(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        track = await _http_track(client, owner)
+        url = f"{S}/tracks/{track}/imports/suno"
+        first = await client.post(url, headers=owner.headers, json=PASTE)
+        assert first.status_code == 201, first.text
+        async with session_factory() as session, session.begin():
+            await _store_legacy_tempo_tag(
+                session, UUID(first.json()["plan_version"]["id"]), "80 BPM"
+            )
+        count = await _count(session_factory, track)
+
+        resp = await client.post(url, headers=owner.headers, json=PASTE)
+
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"] == "import_invalid"
+        assert resp.json()["detail"]["issues"] == [
+            {"path": "plan.global_style.tags[0]", "code": "reserved_tempo_tag"}
+        ]
+        assert await _count(session_factory, track) == count
+
+    async def test_patching_the_avoid_list_of_a_legacy_artist_is_a_422_at_the_tempo_tag(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        created = await client.post(
+            f"{S}/artists", headers=owner.headers, json={"name": "Nova", "style_tags": ["rock"]}
+        )
+        assert created.status_code == 201, created.text
+        artist_id = created.json()["id"]
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE studio_artists SET style_tags = ARRAY['80 BPM'] WHERE id = :id"),
+                {"id": UUID(artist_id)},
+            )
+
+        resp = await client.patch(
+            f"{S}/artists/{artist_id}", headers=owner.headers, json={"global_avoid": ["metal"]}
+        )
+
+        assert resp.status_code == 422, resp.text
+        assert resp.json()["error"] == "document_invalid"
+        assert resp.json()["detail"]["issues"] == [
+            {"path": "style_tags[0]", "code": "reserved_tempo_tag"}
+        ]
+        read = await client.get(f"{S}/artists/{artist_id}", headers=owner.headers)
+        assert (read.json()["style_tags"], read.json()["global_avoid"]) == (["80 BPM"], [])
+
+    async def test_a_colon_label_re_imports_as_a_no_op_without_title_and_flag(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        track = await _http_track(client, owner)
+        verse = make_section(K.VERSE, label="Verse 1: The Return")
+        plan = make_plan(verse, title="Plan Title")
+        plan_version = await self._post_version(client, owner, track, _plan_body(plan))
+        await self._post_version(
+            client,
+            owner,
+            track,
+            _lyrics_body(make_lyrics((verse.id, ["la la"])), plan_version["version"]["id"]),
+        )
+        exported = (
+            await client.get(f"{S}/tracks/{track}/exports/suno", headers=owner.headers)
+        ).json()
+        assert exported["lyrics"] == "[Verse 1: The Return]\nla la"
+        count = await _count(session_factory, track)
+
+        resp = await client.post(
+            f"{S}/tracks/{track}/imports/suno",
+            headers=owner.headers,
+            json={k: exported[k] for k in ("style", "exclude", "lyrics")},
+        )
+
+        assert resp.status_code == 200, resp.text
+        body = resp.json()
+        assert (body["created"], body["plan_unchanged"], body["lyrics_unchanged"]) == (
+            False,
+            True,
+            True,
+        )
+        assert body["round_trip"] == {"style": True, "exclude": True, "lyrics": True}
+        assert body["plan"]["title"] == "Plan Title"  # not the track's "Song"
+        assert body["plan"]["sections"][0]["id"] == str(verse.id)
+        assert await _count(session_factory, track) == count
+
+    async def test_an_instrumental_plan_needs_an_explicit_false_for_lyric_lines(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        track = await _http_track(client, owner)
+        plan = make_plan(make_section(K.DROP), title="Plan Title", instrumental=True)
+        await self._post_version(client, owner, track, _plan_body(plan))
+        url = f"{S}/tracks/{track}/imports/suno"
+        count = await _count(session_factory, track)
+
+        same = await client.post(url, headers=owner.headers, json={"lyrics": "[Drop]"})
+        assert same.status_code == 200, same.text
+        assert (same.json()["created"], same.json()["plan"]["instrumental"]) == (False, True)
+
+        sung = {"lyrics": "[Drop]\nsing", "language": "en"}
+        refused = await client.post(url, headers=owner.headers, json=sung)
+        assert refused.status_code == 422, refused.text
+        assert refused.json()["detail"]["issues"] == [
+            {"path": "lyrics", "code": "instrumental_with_lyric_lines"}
+        ]
+        assert await _count(session_factory, track) == count
+
+        written = await client.post(
+            url, headers=owner.headers, json={**sung, "instrumental": False}
+        )
+        assert written.status_code == 201, written.text
+        assert written.json()["plan"]["instrumental"] is False
+        assert written.json()["plan"]["title"] == "Plan Title"
+
+        explicit_null = await client.post(
+            url, headers=owner.headers, json={**sung, "instrumental": None}
+        )
+        assert explicit_null.status_code == 200, explicit_null.text  # null is omitted: carried over
+        assert explicit_null.json()["created"] is False

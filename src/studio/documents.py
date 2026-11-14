@@ -22,6 +22,7 @@ from msgspec import Meta, Struct
 
 from src.core.enums import StudioDocumentKind, StudioSectionKind
 from src.studio.errors import StudioDocumentSchemaError
+from src.studio.tempo import TEMPO_MAX, TEMPO_MIN
 
 __all__ = [
     "CURRENT_SCHEMA_VERSION",
@@ -73,7 +74,7 @@ class PlanDocument(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True
 
     title: Annotated[str, Meta(min_length=1, max_length=200)]
     idea: Annotated[str, Meta(max_length=4000)] | None = None  # never exported
-    tempo_bpm: Annotated[int, Meta(ge=40, le=240)] | None = None
+    tempo_bpm: Annotated[int, Meta(ge=TEMPO_MIN, le=TEMPO_MAX)] | None = None
     instrumental: bool = False
     global_style: StyleSpec = StyleSpec()
     references: Annotated[

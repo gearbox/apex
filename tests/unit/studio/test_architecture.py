@@ -171,11 +171,58 @@ def test_the_parser_and_builder_are_pure() -> None:
         assert not offending, (name, offending)
 
 
+def _code_string_literals(path: Path) -> list[str]:
+    """Every string constant of a module that is not a docstring (a bare string statement)."""
+    tree = ast.parse(path.read_text())
+    docstrings = {
+        id(node.value)
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Expr)
+        and isinstance(node.value, ast.Constant)
+        and isinstance(node.value.value, str)
+    }
+    return [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and id(node) not in docstrings
+    ]
+
+
+def test_the_tempo_is_defined_once_and_nobody_else_spells_it() -> None:
+    """R1/R5: the renderer writes it and the importer reads it through ``src/studio/tempo.py``."""
+    text = (SRC / "studio/tempo.py").read_text()
+    for name in ("tempo_of", "tempo_token"):
+        assert len(re.findall(rf"^def {name}\b", text, flags=re.MULTILINE)) == 1, name
+    for path in SRC.glob("studio/**/*.py"):
+        if path.name == "tempo.py":
+            continue
+        assert not re.search(
+            r"def tempo_of|def tempo_token|_bpm_of|_MIN_BPM|_MAX_BPM", path.read_text()
+        )
+    for name in ("renderers/suno.py", "importers/suno.py"):
+        literals = _code_string_literals(SRC / "studio" / name)
+        assert not [lit for lit in literals if re.search(r"bpm", lit, flags=re.IGNORECASE)], name
+    # the only regex that mentions "bpm" is the module's own
+    for path in SRC.glob("studio/**/*.py"):
+        if path.name != "tempo.py":
+            assert not re.search(r"re\.compile\([^\n]*bpm", path.read_text(), flags=re.IGNORECASE)
+
+
+def test_the_importer_and_the_validators_use_the_shared_tempo_module() -> None:
+    assert "tempo_of" in (SRC / "studio/importers/suno.py").read_text()
+    assert "tempo_of" in (SRC / "studio/validation.py").read_text()
+    assert "tempo_token" in (SRC / "studio/renderers/suno.py").read_text()
+    assert "from src.studio.tempo import" in (SRC / "studio/documents.py").read_text()
+
+
 def test_the_contract_documents_what_p1b_added() -> None:
     contract = (ROOT / "docs/contracts/studio-contract.md").read_text()
     for needle in (
         "reserved_descriptor",
         "reserved_delivery_tag",
+        "reserved_tempo_tag",
         "instrumental_plan_has_lines",
         "import_invalid",
         "unsupported_inline_tag",
@@ -185,6 +232,7 @@ def test_the_contract_documents_what_p1b_added() -> None:
     ):
         assert needle in contract, needle
     assert len(re.findall(r"^## 10\. Suno import", contract, flags=re.MULTILINE)) == 1
+    assert "resets the flag" not in contract
 
 
 def test_hypothesis_is_a_pinned_dev_dependency() -> None:

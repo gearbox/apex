@@ -298,11 +298,22 @@ class TestStyleAndExclude:
         assert parse(style="40 bpm").tempo_bpm == 40
         assert parse(style="240 bpm").tempo_bpm == 240
 
-    def test_only_the_first_tempo_counts(self) -> None:
+    def test_only_the_first_tempo_counts_and_later_ones_are_dropped(self) -> None:
+        """I8 amended: a later tempo is dropped (warned), never kept as a tag the plan cannot hold."""
         parsed = parse(style="100 bpm, lofi, 120 BPM")
         assert parsed.tempo_bpm == 100
-        assert parsed.style_tokens == ("lofi", "120 BPM")
+        assert parsed.style_tokens == ("lofi",)
         assert codes(parsed) == [("duplicate_tempo", None)]
+
+    def test_every_later_tempo_is_dropped_with_its_own_warning(self) -> None:
+        parsed = parse(style="90 BPM, 90 bpm, a, 120bpm")
+        assert (parsed.tempo_bpm, parsed.style_tokens) == (90, ("a",))
+        assert codes(parsed) == [("duplicate_tempo", None)] * 2
+
+    def test_the_tempo_may_stand_anywhere_in_the_text(self) -> None:
+        """``120 BPM, rock`` is a typical hand-written Style: the tempo is read, rock stays."""
+        parsed = parse(style="120 BPM, rock")
+        assert (parsed.tempo_bpm, parsed.style_tokens) == (120, ("rock",))
 
     def test_a_tempo_out_of_range_does_not_block_a_later_valid_one(self) -> None:
         parsed = parse(style="300 bpm, 90 bpm")
