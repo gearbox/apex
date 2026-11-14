@@ -408,6 +408,67 @@ class TestLegacyTempoTags:
         plan, _, _ = import_text(style="300 BPM, 120 BPM", lyrics="[Verse]", parent_plan=parent)
         assert (plan.global_style.tags, plan.tempo_bpm) == (("300 BPM",), 120)
 
+    @pytest.mark.parametrize(
+        ("plan_tags", "plan_tempo", "artist_tags", "style"),
+        [
+            # RF1, row 1: the artist's tag would win over the plan's own tempo (80, not 120)
+            (("rock",), 120, ("80 BPM",), "rock, 80 BPM, 120 BPM"),
+            # RF1, row 2: no tempo in the plan, so the artist's tag would silently become one
+            (("rock",), None, ("90 BPM",), "rock, 90 BPM"),
+        ],
+    )
+    def test_importing_over_an_artist_with_a_tempo_tag_fails_loudly(
+        self,
+        plan_tags: tuple[str, ...],
+        plan_tempo: int | None,
+        artist_tags: tuple[str, ...],
+        style: str,
+    ) -> None:
+        parent = normalize_plan(make_plan(tags=plan_tags, tempo_bpm=plan_tempo))
+        legacy_artist = ArtistRenderInput(style_tags=artist_tags, global_avoid=())
+        with pytest.raises(ImportInvalid) as exc:
+            import_text(style=style, lyrics="[Verse]", parent_plan=parent, artist=legacy_artist)
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("artist.style_tags[0]", "reserved_tempo_tag")
+        ]
+        assert exc.value.source_lines == {}
+
+    def test_the_artist_is_checked_without_a_current_plan_too(self) -> None:
+        legacy_artist = ArtistRenderInput(style_tags=("rock", "100bpm"), global_avoid=())
+        with pytest.raises(ImportInvalid) as exc:
+            import_text(style="rock", lyrics="[Verse]", artist=legacy_artist)
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("artist.style_tags[1]", "reserved_tempo_tag")
+        ]
+
+    def test_a_legacy_plan_and_a_legacy_artist_give_every_issue_at_once_plan_first(self) -> None:
+        legacy_plan = make_plan(tags=("rock", "120 bpm"), tempo_bpm=120)  # a stored legacy row
+        legacy_artist = ArtistRenderInput(style_tags=("80 BPM", "pop", "90BPM"), global_avoid=())
+        with pytest.raises(ImportInvalid) as exc:
+            import_text(
+                style="rock, 80 BPM",
+                lyrics="[Verse]",
+                parent_plan=legacy_plan,
+                artist=legacy_artist,
+            )
+        assert [(i.path, i.code) for i in exc.value.issues] == [
+            ("plan.global_style.tags[1]", "reserved_tempo_tag"),
+            ("artist.style_tags[0]", "reserved_tempo_tag"),
+            ("artist.style_tags[2]", "reserved_tempo_tag"),
+        ]
+
+    def test_an_artist_with_an_out_of_range_tempo_like_tag_is_not_legacy(self) -> None:
+        artist = ArtistRenderInput(style_tags=("300 BPM", "39 BPM"), global_avoid=())
+        plan, _, _ = import_text(style="300 BPM, 39 BPM, 120 BPM", lyrics="[Verse]", artist=artist)
+        assert (plan.tempo_bpm, plan.global_style.tags) == (120, ())
+
+    def test_a_tempo_like_avoid_item_of_the_artist_is_not_checked(self) -> None:
+        # nothing reads a tempo from Exclude, so the avoid list needs no guard
+        artist = ArtistRenderInput(style_tags=("rock",), global_avoid=("80 BPM",))
+        plan, _, _ = import_text(style="rock", exclude="80 BPM", lyrics="[Verse]", artist=artist)
+        assert plan.global_style.avoid == ()  # the artist's own item is subtracted, not kept
+        assert plan.tempo_bpm is None
+
     def test_hand_written_text_reads_the_tempo_wherever_it_stands(self) -> None:
         plan, _, _ = import_text(style="120 BPM, rock")
         assert (plan.tempo_bpm, plan.global_style.tags) == (120, ("rock",))

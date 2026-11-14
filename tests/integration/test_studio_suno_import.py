@@ -853,7 +853,7 @@ class TestPlanSchemaV2Rules:
         track = await w.new_track()
         plan, created = await w.plan(track, make_plan(empty=True, tags=("lofi",), title="Bare"))
         assert created
-        assert plan.version.content.sections == ()  # type: ignore[union-attr]
+        assert plan.version.content.sections == ()
         export = await w.exports.render_suno(track, w.user_id, w.product_id)
         assert (export.lyrics, export.style) == ("", "lofi")
         # lyrics are accepted only without sections
@@ -928,6 +928,59 @@ class TestLegacyTempoTags:
             ]
             assert exc.value.source_lines == {}
         assert await _state(w, track) == before  # nothing was written, nothing moved
+
+    @pytest.mark.parametrize(
+        ("plan_tempo", "tag", "style"),
+        [
+            (120, "80 BPM", "rock, 80 BPM, 120 BPM"),  # RF1 row 1: the artist's tag would win
+            (None, "90 BPM", "rock, 90 BPM"),  # RF1 row 2: it would silently become the tempo
+        ],
+    )
+    async def test_importing_on_a_project_whose_artist_holds_a_tempo_tag_fails_loudly(
+        self, enabled_studio: StudioWorld, plan_tempo: int | None, tag: str, style: str
+    ) -> None:
+        w = enabled_studio
+        artist = await w.artists.create(
+            w.user_id, w.product_id, ArtistCreate(name="Nova", style_tags=["rock"])
+        )
+        # a row from before the reservation: the service refuses to write one, so change it directly
+        await w.session.execute(
+            text("UPDATE studio_artists SET style_tags = ARRAY[:tag] WHERE id = :id"),
+            {"tag": tag, "id": artist.id},
+        )
+        await w.enable(artist_id=artist.id)
+        track = await w.new_track("T")
+        await w.plan(track, make_plan(tags=("rock",), tempo_bpm=plan_tempo))
+        exported = await w.exports.render_suno(track, w.user_id, w.product_id)
+        assert exported.style == style  # a legacy artist still exports
+        before = await _state(w, track)
+
+        for dry_run in (False, True):
+            with pytest.raises(ImportInvalid) as exc:
+                await w.import_suno(
+                    track, style=exported.style, lyrics=exported.lyrics, dry_run=dry_run
+                )
+            assert [(i.path, i.code) for i in exc.value.issues] == [
+                ("artist.style_tags[0]", "reserved_tempo_tag")
+            ]
+            assert exc.value.source_lines == {}
+        assert await _state(w, track) == before  # nothing was written, nothing moved
+
+    async def test_an_artist_with_a_tempo_like_avoid_item_or_an_out_of_range_tag_imports(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        artist = await w.artists.create(
+            w.user_id,
+            w.product_id,
+            ArtistCreate(name="Nova", style_tags=["300 BPM"], global_avoid=["80 BPM"]),
+        )
+        await w.enable(artist_id=artist.id)
+        track = await w.new_track("T")
+
+        out = await w.import_suno(track, style="rock", lyrics="[Verse]\nhi", language="en")
+
+        assert out.created
 
     async def test_new_writes_of_such_a_plan_or_artist_are_refused(
         self, enabled_studio: StudioWorld
@@ -1436,6 +1489,44 @@ class TestRemediationOverHttp:
         assert resp.json()["detail"]["issues"] == [
             {"path": "plan.global_style.tags[0]", "code": "reserved_tempo_tag"}
         ]
+        assert await _count(session_factory, track) == count
+
+    async def test_importing_with_a_legacy_artist_tempo_tag_is_a_422_import_invalid(
+        self,
+        client: AsyncTestClient[Litestar],
+        owner: SimpleNamespace,
+        session_factory: async_sessionmaker[AsyncSession],
+    ) -> None:
+        track = await _http_track(client, owner)
+        created = await client.post(
+            f"{S}/artists", headers=owner.headers, json={"name": "Nova", "style_tags": ["rock"]}
+        )
+        assert created.status_code == 201, created.text
+        artist_id = created.json()["id"]
+        attached = await client.put(
+            f"{S}/projects/{owner.project_id}",
+            headers=owner.headers,
+            json={"release_kind": "album", "artist_id": artist_id},
+        )
+        assert attached.status_code == 200, attached.text
+        url = f"{S}/tracks/{track}/imports/suno"
+        first = await client.post(url, headers=owner.headers, json=PASTE)
+        assert first.status_code == 201, first.text
+        async with session_factory() as session, session.begin():
+            await session.execute(
+                text("UPDATE studio_artists SET style_tags = ARRAY['80 BPM'] WHERE id = :id"),
+                {"id": UUID(artist_id)},
+            )
+        count = await _count(session_factory, track)
+
+        for dry_run in (False, True):
+            resp = await client.post(url, headers=owner.headers, json={**PASTE, "dry_run": dry_run})
+
+            assert resp.status_code == 422, resp.text
+            assert resp.json()["error"] == "import_invalid"
+            assert resp.json()["detail"]["issues"] == [
+                {"path": "artist.style_tags[0]", "code": "reserved_tempo_tag"}
+            ]
         assert await _count(session_factory, track) == count
 
     async def test_patching_the_avoid_list_of_a_legacy_artist_is_a_422_at_the_tempo_tag(

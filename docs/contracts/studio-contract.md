@@ -233,7 +233,7 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
 
    The size codes and `too_long_after_normalization` are collected together with every other issue; they never short-circuit validation.
 
-   `reserved_descriptor`, `reserved_delivery_tag` and `reserved_tempo_tag` apply to **new writes only**: versions and artists stored earlier that contain such values still load, render and export. (An import over a plan that still holds a tempo-like global tag is refused with the same code, §10.)
+   `reserved_descriptor`, `reserved_delivery_tag` and `reserved_tempo_tag` apply to **new writes only**: versions and artists stored earlier that contain such values still load, render and export. (An import over a plan that still holds a tempo-like global tag, or on a project whose artist still holds a tempo-like style tag, is refused with the same code, §10; the export still works for both.)
 
    Wire-level violations (lengths, ranges, unknown fields, bad enum, malformed union) are `400`.
 3. **Idempotency.** A version is identified by `(track, kind, parent_version_id, normalized content [, based_on_plan_version_id])`.
@@ -455,7 +455,7 @@ For each box: after canonicalisation (NFC, `\n` line ends, lines trimmed, runs o
 |---|---|---|
 | `unsupported_inline_tag` | `lyrics[<line>]` | a lyric line contains `[` or `]` but is not a whole bracket line (e.g. `la [soft] la`); one issue per such line |
 | `instrumental_with_lyric_lines` | `lyrics` | the track is `instrumental` (the request says so, or — when it says nothing — the current plan does) and the Lyrics box has lyric lines; `source_lines.lyrics` lists them all. To write lyrics over an instrumental track send `instrumental: false` |
-| `reserved_tempo_tag` | `plan.global_style.tags[i]` | the **current plan** still holds a global tag that reads as a tempo (stored before the tag was reserved). The import is refused rather than silently rewriting the plan: save a plan version without that tag (or with it moved to `tempo_bpm`) first |
+| `reserved_tempo_tag` | `plan.global_style.tags[i]`, `artist.style_tags[i]` | the **current plan** still holds a global tag that reads as a tempo, or the **project artist** still holds a style tag that reads as one (both stored before the tag was reserved). The import is refused rather than silently rewriting the plan (an artist tag would otherwise become, or override, the plan's tempo): save a plan version without that tag (or with it moved to `tempo_bpm`), or fix the artist (`PATCH /v1/studio/artists/{id}` with a `style_tags` that has no tempo), first. A plan and an artist that are both affected are reported together, the plan's paths first. The artist's `global_avoid` is not checked (nothing reads a tempo from Exclude) |
 | `language_required` | `language` | there are lyric lines and no language could be determined |
 | any §4 code | `plan.<path>` / `lyrics.<path>` | the imported plan / lyrics failed validation, e.g. `plan.sections[2].label` `reserved_characters`, `plan.global_style.avoid[0]` `tag_conflict`, `lyrics.sections[1]` `instrumental_section_has_lines` (a lyric line under `[Instrumental]`), `lyrics.sections[0].lines[3].text` `too_long_after_normalization`. Style / Exclude issues have no `source_lines` entry |
 | `too_many_items` | `plan.global_style.tags`, `plan.sections`, `lyrics.sections[i].lines`, … | more items than the document allows (40 tags, 64 sections, 64 lines per section, …) |

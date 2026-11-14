@@ -145,19 +145,33 @@ def build_documents(
         artist: The project artist's exportable style, if any.
 
     Raises:
-        ImportInvalid: ``reserved_tempo_tag`` (the current plan holds a global tag the importer
-            reads as a tempo, from before the tag was reserved: fix the plan first),
-            ``instrumental_with_lyric_lines`` (the plan is, or was asked to be, instrumental and
-            the Lyrics have lines) or ``language_required`` (lines, and no language to give them).
+        ImportInvalid: ``reserved_tempo_tag`` (the current plan holds a global tag, or the project
+            artist a style tag, that the importer reads as a tempo, from before the tag was
+            reserved: fix the plan / the artist first; both lists of issues are reported at once,
+            the plan's first), ``instrumental_with_lyric_lines`` (the plan is, or was asked to be,
+            instrumental and the Lyrics have lines) or ``language_required`` (lines, and no
+            language to give them).
     """
-    if parent_plan is not None and (
-        legacy := tuple(
+    legacy_plan = (
+        tuple(
             DocumentIssue(f"plan.global_style.tags[{index}]", "reserved_tempo_tag")
             for index, tag in enumerate(parent_plan.global_style.tags)
             if tempo_of(tag) is not None
         )
-    ):
-        raise ImportInvalid(legacy)
+        if parent_plan is not None
+        else ()
+    )
+    legacy_artist = (
+        tuple(
+            DocumentIssue(f"artist.style_tags[{index}]", "reserved_tempo_tag")
+            for index, tag in enumerate(artist.style_tags)
+            if tempo_of(tag) is not None
+        )
+        if artist is not None
+        else ()
+    )
+    if legacy_plan or legacy_artist:
+        raise ImportInvalid((*legacy_plan, *legacy_artist))
 
     if title is None:
         title = parent_plan.title if parent_plan is not None else track_title
