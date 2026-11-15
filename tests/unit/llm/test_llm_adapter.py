@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import json
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, ClassVar
 
 import httpx
 import msgspec
@@ -12,13 +12,14 @@ from pydantic import SecretStr
 from structlog.testing import capture_logs
 
 from src.core.llm_models import LlmModelEntry
-from src.studio.llm.openai_compatible import OpenAICompatibleLlmAdapter
-from src.studio.llm.port import (
+from src.llm.openai_compatible import OpenAICompatibleLlmAdapter
+from src.llm.port import (
     LlmMessage,
     LlmOutputInvalid,
     LlmOutputTruncated,
     LlmRejected,
     LlmUnavailable,
+    LlmUsage,
 )
 from src.studio.planner.drafts import PlanDraft
 from tests.studio_llm import make_draft
@@ -123,21 +124,68 @@ class TestRequestShape:
         await _adapter(rec).complete(MESSAGES, schema=PlanDraft, schema_name="x")
         assert "temperature" not in rec.body
 
-    async def test_json_object_mode_appends_the_schema_instruction(self) -> None:
+    async def test_json_object_mode_puts_the_schema_in_the_one_leading_system_message(
+        self,
+    ) -> None:
+        """Invariant 25: exactly one system message, first, with the schema and the word JSON."""
         rec = Recorder(ok())
         await _adapter(rec, _entry(structured_output="json_object")).complete(
             MESSAGES, schema=PlanDraft, schema_name="plan_draft"
         )
         body = rec.body
         assert body["response_format"] == {"type": "json_object"}
-        assert len(body["messages"]) == 3
-        extra = body["messages"][-1]
-        assert extra["role"] == "system"
-        assert extra["content"].startswith(
-            "Return only a JSON object that matches this JSON Schema:"
-        )
-        assert '"refusal"' in extra["content"]
+        messages = body["messages"]
+        assert [m["role"] for m in messages] == ["system", "user"]  # nothing is appended
+        assert sum(m["role"] == "system" for m in messages) == 1
+        system = messages[0]["content"]
+        assert system.startswith("rules\n\n")  # the caller's text first, then a blank line
+        assert "Return only a JSON object that matches this JSON Schema:" in system
+        assert "JSON" in system
+        assert '"refusal"' in system
+        assert messages[1] == {"role": "user", "content": "make a song"}
         assert "json_schema" not in json.dumps(body["response_format"])
+
+    async def test_json_object_mode_opens_a_system_message_when_there_is_none(self) -> None:
+        rec = Recorder(ok())
+        conversation = [LlmMessage("user", "make a song"), LlmMessage("assistant", "ok")]
+        await _adapter(rec, _entry(structured_output="json_object")).complete(
+            conversation, schema=PlanDraft, schema_name="x"
+        )
+        messages = rec.body["messages"]
+        assert [m["role"] for m in messages] == ["system", "user", "assistant"]
+        assert messages[0]["content"].startswith("Return only a JSON object")
+        assert "JSON" in messages[0]["content"]
+        assert not messages[0]["content"].startswith("\n")
+
+    async def test_json_object_mode_extends_the_first_system_message_only(self) -> None:
+        rec = Recorder(ok())
+        conversation = [
+            LlmMessage("system", "first"),
+            LlmMessage("user", "u"),
+            LlmMessage("system", "second"),
+        ]
+        await _adapter(rec, _entry(structured_output="json_object")).complete(
+            conversation, schema=PlanDraft, schema_name="x"
+        )
+        messages = rec.body["messages"]
+        assert messages[0]["content"].startswith("first\n\nReturn only a JSON object")
+        assert messages[2] == {"role": "system", "content": "second"}
+
+    async def test_json_object_mode_never_mutates_the_callers_messages(self) -> None:
+        conversation = [LlmMessage("system", "rules"), LlmMessage("user", "make a song")]
+        before = list(conversation)
+        adapter = _adapter(Recorder(ok(), ok()), _entry(structured_output="json_object"))
+        await adapter.complete(conversation, schema=PlanDraft, schema_name="x")
+        await adapter.complete(conversation, schema=PlanDraft, schema_name="x")  # twice: no growth
+        assert conversation == before
+        assert conversation[0].content == "rules"
+
+    async def test_json_schema_mode_leaves_the_messages_alone(self) -> None:
+        rec = Recorder(ok())
+        await _adapter(rec).complete(
+            [LlmMessage("user", "only a user message")], schema=PlanDraft, schema_name="x"
+        )
+        assert rec.body["messages"] == [{"role": "user", "content": "only a user message"}]
 
     async def test_extra_body_is_merged_last(self) -> None:
         rec = Recorder(ok())
@@ -235,6 +283,81 @@ class TestResponse:
             assert API_KEY not in str(exc)
 
 
+class TestUsageOfUnusableReplies:
+    """Invariant 26: a reply that was paid for but cannot be used still reports its tokens."""
+
+    USAGE: ClassVar[dict[str, int]] = {"prompt_tokens": 11, "completion_tokens": 7}
+
+    async def test_a_truncated_reply_carries_its_usage(self) -> None:
+        with pytest.raises(LlmOutputTruncated) as caught:
+            await _adapter(Recorder(ok(_reply(finish="length")))).complete(
+                MESSAGES, schema=PlanDraft, schema_name="x"
+            )
+        assert caught.value.usage == LlmUsage(prompt_tokens=11, completion_tokens=7)
+
+    @pytest.mark.parametrize(
+        "choices",
+        [
+            [],
+            [{"finish_reason": "stop", "message": {"content": ""}}],
+            [{"finish_reason": "stop", "message": {"content": "not json"}}],
+            [{"finish_reason": "stop", "message": {"content": '{"title": 1}'}}],
+        ],
+        ids=["no-choice", "empty", "not-json", "wrong-shape"],
+    )
+    async def test_an_undecodable_reply_carries_its_usage(self, choices: list[Any]) -> None:
+        payload = {"choices": choices, "usage": self.USAGE}
+        with pytest.raises(LlmOutputInvalid) as caught:
+            await _adapter(Recorder(ok(payload))).complete(
+                MESSAGES, schema=PlanDraft, schema_name="x"
+            )
+        assert caught.value.usage == LlmUsage(prompt_tokens=11, completion_tokens=7)
+
+    async def test_a_reply_without_a_usage_block_has_none_to_carry(self) -> None:
+        payload = {"choices": [{"finish_reason": "length", "message": {"content": "x"}}]}
+        with pytest.raises(LlmOutputTruncated) as caught:
+            await _adapter(Recorder(ok(payload))).complete(
+                MESSAGES, schema=PlanDraft, schema_name="x"
+            )
+        assert caught.value.usage is None
+
+    async def test_a_body_that_is_not_json_has_no_usage(self) -> None:
+        with pytest.raises(LlmOutputInvalid) as caught:
+            await _adapter(Recorder(httpx.Response(200, text="<html>nope</html>"))).complete(
+                MESSAGES, schema=PlanDraft, schema_name="x"
+            )
+        assert caught.value.usage is None
+
+    async def test_usage_is_numbers_only(self) -> None:
+        """The usage block is read field by field: text in it never reaches the error."""
+        payload = {
+            "choices": [{"finish_reason": "length", "message": {"content": LEAK}}],
+            "usage": {"prompt_tokens": LEAK, "completion_tokens": 5},
+        }
+        with pytest.raises(LlmOutputTruncated) as caught:
+            await _adapter(Recorder(ok(payload))).complete(
+                MESSAGES, schema=PlanDraft, schema_name="x"
+            )
+        assert caught.value.usage == LlmUsage(prompt_tokens=0, completion_tokens=5)
+        assert LEAK not in str(caught.value)
+        assert LEAK not in repr(caught.value.usage)
+
+    async def test_a_usable_reply_still_reports_zero_without_a_usage_block(self) -> None:
+        payload = _reply()
+        del payload["usage"]
+        result = await _adapter(Recorder(ok(payload))).complete(
+            MESSAGES, schema=PlanDraft, schema_name="x"
+        )
+        assert result.usage == LlmUsage(prompt_tokens=0, completion_tokens=0)
+
+    def test_the_errors_take_usage_as_an_optional_keyword(self) -> None:
+        assert LlmOutputInvalid("x").usage is None
+        assert LlmOutputTruncated("x").usage is None
+        usage = LlmUsage(prompt_tokens=1, completion_tokens=2)
+        assert LlmOutputInvalid("x", usage=usage).usage is usage
+        assert LlmOutputTruncated("x", usage=usage).usage is usage
+
+
 class TestRetry:
     @pytest.mark.parametrize(
         "first",
@@ -263,6 +386,22 @@ class TestRetry:
             await _adapter(rec).complete(MESSAGES, schema=PlanDraft, schema_name="x")
         assert len(rec.requests) == 2  # never a third
         assert LEAK not in str(caught.value)
+
+    async def test_the_failure_after_the_last_attempt_names_the_last_cause(self) -> None:
+        rec = Recorder(httpx.Response(429), httpx.Response(502))
+        with pytest.raises(LlmUnavailable, match=r"http_502"):
+            await _adapter(rec).complete(MESSAGES, schema=PlanDraft, schema_name="x")
+
+        rec = Recorder(httpx.Response(502), httpx.ReadTimeout("slow"))
+        with pytest.raises(LlmUnavailable, match=r"transport"):
+            await _adapter(rec).complete(MESSAGES, schema=PlanDraft, schema_name="x")
+
+    async def test_there_is_no_sleep_after_the_last_attempt(self) -> None:
+        sleeps: list[float] = []
+        rec = Recorder(httpx.Response(503), httpx.Response(503))
+        with pytest.raises(LlmUnavailable):
+            await _adapter(rec, sleeps=sleeps).complete(MESSAGES, schema=PlanDraft, schema_name="x")
+        assert len(sleeps) == 1  # between the two attempts only
 
     async def test_a_timeout_twice_is_unavailable(self) -> None:
         rec = Recorder(httpx.ReadTimeout("a"), httpx.ReadTimeout("b"))
@@ -295,7 +434,7 @@ class TestLogging:
             await _adapter(rec).complete(
                 [LlmMessage("user", LEAK)], schema=PlanDraft, schema_name="x"
             )
-        calls = [log for log in logs if log["event"] == "studio.llm.call"]
+        calls = [log for log in logs if log["event"] == "llm.call"]
         assert len(calls) == 1
         entry = calls[0]
         assert entry["model_key"] == "test"

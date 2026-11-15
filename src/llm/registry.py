@@ -1,8 +1,9 @@
-"""The model registry: which configured model answers which kind of run.
+"""The model registry: the configured models, their entries and their API keys.
 
 Built once at startup from settings. API keys are looked up **by environment-variable name** (the
 entry's ``api_key_env``), read once into ``SecretStr`` and never logged; a missing or empty one
-fails startup naming the setting, not the value.
+fails startup naming the setting, not the value. Which model serves which piece of work is the
+consumer's own routing (it names a registry key); the registry only knows a default.
 """
 
 from __future__ import annotations
@@ -12,80 +13,62 @@ from typing import TYPE_CHECKING
 
 from pydantic import SecretStr
 
-from src.core.llm_models import (
-    LlmModelEntry,
-    LlmRegistryError,
-    validate_model_entries,
-)
+from src.core.llm_models import LlmModelEntry, LlmRegistryError, validate_model_entries
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
 
     from src.core.config import Settings
-    from src.core.enums import StudioRunKind
 
 __all__ = ["LlmModelEntry", "LlmModelRegistry", "LlmRegistryError"]
 
 
 class LlmModelRegistry:
-    """Resolves a run kind to a registry key and its configured model entry."""
+    """The configured models, by registry key."""
 
     def __init__(
         self,
         entries: Mapping[str, LlmModelEntry],
         default_key: str,
-        by_kind: Mapping[StudioRunKind, str],
         keys: Mapping[str, SecretStr],
     ) -> None:
         """Validate and freeze the registry.
 
         Args:
             entries: Registry key -> entry.
-            default_key: Key used by kinds without an entry in ``by_kind``.
-            by_kind: Optional run kind -> registry key.
+            default_key: Key for any consumer without a routing setting of its own.
             keys: Registry key -> API key, one per entry.
 
         Raises:
             LlmRegistryError: The configuration is unusable (messages name the setting and never
-                a secret): unknown default / per-kind key, non-https ``base_url``, a protected
+                a secret): an unknown default key, non-https ``base_url``, a protected
                 ``extra_body`` key, or an entry without a non-empty API key.
         """
-        validate_model_entries(entries, default_key=default_key, by_kind=by_kind)
+        validate_model_entries(entries, default_key=default_key)
         for key in entries:
             secret = keys.get(key)
             if secret is None or not secret.get_secret_value().strip():
                 raise LlmRegistryError(
-                    f"studio_llm_models[{key}]: the environment variable named by api_key_env "
+                    f"llm_models[{key}]: the environment variable named by api_key_env "
                     "is not set or is empty"
                 )
         self._entries = dict(entries)
         self._default_key = default_key
-        self._by_kind = dict(by_kind)
         self._keys = dict(keys)
 
     @classmethod
     def from_settings(
         cls, settings: Settings, environ: Mapping[str, str] | None = None
     ) -> LlmModelRegistry:
-        """Build the registry from ``STUDIO_LLM_*`` settings, reading API keys from ``environ``.
+        """Build the registry from ``LLM_*`` settings, reading API keys from ``environ``.
 
         Raises:
             LlmRegistryError: See :meth:`__init__`.
         """
         env = os.environ if environ is None else environ
-        entries = settings.studio_llm_model_entries()
+        entries = settings.llm_model_entries()
         keys = {key: SecretStr(env.get(entry.api_key_env, "")) for key, entry in entries.items()}
-        return cls(
-            entries,
-            settings.studio_llm_default_model,
-            settings.studio_llm_model_by_kind,
-            keys,
-        )
-
-    def resolve(self, kind: StudioRunKind) -> tuple[str, LlmModelEntry]:
-        """The registry key and entry that serve ``kind``."""
-        key = self._by_kind.get(kind, self._default_key)
-        return key, self._entries[key]
+        return cls(entries, settings.llm_default_model, keys)
 
     def entry(self, key: str) -> LlmModelEntry:
         """The entry of a registry key (``KeyError`` for an unknown one)."""
@@ -94,6 +77,11 @@ class LlmModelRegistry:
     def api_key(self, key: str) -> SecretStr:
         """The API key of a registry key (``KeyError`` for an unknown one)."""
         return self._keys[key]
+
+    @property
+    def default_key(self) -> str:
+        """The key used by a consumer that has no routing setting of its own."""
+        return self._default_key
 
     @property
     def keys(self) -> tuple[str, ...]:

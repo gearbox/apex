@@ -43,16 +43,17 @@ from src.studio.run_requests import PlanRunRequest, RunRequest, normalize_plan_r
 from src.studio.services.mappers import run_out
 
 if TYPE_CHECKING:
+    from collections.abc import Mapping
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.api.schemas.studio_runs import RunOut
     from src.api.services.billing import BalanceEvent, BillingService
     from src.core.config import Settings
     from src.db.models.studio import StudioRun
-    from src.studio.llm.registry import LlmModelRegistry
     from src.studio.services.run_events import StudioRunEvents
 
-__all__ = ["RunWrite", "StudioRunService"]
+__all__ = ["RunWrite", "StudioRunService", "model_key_for"]
 
 logger = structlog.get_logger(__name__)
 
@@ -70,6 +71,17 @@ class RunWrite:
     balance_event: BalanceEvent | None = None
 
 
+def model_key_for(
+    kind: StudioRunKind, *, by_kind: Mapping[StudioRunKind, str], default_key: str
+) -> str:
+    """The ``LLM_MODELS`` key that serves a run of ``kind``: its own routing entry, else the default.
+
+    Pure. The studio owns this routing (``STUDIO_LLM_MODEL_BY_KIND``); the shared registry only
+    knows keys. Startup has already checked that every value is a registry key.
+    """
+    return by_kind.get(kind, default_key)
+
+
 def _request_hash(track_id: UUID, request: PlanRunRequest) -> str:
     """Identity of a submit: the track plus the normalized body (same key + same hash = replay)."""
     return hashlib.sha256(f"{track_id}\n".encode() + msgspec.json.encode(request)).hexdigest()
@@ -83,13 +95,11 @@ class StudioRunService:
         session: AsyncSession,
         *,
         billing: BillingService,
-        registry: LlmModelRegistry,
         settings: Settings,
         events: StudioRunEvents,
     ) -> None:
         self._session = session
         self._billing = billing
-        self._registry = registry
         self._settings = settings
         self._events = events
         self._runs = StudioRunRepository(session)
@@ -166,7 +176,11 @@ class StudioRunService:
             raise RunLimitReached
 
         kind = StudioRunKind.PLAN
-        model_key, _ = self._registry.resolve(kind)
+        model_key = model_key_for(
+            kind,
+            by_kind=self._settings.studio_llm_model_by_kind,
+            default_key=self._settings.llm_default_model,
+        )
         price = self._settings.studio_run_prices[kind]
         try:
             return await self._insert_and_reserve(

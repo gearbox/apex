@@ -18,10 +18,11 @@ import msgspec
 import pytest
 
 from src.core.enums import StudioRunStage
-from src.studio.llm.factory import LlmClientFactory
-from src.studio.llm.port import LlmOutputInvalid, LlmUnavailable
+from src.llm.factory import LlmClientFactory
+from src.llm.port import LlmOutputInvalid, LlmUnavailable
 from src.studio.services.mappers import run_out
-from tests.studio_llm import FakeLlm, make_draft, make_section_draft
+from tests.llm_support import FakeLlm
+from tests.studio_llm import make_draft, make_section_draft
 from tests.studio_runs_support import PRODUCT
 
 if TYPE_CHECKING:

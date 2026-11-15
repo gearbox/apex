@@ -7,7 +7,7 @@ from typing import Annotated, Any
 import msgspec
 import pytest
 
-from src.studio.llm.strict_schema import DROPPED_KEYWORDS, to_strict_schema
+from src.llm.strict_schema import DROPPED_KEYWORDS, to_strict_schema
 from src.studio.planner.drafts import PlanDraft, PlanSectionDraft
 
 pytestmark = pytest.mark.unit

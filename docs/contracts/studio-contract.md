@@ -478,7 +478,7 @@ A **run** is an asynchronous LLM job on a track. In this phase there is one kind
 
 ### Gating
 
-Runs sit behind **their own switch**, because they spend money: `STUDIO_RUNS_ENABLED` (default off) **and** the studio gate of §1. While either is off, **all four** run routes answer `404 {"error": "not_found"}` (before authentication). A `404` on `POST …/runs` therefore means "planner runs are off" — hide the "Plan with AI" action; the rest of the studio keeps working. A user never chooses the model; the operator configures it.
+Runs sit behind **their own switch**, because they spend money: `STUDIO_RUNS_ENABLED` (default off) **and** the studio gate of §1. While either is off, **all four** run routes answer `404 {"error": "not_found"}` (before authentication). A `404` on `POST …/runs` therefore means "planner runs are off" — hide the "Plan with AI" action; the rest of the studio keeps working. A user never chooses the model; the operator configures it: the shared model registry (`LLM_MODELS` / `LLM_DEFAULT_MODEL`, used by every feature that calls a model) and, per run kind, the studio's own routing (`STUDIO_LLM_MODEL_BY_KIND`).
 
 ### Endpoints
 
@@ -541,7 +541,7 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
   "status": "queued | running | succeeded | failed | cancelled",
   "stage": null,                      // running only: "context" | "drafting" | "validating" | "revising" | "saving"
   "revision": 1,                      // strictly increases with every status or stage change
-  "price_tokens": 1, "model_key": "grok",   // the operator's registry key, informational
+  "price_tokens": 1, "model_key": "grok",   // the operator's `LLM_MODELS` key, informational
   "result_plan_version_id": null,     // set when succeeded
   "result_lyrics_version_id": null,   // always null for now
   "warnings": [],                     // [{ "code", "path"? }] — none are emitted yet

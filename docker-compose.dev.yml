@@ -53,6 +53,7 @@ services:
       - ./uv.lock:/app/uv.lock:ro
       - ./docs:/app/docs:ro
       - ./.env.example:/app/.env.example:ro
+      - ./CLAUDE.md:/app/CLAUDE.md:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
     

@@ -4,13 +4,13 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.studio.llm.openai_compatible import OpenAICompatibleLlmAdapter
+from src.llm.openai_compatible import OpenAICompatibleLlmAdapter
 
 if TYPE_CHECKING:
     import httpx
 
-    from src.studio.llm.port import StructuredLlmPort
-    from src.studio.llm.registry import LlmModelRegistry
+    from src.llm.port import StructuredLlmPort
+    from src.llm.registry import LlmModelRegistry
 
 __all__ = ["LlmClientFactory"]
 

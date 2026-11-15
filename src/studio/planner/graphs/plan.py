@@ -1,9 +1,10 @@
 """The ``plan`` graph: draft -> validate -> (revise -> validate)* -> done.
 
 An in-memory LangGraph state machine over the planner's ports; **it never touches the database**.
-It returns the validated :class:`~src.studio.documents.PlanDocument` or says why there is none, and
-lets the run service save (or fail) it. Port errors (``LlmUnavailable`` ...) propagate out of
-``ainvoke`` for the run service to map.
+It returns a :class:`PlanRun` whose outcome is a tagged union - a valid plan, a refusal, or the
+last draft's issues - and lets the run service save (or fail) it. Port errors (``LlmUnavailable``
+...) propagate out of ``ainvoke`` for the run service to map; a state the wiring should make
+impossible raises :class:`PlannerStateError` instead of asserting.
 
 Budget: at most :data:`MAX_LLM_CALLS` model calls per run - the first draft, then at most two
 revisions. A reply that does not decode is re-asked within the same budget (and consumes no
@@ -19,12 +20,19 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime  # noqa: TC002 - runtime: langgraph inspects node signatures
 
 from src.core.enums import StudioRunStage
-from src.studio.documents import PlanDocument  # noqa: TC001 - runtime: LangGraph reads the state hints
-from src.studio.errors import DocumentIssue  # noqa: TC001
-from src.studio.llm.port import LlmMessage, LlmOutputInvalid
+from src.llm.port import LlmMessage, LlmOutputInvalid
+from src.studio.errors import DocumentIssue  # noqa: TC001 - runtime: LangGraph reads the state hints
 from src.studio.planner.context import RunContextSnapshot  # noqa: TC001
-from src.studio.planner.drafts import DraftRefusal, PlanDraft
+from src.studio.planner.drafts import PlanDraft
+from src.studio.planner.errors import PlannerStateError
 from src.studio.planner.mapping import draft_key_issues, plan_from_draft
+from src.studio.planner.outcome import (
+    PlanOutcome,
+    PlanReady,
+    PlanRefused,
+    PlanRejected,
+    PlanRun,
+)
 from src.studio.planner.prompts.plan_v1 import (
     REASK_MESSAGE,
     build_plan_messages,
@@ -39,7 +47,7 @@ if TYPE_CHECKING:
 
     from langgraph.graph.state import CompiledStateGraph
 
-    from src.studio.llm.port import StructuredLlmPort
+    from src.llm.port import StructuredLlmPort
 
 __all__ = [
     "MAX_LLM_CALLS",
@@ -47,6 +55,10 @@ __all__ = [
     "PLAN_SCHEMA_NAME",
     "PlanDeps",
     "PlanOutcome",
+    "PlanReady",
+    "PlanRefused",
+    "PlanRejected",
+    "PlanRun",
     "PlanState",
     "build_plan_graph",
     "compile_plan_graph",
@@ -60,15 +72,6 @@ MAX_REVISIONS: Final = 2
 PLAN_SCHEMA_NAME: Final = "plan_draft"
 _RECURSION_LIMIT: Final = 12
 """A full run is six supersteps (draft, validate, revise, validate, revise, validate)."""
-
-
-@dataclass(frozen=True, slots=True)
-class PlanOutcome:
-    """How the graph ended."""
-
-    status: Literal["ok", "refused", "invalid"]
-    refusal: DraftRefusal | None = None
-    """Set for ``refused``: the model's own reason."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -88,7 +91,6 @@ class PlanState(TypedDict):
     request: PlanRunRequest
     messages: tuple[LlmMessage, ...]
     draft: PlanDraft | None
-    plan: PlanDocument | None
     issues: tuple[DocumentIssue, ...]
     revisions: int
     llm_calls: int
@@ -104,7 +106,6 @@ def initial_state(context: RunContextSnapshot, request: PlanRunRequest) -> PlanS
         request=request,
         messages=(),
         draft=None,
-        plan=None,
         issues=(),
         revisions=0,
         llm_calls=0,
@@ -128,7 +129,11 @@ async def _ask(
             result = await deps.llm.complete(
                 conversation, schema=PlanDraft, schema_name=PLAN_SCHEMA_NAME
             )
-        except LlmOutputInvalid:
+        except LlmOutputInvalid as exc:
+            # The reply was paid for even though it is unusable: keep the counters in step.
+            if exc.usage is not None:
+                prompt_tokens += exc.usage.prompt_tokens
+                completion_tokens += exc.usage.completion_tokens
             if calls >= MAX_LLM_CALLS:
                 raise
             conversation.append(LlmMessage("user", REASK_MESSAGE))
@@ -152,30 +157,24 @@ async def _validate(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, A
     deps = runtime.context
     await deps.on_stage(StudioRunStage.VALIDATING)
     draft = state["draft"]
-    assert draft is not None  # noqa: S101 - the draft node always runs first
+    if draft is None:
+        raise PlannerStateError("validate ran before draft")
     if draft.refusal is not None:
-        return {
-            "plan": None,
-            "issues": (),
-            "outcome": PlanOutcome("refused", draft.refusal),
-        }
+        return {"issues": (), "outcome": PlanRefused(draft.refusal)}
     plan, plan_issues = validate_plan(plan_from_draft(draft, brief=state["request"].brief))
     issues = (*draft_key_issues(draft), *plan_issues)
     if plan is not None and not issues:
-        return {"plan": plan, "issues": (), "outcome": PlanOutcome("ok")}
+        return {"issues": (), "outcome": PlanReady(plan)}
     can_revise = state["revisions"] < deps.max_revisions and state["llm_calls"] < MAX_LLM_CALLS
-    return {
-        "plan": None,
-        "issues": issues,
-        "outcome": None if can_revise else PlanOutcome("invalid"),
-    }
+    return {"issues": issues, "outcome": None if can_revise else PlanRejected(issues)}
 
 
 async def _revise(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, Any]:
     deps = runtime.context
     await deps.on_stage(StudioRunStage.REVISING)
     draft = state["draft"]
-    assert draft is not None  # noqa: S101 - only reached after a validated draft
+    if draft is None:
+        raise PlannerStateError("revise ran before draft")
     messages = (*state["messages"], *build_plan_revision_messages(draft, state["issues"]))
     return {"revisions": state["revisions"] + 1, **await _ask(deps, messages, state)}
 
@@ -208,13 +207,23 @@ async def run_plan_graph(
     compiled: CompiledStateGraph[PlanState, PlanDeps, PlanState, PlanState],
     state: PlanState,
     deps: PlanDeps,
-) -> PlanState:
+) -> PlanRun:
     """Run a compiled plan graph to its end.
 
     Raises:
-        LlmError: Any port error (see ``src/studio/llm/port.py``); nothing is swallowed here.
+        LlmError: Any port error (see ``src/llm/port.py``); nothing is swallowed here.
+        PlannerStateError: The graph ended without an outcome (its wiring should prevent it).
     """
-    result = await compiled.ainvoke(
-        state, context=deps, config={"recursion_limit": _RECURSION_LIMIT}
+    final = cast(
+        "PlanState",
+        await compiled.ainvoke(state, context=deps, config={"recursion_limit": _RECURSION_LIMIT}),
     )
-    return cast("PlanState", result)
+    outcome = final["outcome"]
+    if outcome is None:
+        raise PlannerStateError("the plan graph ended without an outcome")
+    return PlanRun(
+        outcome=outcome,
+        llm_calls=final["llm_calls"],
+        prompt_tokens=final["prompt_tokens"],
+        completion_tokens=final["completion_tokens"],
+    )

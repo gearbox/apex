@@ -92,6 +92,6 @@ async def test_balance_events_pass_through() -> None:
 def test_the_run_service_provider_refuses_to_exist_without_the_registry(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.setattr(common._services, "studio_llm_registry", None)
+    monkeypatch.setattr(common._services, "llm_registry", None)
     with pytest.raises(RuntimeError, match="not enabled"):
         common.get_studio_run_service(object(), object())  # type: ignore[arg-type]

@@ -12,7 +12,8 @@ from unittest.mock import MagicMock
 import pytest
 
 from src.workers.studio_run import StudioRunTickError, StudioRunWorker
-from tests.studio_llm import FakeLlm, make_draft
+from tests.llm_support import FakeLlm
+from tests.studio_llm import make_draft
 
 if TYPE_CHECKING:
     from collections.abc import Callable

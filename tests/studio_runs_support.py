@@ -29,7 +29,7 @@ from src.db.models.library import LibraryProject
 from src.db.models.studio import StudioDocumentVersion, StudioRun, StudioTrack
 from src.db.models.user import User
 from src.db.session import DatabaseManager
-from src.studio.llm.registry import LlmModelRegistry
+from src.llm.registry import LlmModelRegistry
 from src.studio.run_requests import PlanRunRequest
 from src.studio.services.project import StudioProjectService
 from src.studio.services.run import RunWrite, StudioRunService
@@ -45,8 +45,8 @@ if TYPE_CHECKING:
 
     from src.api.schemas.events import EventType
     from src.api.services.billing import BalanceEvent
+    from src.llm.port import StructuredLlmPort
     from src.studio.documents import PlanDocument
-    from src.studio.llm.port import StructuredLlmPort
 
 __all__ = [
     "PRODUCT",
@@ -82,8 +82,8 @@ def make_settings(**overrides: Any) -> Settings:
         "jwt_secret_key": "x" * 40,
         "studio_enabled": True,
         "studio_runs_enabled": True,
-        "studio_llm_models": MODELS,
-        "studio_llm_default_model": "grok",
+        "llm_models": MODELS,
+        "llm_default_model": "grok",
     }
     return Settings(_env_file=None, **{**base, **overrides})  # type: ignore[call-arg]
 
@@ -91,10 +91,9 @@ def make_settings(**overrides: Any) -> Settings:
 def make_registry(settings: Settings | None = None) -> LlmModelRegistry:
     settings = settings or make_settings()
     return LlmModelRegistry(
-        parse_model_entries(settings.studio_llm_models),
-        settings.studio_llm_default_model,
-        settings.studio_llm_model_by_kind,
-        {key: SecretStr(f"secret-for-{key}") for key in settings.studio_llm_models},
+        parse_model_entries(settings.llm_models),
+        settings.llm_default_model,
+        {key: SecretStr(f"secret-for-{key}") for key in settings.llm_models},
     )
 
 
@@ -242,7 +241,6 @@ class RunWorld:
         return StudioRunService(
             session,
             billing=BillingService(),
-            registry=overrides.pop("registry", self.registry),
             settings=overrides.pop("settings", self.settings),
             events=StudioRunEvents(self.bus),  # type: ignore[arg-type]
         )

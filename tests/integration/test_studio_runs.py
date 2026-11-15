@@ -19,6 +19,12 @@ from src.core.enums import StudioDocumentOrigin, StudioRunKind, StudioRunStage
 from src.core.uid import new_id
 from src.db.models.studio import StudioRun
 from src.db.repositories.studio import StudioRunRepository
+from src.llm.port import (
+    LlmOutputInvalid,
+    LlmOutputTruncated,
+    LlmRejected,
+    LlmUnavailable,
+)
 from src.studio.errors import (
     IdempotencyConflict,
     IdempotencyKeyRequired,
@@ -33,16 +39,11 @@ from src.studio.errors import (
     StudioNotFound,
     VersionLimitReached,
 )
-from src.studio.llm.port import (
-    LlmOutputInvalid,
-    LlmOutputTruncated,
-    LlmRejected,
-    LlmUnavailable,
-)
 from src.studio.planner.drafts import DraftRefusal
 from src.studio.run_requests import LyricsRunRequest, PlanRunRequest, ReviseLyricsRunRequest
 from src.studio.services.version import DocumentVersionService
-from tests.studio_llm import FakeLlm, make_draft, refusal_draft
+from tests.llm_support import FakeLlm
+from tests.studio_llm import make_draft, refusal_draft
 from tests.studio_runs_support import PRODUCT, RunWorld
 from tests.studio_support import make_plan
 

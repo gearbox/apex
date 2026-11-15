@@ -42,7 +42,8 @@ from src.studio.errors import StudioError
 from src.studio.services.run import StudioRunService
 from src.studio.services.run_events import StudioRunEvents
 from tests.legal_support import TEST_LEGAL_REGISTRY
-from tests.studio_llm import FakeLlm, make_draft
+from tests.llm_support import FakeLlm
+from tests.studio_llm import make_draft
 from tests.studio_runs_support import SECRET, RunWorld
 
 if TYPE_CHECKING:
@@ -81,7 +82,6 @@ def _build_app(world: RunWorld) -> Litestar:
         return StudioRunService(
             session,
             billing=BillingService(),
-            registry=world.registry,
             settings=world.settings,
             events=StudioRunEvents(world.bus),  # type: ignore[arg-type]
         )

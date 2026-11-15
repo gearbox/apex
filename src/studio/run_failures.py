@@ -7,22 +7,23 @@ numbers** - never model output or user text (the contract promises it, ``RunOut`
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, overload
 
-from src.studio.errors import StudioError
-from src.studio.llm.port import (
+from src.llm.port import (
     LlmOutputInvalid,
     LlmOutputTruncated,
     LlmRejected,
     LlmUnavailable,
 )
+from src.studio.errors import StudioError
 from src.studio.planner.drafts import DraftRefusal
+from src.studio.planner.outcome import PlanReady, PlanRefused, PlanRejected
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.graphs.plan import PlanOutcome
+    from src.studio.planner.outcome import PlanOutcome
 
 __all__ = [
     "ERR_BRIEF_UNUSABLE",
@@ -59,9 +60,12 @@ class RunFailure:
 
 
 def failure_of_error(exc: BaseException) -> RunFailure:
-    """Map an exception raised while running to a failure (``internal_error`` for the rest)."""
-    if isinstance(exc, TimeoutError):
-        return RunFailure(ERR_TIMEOUT)
+    """Map an exception raised while running to a failure (``internal_error`` for the rest).
+
+    ``TimeoutError`` is deliberately **not** mapped: the run's own deadline is recognised where it
+    is applied (around the graph only), so a timeout raised by anything else - the save step's
+    database, say - is an ``internal_error`` and not a ``run_timeout`` that hides it.
+    """
     if isinstance(exc, LlmUnavailable):
         return RunFailure(ERR_LLM_UNAVAILABLE)
     if isinstance(exc, LlmRejected):
@@ -79,16 +83,20 @@ def _issues_detail(issues: Sequence[DocumentIssue]) -> dict[str, object]:
     return {"issues": [{"path": issue.path, "code": issue.code} for issue in issues]}
 
 
-def failure_of_outcome(
-    outcome: PlanOutcome | None, issues: Sequence[DocumentIssue]
-) -> RunFailure | None:
+@overload
+def failure_of_outcome(outcome: PlanReady) -> None: ...
+@overload
+def failure_of_outcome(outcome: PlanRefused | PlanRejected) -> RunFailure: ...
+@overload
+def failure_of_outcome(outcome: PlanOutcome) -> RunFailure | None: ...
+def failure_of_outcome(outcome: PlanOutcome) -> RunFailure | None:
     """The failure a finished graph stands for; ``None`` when it produced a valid plan."""
-    if outcome is None:
-        return RunFailure(ERR_INTERNAL)
-    if outcome.status == "ok":
-        return None
-    if outcome.status == "refused":
-        if outcome.refusal is DraftRefusal.BRIEF_UNUSABLE:
+    match outcome:
+        case PlanReady():
+            return None
+        case PlanRefused(reason=DraftRefusal.BRIEF_UNUSABLE):
             return RunFailure(ERR_BRIEF_UNUSABLE)
-        return RunFailure(ERR_CONTENT_POLICY)
-    return RunFailure(ERR_PLAN_INVALID, _issues_detail(issues))
+        case PlanRefused():
+            return RunFailure(ERR_CONTENT_POLICY)
+        case PlanRejected(issues=issues):
+            return RunFailure(ERR_PLAN_INVALID, _issues_detail(issues))

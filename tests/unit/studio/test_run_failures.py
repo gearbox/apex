@@ -4,16 +4,18 @@ from __future__ import annotations
 
 import pytest
 
-from src.studio.errors import DocumentIssue, RunInProgress, VersionLimitReached
-from src.studio.llm.port import (
+from src.llm.port import (
     LlmOutputInvalid,
     LlmOutputTruncated,
     LlmRejected,
     LlmUnavailable,
 )
+from src.studio.errors import DocumentIssue, RunInProgress, VersionLimitReached
 from src.studio.planner.drafts import DraftRefusal
-from src.studio.planner.graphs.plan import PlanOutcome
+from src.studio.planner.errors import PlannerStateError
+from src.studio.planner.outcome import PlanReady, PlanRefused, PlanRejected
 from src.studio.run_failures import RunFailure, failure_of_error, failure_of_outcome
+from tests.studio_llm import make_draft
 
 pytestmark = pytest.mark.unit
 
@@ -25,11 +27,13 @@ pytestmark = pytest.mark.unit
         (LlmRejected(400), "llm_rejected"),
         (LlmOutputTruncated("x"), "llm_output_truncated"),
         (LlmOutputInvalid("x"), "llm_output_invalid"),
-        (TimeoutError(), "run_timeout"),
         (VersionLimitReached(), "version_limit_reached"),
         (RunInProgress(), "run_in_progress"),
         (RuntimeError("boom"), "internal_error"),
         (ValueError("anything"), "internal_error"),
+        (PlannerStateError("validate ran before draft"), "internal_error"),
+        # the run's own deadline is recognised where it is applied, not by its type
+        (TimeoutError(), "internal_error"),
     ],
 )
 def test_errors_map_to_codes(error: Exception, code: str) -> None:
@@ -45,8 +49,28 @@ def test_an_unexpected_error_carries_no_detail() -> None:
     assert failure_of_error(RuntimeError("the brief says SECRET")) == RunFailure("internal_error")
 
 
-def test_a_valid_outcome_is_not_a_failure() -> None:
-    assert failure_of_outcome(PlanOutcome("ok"), ()) is None
+def test_a_planner_state_error_is_internal_and_carries_no_detail() -> None:
+    assert failure_of_error(PlannerStateError("revise ran before draft")) == RunFailure(
+        "internal_error"
+    )
+    assert issubclass(PlannerStateError, RuntimeError)
+
+
+def test_a_paid_for_reply_error_is_still_the_same_code() -> None:
+    """Carrying usage changes nothing about how the error is reported."""
+    from src.llm.port import LlmUsage
+
+    usage = LlmUsage(prompt_tokens=5, completion_tokens=6)
+    assert failure_of_error(LlmOutputInvalid("x", usage=usage)).code == "llm_output_invalid"
+    assert failure_of_error(LlmOutputTruncated("x", usage=usage)).code == "llm_output_truncated"
+
+
+# -- failure_of_outcome over the three variants ---------------------------------------------------
+
+
+def test_a_ready_outcome_is_not_a_failure() -> None:
+    plan_ready = PlanReady(plan=_a_plan())
+    assert failure_of_outcome(plan_ready) is None
 
 
 @pytest.mark.parametrize(
@@ -57,17 +81,30 @@ def test_a_valid_outcome_is_not_a_failure() -> None:
     ],
 )
 def test_refusals(reason: DraftRefusal, code: str) -> None:
-    assert failure_of_outcome(PlanOutcome("refused", reason), ()) == RunFailure(code)
+    assert failure_of_outcome(PlanRefused(reason)) == RunFailure(code)
 
 
-def test_an_invalid_plan_lists_paths_and_codes_only() -> None:
+def test_a_rejected_plan_lists_paths_and_codes_only() -> None:
     issues = (DocumentIssue("sections[1].delivery[0]", "reserved_descriptor"),)
-    failure = failure_of_outcome(PlanOutcome("invalid"), issues)
+    failure = failure_of_outcome(PlanRejected(issues))
     assert failure == RunFailure(
         "plan_invalid",
         {"issues": [{"path": "sections[1].delivery[0]", "code": "reserved_descriptor"}]},
     )
 
 
-def test_a_missing_outcome_is_an_internal_error() -> None:
-    assert failure_of_outcome(None, ()) == RunFailure("internal_error")
+def test_every_outcome_variant_is_covered() -> None:
+    """The union has exactly the three variants the mapping handles."""
+    from src.studio.planner import outcome
+
+    assert set(outcome.PlanOutcome.__value__.__args__) == {PlanReady, PlanRefused, PlanRejected}
+
+
+def _a_plan():  # type: ignore[no-untyped-def]
+    from src.studio.planner.mapping import plan_from_draft
+    from src.studio.planner.validate import validate_plan
+
+    plan, issues = validate_plan(plan_from_draft(make_draft(), brief="a brief"))
+    assert plan is not None
+    assert not issues
+    return plan

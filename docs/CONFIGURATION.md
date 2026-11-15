@@ -322,15 +322,26 @@ enabled (independently of `*_VIDEO_WORKER_IN_PROCESS`); a standalone worker is o
 
 ---
 
+### Shared LLM registry
+
+Every feature that calls a chat model (`src/llm`) takes its models from this one registry; a feature that routes work to models by its own setting (the studio does, with `STUDIO_LLM_MODEL_BY_KIND`) names registry keys. Entries speak the OpenAI-compatible `/chat/completions` wire format, so adding a provider is configuration.
+
+| Variable | Default | Type | Description |
+|----------|---------|------|-------------|
+| `LLM_MODELS` | `{}` | `json` | Model registry shared by every feature that calls a chat model: a JSON object `key → entry`. Entry: `base_url` (https origin + path up to, **not** including, `/chat/completions`), `api_key_env` (the **name** of a process environment variable that holds the key — it must be a real env var, e.g. from compose `env_file`; the key is never configured here and never logged), `model`, `structured_output` (`json_schema` default \| `json_object`), `max_output_tokens` (256–32000, default 8000), `timeout_s` (5–300, default 90), `temperature` (optional), `extra_body` (merged into the request last; may not set `model`, `messages` or `response_format`). Two entries ship in `.env.example`: `grok` and `qwen`. |
+| `LLM_DEFAULT_MODEL` | `grok` | `str` | Registry key used by every consumer without a routing setting of its own. Must be a key of `LLM_MODELS` when a feature that calls a model is enabled. |
+
+**When it is checked.** The *shape* of every `LLM_MODELS` entry (https `base_url`, non-blank `api_key_env` and `model`, no protected `extra_body` key) is validated at startup whenever `LLM_MODELS` is non-empty, whatever is enabled. **API keys are read from the environment, and the registry and its HTTP client are built, only when a feature that calls a model is switched on** (`Settings.llm_required`; today `STUDIO_ENABLED` **and** `STUDIO_RUNS_ENABLED`), so a disabled feature never blocks boot on a missing key. A feature that is on needs a usable registry: an empty `LLM_MODELS`, an unknown `LLM_DEFAULT_MODEL`, an unknown per-feature routing value, or a missing / empty API-key variable fails startup, naming the setting and never a value.
+
+---
+
 ### Media Project Studio
 
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `STUDIO_ENABLED` | `false` | `bool` | Global kill switch for `/v1/studio/*`. Studio is exposed only when this is `true` **and** the resolved product lists the `studio` feature (both `vex` and `synthara` do). Otherwise every studio route answers `404` — before authentication and before any DB access — so a disabled feature is indistinguishable from a route that does not exist. Contract: `docs/contracts/studio-contract.md`. |
-| `STUDIO_RUNS_ENABLED` | `false` | `bool` | Separate kill switch for LLM spend. When `false` the four run routes answer `404` and the run worker is not started. When `true`, startup fails unless the model registry below is valid and no LangSmith / LangChain tracing is enabled (`LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` truthy, or `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY` set) — prompts must reach the LLM provider only. Only has effect together with `STUDIO_ENABLED`. |
-| `STUDIO_LLM_MODELS` | `{}` | `json` | Model registry: a JSON object `key → entry`. Entry: `base_url` (https origin + path up to, **not** including, `/chat/completions`), `api_key_env` (the **name** of a process environment variable that holds the key — it must be a real env var, e.g. from compose `env_file`; the key is never configured here and never logged), `model`, `structured_output` (`json_schema` default \| `json_object`), `max_output_tokens` (256–32000, default 8000), `timeout_s` (5–300, default 90), `temperature` (optional), `extra_body` (merged into the request last; may not set `model`, `messages` or `response_format`). Two entries ship in `.env.example`: `grok` and `qwen`. |
-| `STUDIO_LLM_DEFAULT_MODEL` | `grok` | `str` | Registry key used by every run kind without a `STUDIO_LLM_MODEL_BY_KIND` entry. Must be a key of `STUDIO_LLM_MODELS` when runs are enabled. Users never choose the model. |
-| `STUDIO_LLM_MODEL_BY_KIND` | `{}` | `json` | Optional `kind → registry key`, e.g. `{"plan":"qwen"}`. |
+| `STUDIO_RUNS_ENABLED` | `false` | `bool` | Separate kill switch for LLM spend. When `false` the four run routes answer `404` and the run worker is not started. When `true`, startup fails unless the shared model registry (`LLM_MODELS`, `LLM_DEFAULT_MODEL`) is non-empty and valid and `STUDIO_LLM_MODEL_BY_KIND` names only its keys and no LangSmith / LangChain tracing is enabled (`LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` truthy, or `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY` set) — prompts must reach the LLM provider only. Only has effect together with `STUDIO_ENABLED`. |
+| `STUDIO_LLM_MODEL_BY_KIND` | `{}` | `json` | The studio's own routing: optional `kind → LLM_MODELS key`, e.g. `{"plan":"qwen"}`; a kind without an entry uses `LLM_DEFAULT_MODEL`. When runs are enabled every value must be a key of `LLM_MODELS` (startup fails naming `studio_llm_model_by_kind[<kind>]`). Users never choose the model. |
 | `STUDIO_RUN_PRICES` | `{"plan":1,"lyrics":1,"revise_lyrics":1}` | `json` | Tokens per run kind (each `>= 0`), reserved when the run is accepted and refunded in full when it fails or is cancelled. `0` writes no ledger rows. |
 | `STUDIO_RUN_DEADLINE_SECONDS` | `180` | `int (30–600)` | Wall-clock budget of one run once it starts. A run past its lease is failed `run_timeout` and refunded; it is never executed twice. |
 | `STUDIO_RUN_MAX_CONCURRENT` | `4` | `int (1–16)` | Runs one worker process executes at once. |

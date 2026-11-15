@@ -1,13 +1,13 @@
-"""Opt-in smoke test of the configured studio models: ``pytest -m live_llm tests/live``.
+"""Opt-in smoke test of the configured LLM models: ``pytest -m live_llm tests/live``.
 
-CI never calls a model (the default run excludes ``live_llm``). This sends the real ``plan-v1``
-prompt with a fixed brief to **every** entry of ``STUDIO_LLM_MODELS`` whose API-key environment
+CI never calls a model (the default run excludes ``live_llm``). This sends the studio's real
+``plan-v1`` prompt with a fixed brief to **every** entry of ``LLM_MODELS`` whose API-key environment
 variable is set, over the real adapter, and asserts that the reply decodes into ``PlanDraft`` -
 which is what proves a model really honours the entry's ``structured_output`` mode. Run it for the
 ``grok`` and ``qwen`` entries before merging and put the result (pass / fail, model ids, token
 counts) in the PR description. It spends a few tokens per entry.
 
-    STUDIO_LLM_MODELS='{...}' XAI_API_KEY=... MODEL_STUDIO_API_KEY=... \\
+    LLM_MODELS='{...}' XAI_API_KEY=... MODEL_STUDIO_API_KEY=... \\
         uv run pytest -m live_llm tests/live -s
 """
 
@@ -21,7 +21,7 @@ from pydantic import SecretStr
 
 from src.core.config import Settings
 from src.core.llm_models import LlmModelEntry, parse_model_entries
-from src.studio.llm.openai_compatible import OpenAICompatibleLlmAdapter
+from src.llm.openai_compatible import OpenAICompatibleLlmAdapter
 from src.studio.planner.context import RunContextSnapshot
 from src.studio.planner.drafts import PlanDraft
 from src.studio.planner.graphs.plan import PLAN_SCHEMA_NAME
@@ -37,7 +37,7 @@ BRIEF = "A mellow synthwave track about driving home through the rain at night."
 
 def _configured() -> dict[str, LlmModelEntry]:
     try:
-        return parse_model_entries(Settings().studio_llm_models)  # type: ignore[call-arg]
+        return parse_model_entries(Settings().llm_models)  # type: ignore[call-arg]
     except Exception:  # an unusable local environment simply means nothing is configured
         return {}
 
@@ -47,8 +47,7 @@ ENTRIES = _configured()
 
 @pytest.mark.parametrize(
     "key",
-    sorted(ENTRIES)
-    or [pytest.param("none", marks=pytest.mark.skip(reason="no STUDIO_LLM_MODELS"))],
+    sorted(ENTRIES) or [pytest.param("none", marks=pytest.mark.skip(reason="no LLM_MODELS"))],
 )
 async def test_the_model_answers_the_plan_prompt_with_a_valid_draft(key: str) -> None:
     entry = ENTRIES[key]

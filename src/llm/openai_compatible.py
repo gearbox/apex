@@ -20,7 +20,7 @@ import msgspec
 import structlog
 
 from src.core.llm_models import PROTECTED_BODY_KEYS
-from src.studio.llm.port import (
+from src.llm.port import (
     LlmMessage,
     LlmOutputInvalid,
     LlmOutputTruncated,
@@ -29,7 +29,7 @@ from src.studio.llm.port import (
     LlmUnavailable,
     LlmUsage,
 )
-from src.studio.llm.strict_schema import to_strict_schema
+from src.llm.strict_schema import to_strict_schema
 
 if TYPE_CHECKING:
     from collections.abc import Awaitable, Callable, Sequence
@@ -104,15 +104,11 @@ class OpenAICompatibleLlmAdapter:
             }
         else:
             response_format = {"type": "json_object"}
-            wire_messages.append(
-                {
-                    "role": "system",
-                    "content": _JSON_OBJECT_INSTRUCTION
-                    + " "
-                    + json.dumps(strict, separators=(",", ":")),
-                }
+            _put_in_leading_system_message(
+                wire_messages,
+                _JSON_OBJECT_INSTRUCTION + " " + json.dumps(strict, separators=(",", ":")),
             )
-        # ``extra_body`` goes in last, but the planner's contract keys cannot be replaced.
+        # ``extra_body`` goes in last, but the request's contract keys cannot be replaced.
         extra = {k: v for k, v in entry.extra_body.items() if k not in PROTECTED_BODY_KEYS}
         return {
             **body,
@@ -125,6 +121,7 @@ class OpenAICompatibleLlmAdapter:
     async def _post(self, body: dict[str, Any]) -> dict[str, Any]:
         """POST with one retry; returns the decoded JSON object of a ``200`` reply."""
         headers = {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
+        failure = "transport"
         for attempt in range(1, _MAX_ATTEMPTS + 1):
             started = time.perf_counter()
             status: int | None = None
@@ -145,10 +142,11 @@ class OpenAICompatibleLlmAdapter:
                 failure = f"http_{status}"
                 retry_after = _retry_after(response)
             self._log(status, started, attempt, usage=None)
-            if attempt == _MAX_ATTEMPTS:
-                raise LlmUnavailable(f"LLM provider unavailable ({failure})")
-            await self._sleep(retry_after if retry_after is not None else _DEFAULT_BACKOFF_SECONDS)
-        raise AssertionError("unreachable")  # pragma: no cover - the loop returns or raises
+            if attempt < _MAX_ATTEMPTS:
+                await self._sleep(
+                    retry_after if retry_after is not None else _DEFAULT_BACKOFF_SECONDS
+                )
+        raise LlmUnavailable(f"LLM provider unavailable ({failure})")
 
     def _payload(self, response: httpx.Response, attempt: int, started: float) -> dict[str, Any]:
         try:
@@ -159,32 +157,35 @@ class OpenAICompatibleLlmAdapter:
         if not isinstance(payload, dict):
             self._log(response.status_code, started, attempt, usage=None)
             raise LlmOutputInvalid("LLM reply is not a JSON object")
-        self._log(response.status_code, started, attempt, usage=_usage_of(payload))
+        self._log(response.status_code, started, attempt, usage=_reported_usage(payload))
         return payload
 
     # -- response ----------------------------------------------------------------------------
 
     @staticmethod
     def _decode[T: msgspec.Struct](payload: dict[str, Any], schema: type[T]) -> LlmResult[T]:
+        # A reply that arrives but is unusable has been paid for: its token counts travel on the
+        # error (numbers only) so a caller that meters tokens still counts it.
+        usage = _reported_usage(payload)
         choices = payload.get("choices")
         choice = choices[0] if isinstance(choices, list) and choices else None
         if not isinstance(choice, dict):
-            raise LlmOutputInvalid("LLM reply has no choice")
+            raise LlmOutputInvalid("LLM reply has no choice", usage=usage)
         if choice.get("finish_reason") == "length":
-            raise LlmOutputTruncated("LLM reply was cut off at the output-token limit")
+            raise LlmOutputTruncated("LLM reply was cut off at the output-token limit", usage=usage)
         message = choice.get("message")
         content = message.get("content") if isinstance(message, dict) else None
         if not isinstance(content, str) or not content.strip():
-            raise LlmOutputInvalid("LLM reply is empty")
+            raise LlmOutputInvalid("LLM reply is empty", usage=usage)
         try:
             value = msgspec.json.decode(content, type=schema)
         except (msgspec.DecodeError, msgspec.ValidationError):
             # No chaining: msgspec's message can quote a value from the reply.
-            raise LlmOutputInvalid("LLM reply does not match the schema") from None
+            raise LlmOutputInvalid("LLM reply does not match the schema", usage=usage) from None
         model = payload.get("model")
         return LlmResult(
             value=value,
-            usage=_usage_of(payload),
+            usage=usage or LlmUsage(prompt_tokens=0, completion_tokens=0),
             model_id=model if isinstance(model, str) else "",
         )
 
@@ -194,7 +195,7 @@ class OpenAICompatibleLlmAdapter:
         self, status: int | None, started: float, attempt: int, usage: LlmUsage | None
     ) -> None:
         logger.info(
-            "studio.llm.call",
+            "llm.call",
             model_key=self._model_key,
             status_code=status,
             duration_ms=int((time.perf_counter() - started) * 1000),
@@ -204,16 +205,31 @@ class OpenAICompatibleLlmAdapter:
         )
 
 
-def _usage_of(payload: dict[str, Any]) -> LlmUsage:
+def _reported_usage(payload: dict[str, Any]) -> LlmUsage | None:
+    """The token counts of a reply, or ``None`` when the provider sent no ``usage`` object."""
     usage = payload.get("usage")
     if not isinstance(usage, dict):
-        return LlmUsage(prompt_tokens=0, completion_tokens=0)
+        return None
     prompt = usage.get("prompt_tokens")
     completion = usage.get("completion_tokens")
     return LlmUsage(
         prompt_tokens=prompt if isinstance(prompt, int) else 0,
         completion_tokens=completion if isinstance(completion, int) else 0,
     )
+
+
+def _put_in_leading_system_message(wire_messages: list[dict[str, Any]], text: str) -> None:
+    """Add ``text`` to the first system message (after a blank line), or open with a new one.
+
+    Several chat endpoints accept a system message only at the very start of the conversation, so
+    the instruction never travels as a later message. ``wire_messages`` is the adapter's own copy
+    of the request; the caller's messages are never touched.
+    """
+    for message in wire_messages:
+        if message["role"] == "system":
+            message["content"] = f"{message['content']}\n\n{text}"
+            return
+    wire_messages.insert(0, {"role": "system", "content": text})
 
 
 def _retry_after(response: httpx.Response) -> float | None:

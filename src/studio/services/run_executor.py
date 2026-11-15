@@ -29,9 +29,11 @@ import structlog
 from src.api.schemas.studio import PlanVersionCreate
 from src.core.enums import StudioDocumentOrigin, StudioRunKind, StudioRunStage
 from src.db.repositories.studio import StudioRunRepository
+from src.llm.port import LlmReplyError
 from src.studio.errors import StudioError, VersionUnchanged
 from src.studio.planner.graphs.plan import (
     PlanDeps,
+    PlanReady,
     compile_plan_graph,
     initial_state,
     run_plan_graph,
@@ -57,11 +59,11 @@ if TYPE_CHECKING:
     from src.core.config import Settings
     from src.db.models.studio import StudioRun
     from src.db.session import DatabaseManager
+    from src.llm.port import LlmMessage, LlmResult, LlmUsage, StructuredLlmPort
+    from src.llm.registry import LlmModelRegistry
     from src.studio.documents import PlanDocument
-    from src.studio.llm.port import LlmMessage, LlmResult, LlmUsage, StructuredLlmPort
-    from src.studio.llm.registry import LlmModelRegistry
     from src.studio.planner.context import ArtistContextProvider, RunContextSnapshot
-    from src.studio.planner.graphs.plan import PlanState
+    from src.studio.planner.graphs.plan import PlanRun
     from src.studio.services.run_events import StudioRunEvents
 
 __all__ = ["ClaimedRun", "RunSwept", "StudioRunExecutor"]
@@ -93,7 +95,11 @@ class ClaimedRun:
 
 
 class _MeteredLlm:
-    """Counts the calls and tokens that pass through a port, so a failed run still reports them."""
+    """Counts the calls and tokens that pass through a port, so a failed run still reports them.
+
+    A reply that arrives but is unusable (truncated, undecodable) has been paid for: the port's
+    error carries its token counts, and they are added before the error goes on.
+    """
 
     def __init__(self, inner: StructuredLlmPort) -> None:
         self._inner = inner
@@ -105,7 +111,12 @@ class _MeteredLlm:
         self, messages: Sequence[LlmMessage], *, schema: type[T], schema_name: str
     ) -> LlmResult[T]:
         self.calls += 1
-        result = await self._inner.complete(messages, schema=schema, schema_name=schema_name)
+        try:
+            result = await self._inner.complete(messages, schema=schema, schema_name=schema_name)
+        except LlmReplyError as exc:
+            if exc.usage is not None:
+                self._add(exc.usage)
+            raise
         self._add(result.usage)
         return result
 
@@ -226,22 +237,26 @@ class StudioRunExecutor:
         started = time.monotonic()
         meter = _MeteredLlm(self._llm_factory(claimed.model_key))
         deps = PlanDeps(llm=meter, on_stage=lambda stage: self._on_stage(claimed, stage))
-        failure: RunFailure | None
+        failure: RunFailure
         try:
-            final = await self._run_graph(claimed, deps)
-            failure = failure_of_outcome(final["outcome"], final["issues"])
-            if failure is None:
-                plan = final["plan"]
-                assert plan is not None  # noqa: S101 - an "ok" outcome always carries the plan
-                await self._on_stage(claimed, StudioRunStage.SAVING)
-                if await self._finish_success(claimed, plan, meter):
-                    self._log_finished(claimed, "succeeded", None, meter, started)
-                return
+            try:
+                run = await self._run_graph(claimed, deps)
+            except TimeoutError:
+                # The run's own deadline. Only the graph is bounded by it: a timeout raised by the
+                # save step below is not a ``run_timeout`` and must not be reported as one.
+                failure = RunFailure(ERR_TIMEOUT)
+            else:
+                match run.outcome:
+                    case PlanReady(plan=plan):
+                        await self._on_stage(claimed, StudioRunStage.SAVING)
+                        if await self._finish_success(claimed, plan, meter):
+                            self._log_finished(claimed, "succeeded", None, meter, started)
+                        return
+                    case unsuccessful:
+                        failure = failure_of_outcome(unsuccessful)
         except RunSwept:
             logger.warning("studio.run.swept", run_id=str(claimed.run_id))
             return
-        except TimeoutError:
-            failure = RunFailure(ERR_TIMEOUT)
         except StudioError as exc:  # the save step's own refusals (e.g. VersionLimitReached)
             failure = failure_of_error(exc)
         except Exception as exc:  # the run guard: whatever else happens, the run ends and refunds
@@ -257,7 +272,7 @@ class StudioRunExecutor:
         await self._finish_failure(claimed, failure, meter)
         self._log_finished(claimed, "failed", failure.code, meter, started)
 
-    async def _run_graph(self, claimed: ClaimedRun, deps: PlanDeps) -> PlanState:
+    async def _run_graph(self, claimed: ClaimedRun, deps: PlanDeps) -> PlanRun:
         async with asyncio.timeout(self._deadline):
             return await run_plan_graph(
                 self._graph, initial_state(claimed.context, claimed.request), deps

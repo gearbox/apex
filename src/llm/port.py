@@ -1,10 +1,10 @@
-"""The studio's port to a language model: one structured completion, typed errors.
+"""The port to a language model: one structured completion, typed errors.
 
-The planner depends on this module only; which provider answers is an adapter detail
-(``openai_compatible.py``) chosen by configuration. The errors are plain exceptions, not
-``StudioError``: the run service maps them to a run's ``error_code``. **They never carry response
-text** - a model may echo the brief or the artist's persona, and an exception message ends up in
-logs.
+Callers depend on this module only; which provider answers is an adapter detail
+(``openai_compatible.py``) chosen by configuration. The errors are plain exceptions, not API
+errors: each caller maps them to its own outcome. **They never carry response text** - a model may
+echo the prompt it was given, and an exception message ends up in logs. The one thing a failed reply
+may carry is its token usage, which is numbers only.
 """
 
 from __future__ import annotations
@@ -23,6 +23,7 @@ __all__ = [
     "LlmOutputInvalid",
     "LlmOutputTruncated",
     "LlmRejected",
+    "LlmReplyError",
     "LlmResult",
     "LlmUnavailable",
     "LlmUsage",
@@ -71,11 +72,24 @@ class LlmRejected(LlmError):
         self.status_code = status_code
 
 
-class LlmOutputTruncated(LlmError):
+class LlmReplyError(LlmError):
+    """The provider answered (and billed) but the reply is unusable.
+
+    ``usage`` is what the provider reported for that reply (numbers only, never text), or ``None``
+    when the failure came before any usage was known. A caller that meters tokens adds it before
+    giving up, so the recorded usage does not undercount the runs that spend the most.
+    """
+
+    def __init__(self, message: str, *, usage: LlmUsage | None = None) -> None:
+        super().__init__(message)
+        self.usage = usage
+
+
+class LlmOutputTruncated(LlmReplyError):
     """The reply hit the output-token limit (``finish_reason == "length"``)."""
 
 
-class LlmOutputInvalid(LlmError):
+class LlmOutputInvalid(LlmReplyError):
     """Empty reply, not JSON, or JSON that does not decode into the requested schema."""
 
 
@@ -95,7 +109,7 @@ class StructuredLlmPort(Protocol):
         Raises:
             LlmUnavailable: The provider could not be reached or kept failing.
             LlmRejected: The provider refused the request.
-            LlmOutputTruncated: The reply was cut off.
-            LlmOutputInvalid: The reply is not a valid ``schema`` object.
+            LlmOutputTruncated: The reply was cut off (``usage`` holds its tokens when known).
+            LlmOutputInvalid: The reply is not a valid ``schema`` object (``usage`` as above).
         """
         ...

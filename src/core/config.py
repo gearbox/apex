@@ -20,7 +20,12 @@ from src.core.constants import (
     validate_dev_ref_is_route_safe,
 )
 from src.core.enums import GitHubAuthMode, StudioRunKind, WorkerMode
-from src.core.llm_models import LlmModelEntry, parse_model_entries, validate_model_entries
+from src.core.llm_models import (
+    LlmModelEntry,
+    parse_model_entries,
+    validate_model_entries,
+    validate_model_keys,
+)
 from src.core.llm_tracing import TracingEnabledError, force_tracing_off
 from src.core.product_registry import PRODUCT_REGISTRY
 from src.core.topup_pricing import build_tiers
@@ -967,6 +972,27 @@ class Settings(BaseSettings):
     )
 
     # -------------------------------------------------------------------------
+    # Shared LLM registry (src/llm) - used by every feature that calls a chat model
+    # -------------------------------------------------------------------------
+    llm_models: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Model registry (env LLM_MODELS, a JSON object): key -> {base_url, api_key_env, "
+            "model, structured_output, max_output_tokens, timeout_s, temperature, extra_body}. "
+            "api_key_env is the NAME of a process environment variable; the key itself is never "
+            "configured here. Its shape is checked whenever it is non-empty; API keys are read "
+            "only when a feature that calls a model is switched on (see llm_required)."
+        ),
+    )
+    llm_default_model: str = Field(
+        default="grok",
+        description=(
+            "Registry key (env LLM_DEFAULT_MODEL) used by every consumer without a routing "
+            "setting of its own."
+        ),
+    )
+
+    # -------------------------------------------------------------------------
     # Media Project Studio
     # -------------------------------------------------------------------------
     studio_enabled: bool = Field(
@@ -980,26 +1006,16 @@ class Settings(BaseSettings):
         default=False,
         description=(
             "Separate kill switch for LLM spend (env STUDIO_RUNS_ENABLED). When false the studio "
-            "run routes answer 404 and the run worker is not started. Requires "
-            "STUDIO_LLM_MODELS / STUDIO_LLM_DEFAULT_MODEL to be valid when true."
+            "run routes answer 404 and the run worker is not started. Requires LLM_MODELS / "
+            "LLM_DEFAULT_MODEL (and STUDIO_LLM_MODEL_BY_KIND, if set) to be valid when true."
         ),
-    )
-    studio_llm_models: dict[str, dict[str, Any]] = Field(
-        default_factory=dict,
-        description=(
-            "Model registry (env STUDIO_LLM_MODELS, a JSON object): key -> {base_url, "
-            "api_key_env, model, structured_output, max_output_tokens, timeout_s, temperature, "
-            "extra_body}. api_key_env is the NAME of a process environment variable; the key "
-            "itself is never configured here."
-        ),
-    )
-    studio_llm_default_model: str = Field(
-        default="grok",
-        description="Registry key used by every run kind without a studio_llm_model_by_kind entry.",
     )
     studio_llm_model_by_kind: dict[StudioRunKind, str] = Field(
         default_factory=dict,
-        description='Optional run kind -> registry key, e.g. {"plan": "qwen"}.',
+        description=(
+            "Optional run kind -> LLM_MODELS key (env STUDIO_LLM_MODEL_BY_KIND), e.g. "
+            '{"plan": "qwen"}. A kind without an entry uses LLM_DEFAULT_MODEL.'
+        ),
     )
     studio_run_prices: dict[StudioRunKind, Annotated[int, Field(ge=0)]] = Field(
         default={StudioRunKind.PLAN: 1, StudioRunKind.LYRICS: 1, StudioRunKind.REVISE_LYRICS: 1},
@@ -2197,12 +2213,27 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_llm_registry_shape(self) -> "Settings":
+        """Fail loud on a malformed ``LLM_MODELS``, whatever feature is switched on.
+
+        The shape is checked whenever the registry is non-empty, so a typo is found at boot and not
+        the day a feature is enabled. API keys are *not* looked up here (see ``llm_required``), and
+        messages name the setting and never an environment value.
+        """
+        entries = self.llm_model_entries()
+        if entries:
+            validate_model_entries(entries)
+        return self
+
+    @model_validator(mode="after")
     def validate_studio_runs(self) -> "Settings":
         """Fail loud on an unusable studio run configuration - before any worker starts.
 
         Checked only when ``STUDIO_RUNS_ENABLED`` is on, so a disabled feature never blocks boot.
-        Messages name the setting and never an environment value (the API key itself is looked up
-        when the registry is built, see ``src/studio/llm/registry.py``).
+        A feature that is on needs a usable registry: ``LLM_MODELS`` non-empty, ``LLM_DEFAULT_MODEL``
+        and every ``STUDIO_LLM_MODEL_BY_KIND`` value one of its keys. Messages name the setting and
+        never an environment value (the API key itself is looked up when the registry is built,
+        see ``src/llm/registry.py``).
         """
         missing_prices = set(StudioRunKind) - self.studio_run_prices.keys()
         if missing_prices:
@@ -2213,12 +2244,13 @@ class Settings(BaseSettings):
             )
         if not self.studio_runs_enabled:
             return self
+        entries = self.llm_model_entries()
+        if not entries:
+            raise ValueError("llm_models must not be empty when studio_runs_enabled is on")
         try:
-            validate_model_entries(
-                self.studio_llm_model_entries(),
-                default_key=self.studio_llm_default_model,
-                by_kind=self.studio_llm_model_by_kind,
-            )
+            validate_model_entries(entries, default_key=self.llm_default_model)
+            for kind, key in self.studio_llm_model_by_kind.items():
+                validate_model_keys(f"studio_llm_model_by_kind[{kind.value}]", [key], entries)
             force_tracing_off()
         except TracingEnabledError as exc:
             raise ValueError(str(exc)) from None
@@ -2320,13 +2352,23 @@ class Settings(BaseSettings):
         """
         return self.studio_enabled and self.studio_runs_enabled
 
-    def studio_llm_model_entries(self) -> dict[str, LlmModelEntry]:
-        """The decoded ``STUDIO_LLM_MODELS`` registry entries.
+    @property
+    def llm_required(self) -> bool:
+        """Whether any enabled feature calls a chat model - the registry and HTTP client are needed.
+
+        Gates everything that needs an API key: reading keys from the environment, building the
+        registry and the shared HTTP client. Today only the studio planner runs; a feature that
+        joins (prompt extension, ...) adds its own switch here.
+        """
+        return self.studio_runs_active
+
+    def llm_model_entries(self) -> dict[str, LlmModelEntry]:
+        """The decoded ``LLM_MODELS`` registry entries.
 
         Raises:
             LlmRegistryError: An entry does not decode.
         """
-        return parse_model_entries(self.studio_llm_models)
+        return parse_model_entries(self.llm_models)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

@@ -16,7 +16,7 @@ import msgspec
 
 from src.core.enums import StudioSectionKind
 from src.core.product import ContentRating
-from src.studio.llm.port import LlmMessage
+from src.llm.port import LlmMessage
 from src.studio.planner.policy import policy_block
 
 if TYPE_CHECKING:
