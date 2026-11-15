@@ -106,7 +106,7 @@ class OpenAICompatibleLlmAdapter:
             response_format = {"type": "json_object"}
             _put_in_leading_system_message(
                 wire_messages,
-                f"{_JSON_OBJECT_INSTRUCTION} {json.dumps(strict, separators=(",", ":"))}",
+                f"{_JSON_OBJECT_INSTRUCTION} {json.dumps(strict, separators=(',', ':'))}",
             )
         # ``extra_body`` goes in last, but the request's contract keys cannot be replaced.
         extra = {k: v for k, v in entry.extra_body.items() if k not in PROTECTED_BODY_KEYS}
