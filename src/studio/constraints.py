@@ -15,7 +15,7 @@ with the other validation issues (P1-6). Lengths are counted in code points, lik
 from __future__ import annotations
 
 import functools
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, Literal
 
 import msgspec
 import msgspec.inspect as mi
@@ -25,13 +25,25 @@ from src.studio.errors import DocumentIssue
 if TYPE_CHECKING:
     from collections.abc import Iterable
 
-__all__ = ["TOO_LONG", "TOO_MANY", "collect_count_issues", "collect_length_issues"]
+__all__ = [
+    "OUT_OF_RANGE",
+    "TOO_LONG",
+    "TOO_MANY",
+    "collect_count_issues",
+    "collect_length_issues",
+    "collect_range_issues",
+]
 
 TOO_LONG: Final = "too_long_after_normalization"
 """Issue code: a value is within its wire limit as sent, but past it once normalized."""
 
 TOO_MANY: Final = "too_many_items"
 """Issue code: a list or tuple holds more items than its declared ``max_length``."""
+
+OUT_OF_RANGE: Final = "out_of_range"
+"""Issue code: an integer is outside its declared ``ge`` / ``le`` / ``gt`` / ``lt`` bounds."""
+
+type _Check = Literal["length", "count", "range"]
 
 
 @functools.cache
@@ -55,7 +67,7 @@ def collect_length_issues(
             order. Nothing is raised, so the caller can report them with all other issues.
         path: Prefix of every reported path (the wire path of ``value``; ``""`` for the root).
     """
-    _walk(value, _struct_type(type(value)), path, issues, counts=False)
+    _walk(value, _struct_type(type(value)), path, issues, check="length")
 
 
 def collect_count_issues(
@@ -69,7 +81,20 @@ def collect_count_issues(
     allows. The same walker, the same single source of limits; one ``DocumentIssue(path,
     TOO_MANY)`` per offending array, at the array's own path.
     """
-    _walk(value, _struct_type(type(value)), path, issues, counts=True)
+    _walk(value, _struct_type(type(value)), path, issues, check="count")
+
+
+def collect_range_issues(
+    value: msgspec.Struct, issues: list[DocumentIssue], path: str = ""
+) -> None:
+    """Re-check every integer bound declared on ``type(value)`` (``ge`` / ``le`` / ``gt`` / ``lt``).
+
+    Like :func:`collect_count_issues` this is for a document **built in code** (the planner's
+    output), which never went through msgspec's decoding: a ``tempo_bpm`` of 9000 or a section
+    ``duration_seconds`` of 0 must not reach storage because nothing enforced the wire limit.
+    One ``DocumentIssue(path, OUT_OF_RANGE)`` per offending integer.
+    """
+    _walk(value, _struct_type(type(value)), path, issues, check="range")
 
 
 def _join(path: str, name: str) -> str:
@@ -77,7 +102,7 @@ def _join(path: str, name: str) -> str:
 
 
 def _walk(
-    value: object, info: mi.Type, path: str, issues: list[DocumentIssue], *, counts: bool
+    value: object, info: mi.Type, path: str, issues: list[DocumentIssue], *, check: _Check
 ) -> None:
     # PATCH fields: ``type_info`` drops ``UnsetType`` from the declared type, so an unset field
     # reports a bare ``StrType`` / ``ListType``. Skip it by identity *before* any type dispatch.
@@ -89,7 +114,7 @@ def _walk(
             # optional struct both as ``None`` and as itself.
             branch = _branch_for(value, branches)
             if branch is not None:
-                _walk(value, branch, path, issues, counts=counts)
+                _walk(value, branch, path, issues, check=check)
         case mi.StructType(fields=fields):
             for field in fields:
                 _walk(
@@ -97,20 +122,26 @@ def _walk(
                     field.type,
                     _join(path, field.encode_name),
                     issues,
-                    counts=counts,
+                    check=check,
                 )
         case mi.StrType(max_length=limit) if limit is not None:
-            if not counts and isinstance(value, str) and len(value) > limit:
+            if check == "length" and isinstance(value, str) and len(value) > limit:
                 issues.append(DocumentIssue(path, TOO_LONG))
+        case mi.IntType(ge=ge, le=le, gt=gt, lt=lt):
+            if check == "range" and isinstance(value, int) and not isinstance(value, bool):
+                below = (ge is not None and value < ge) or (gt is not None and value <= gt)
+                above = (le is not None and value > le) or (lt is not None and value >= lt)
+                if below or above:
+                    issues.append(DocumentIssue(path, OUT_OF_RANGE))
         case (
             mi.ListType(item_type=item, max_length=limit)
             | mi.VarTupleType(item_type=item, max_length=limit)
         ):
             if isinstance(value, list | tuple):
-                if counts and limit is not None and len(value) > limit:
+                if check == "count" and limit is not None and len(value) > limit:
                     issues.append(DocumentIssue(path, TOO_MANY))
                 for index, element in enumerate(value):
-                    _walk(element, item, f"{path}[{index}]", issues, counts=counts)
+                    _walk(element, item, f"{path}[{index}]", issues, check=check)
         case _:
             # int / UUID / enum / bool / ...: untouched by normalization.
             return
@@ -122,6 +153,9 @@ def _branch_for(value: object, branches: Iterable[mi.Type]) -> mi.Type | None:
         match branch:
             case mi.StrType():
                 if isinstance(value, str):
+                    return branch
+            case mi.IntType():
+                if isinstance(value, int) and not isinstance(value, bool):
                     return branch
             case mi.StructType(cls=cls):
                 if isinstance(value, cls):

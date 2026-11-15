@@ -999,3 +999,41 @@ class StudioExportTarget(StrEnum):
     """Third-party tool a track can be rendered for."""
 
     SUNO = "suno"
+
+
+class StudioRunKind(StrEnum):
+    """What a planner run produces. Declared in full so the CHECK needs no later migration."""
+
+    PLAN = "plan"
+    LYRICS = "lyrics"
+    REVISE_LYRICS = "revise_lyrics"
+
+
+class StudioRunStatus(StrEnum):
+    """Lifecycle of a planner run: ``queued → running → succeeded | failed``; ``queued → cancelled``."""
+
+    QUEUED = "queued"
+    RUNNING = "running"
+    SUCCEEDED = "succeeded"
+    FAILED = "failed"
+    CANCELLED = "cancelled"
+
+    @classmethod
+    def active(cls) -> frozenset[StudioRunStatus]:
+        """Statuses in which a run still holds its track (one such run per track)."""
+        return frozenset({cls.QUEUED, cls.RUNNING})
+
+    @classmethod
+    def terminal(cls) -> frozenset[StudioRunStatus]:
+        """Statuses a run never leaves."""
+        return frozenset({cls.SUCCEEDED, cls.FAILED, cls.CANCELLED})
+
+
+class StudioRunStage(StrEnum):
+    """Where a ``running`` run is. Informational; ``status`` is authoritative."""
+
+    CONTEXT = "context"
+    DRAFTING = "drafting"
+    VALIDATING = "validating"
+    REVISING = "revising"
+    SAVING = "saving"

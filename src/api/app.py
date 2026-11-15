@@ -63,6 +63,7 @@ from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
 from src.api.routes.studio_artists import StudioArtistController
 from src.api.routes.studio_projects import StudioProjectController
+from src.api.routes.studio_runs import StudioRunController
 from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
@@ -610,6 +611,7 @@ def create_app() -> Litestar:
             # Media Project Studio (404 unless STUDIO_ENABLED and the product has "studio")
             StudioArtistController,
             StudioProjectController,
+            StudioRunController,
             StudioTrackController,
             # Content proxy
             ContentProxyController,

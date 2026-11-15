@@ -18,7 +18,7 @@ from src.studio.errors import LyricsIncompatibleWithPlan, PlanRequired, StudioNo
 from src.studio.renderers import RENDERERS
 from src.studio.renderers.base import RenderContext
 from src.studio.renderers.projection import to_artist_render_input, to_renderable_plan
-from src.studio.services.mappers import decode_lyrics, decode_plan
+from src.studio.services.mappers import decode_lyrics, decode_plan, require_current_rows
 from src.studio.validation import check_pair_compatible
 
 if TYPE_CHECKING:
@@ -82,35 +82,40 @@ class ExportService:
             PlanRequired: No plan was requested and the track has no current plan.
             LyricsIncompatibleWithPlan: The chosen lyrics do not fit the chosen plan.
         """
-        track = await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
-        if track is None:
-            raise StudioNotFound
-
-        plan_id: UUID | None
-        lyrics_id: UUID | None
-        if plan_version_id is None and lyrics_version_id is None:
-            plan_id, lyrics_id = track.current_plan_version_id, track.current_lyrics_version_id
-        elif lyrics_version_id is None:  # explicit plan only -> that plan alone
-            plan_id, lyrics_id = plan_version_id, None
-        else:  # explicit lyrics, with or without an explicit plan
-            plan_id = plan_version_id or track.current_plan_version_id
-            lyrics_id = lyrics_version_id
-        if plan_id is None:
-            raise PlanRequired
-
-        plan_row = await self._version_of(
-            plan_id, track_id, StudioDocumentKind.PLAN, user_id, product_id
+        # The track and the rows its current pointers name come from ONE statement, so a
+        # concurrent "switch current + delete the old version" cannot make the current pair
+        # vanish half-way (a spurious 404). Versions the caller names keep their own lookup.
+        found = await self._tracks.get_with_current_versions(
+            track_id, user_id=user_id, product_id=product_id
         )
-        plan = decode_plan(plan_row)
-        lyrics_row: StudioDocumentVersion | None = None
-        lyrics = None
-        if lyrics_id is not None:
-            lyrics_row = await self._version_of(
-                lyrics_id, track_id, StudioDocumentKind.LYRICS, user_id, product_id
+        if found is None:
+            raise StudioNotFound
+        track = found[0]
+        current_plan_row, current_lyrics_row = require_current_rows(track, found[1], found[2])
+
+        plan_row = (
+            current_plan_row
+            if plan_version_id is None
+            else await self._version_of(
+                plan_version_id, track_id, StudioDocumentKind.PLAN, user_id, product_id
             )
+        )
+        if plan_row is None:
+            raise PlanRequired
+        lyrics_row: StudioDocumentVersion | None
+        if lyrics_version_id is not None:
+            lyrics_row = await self._version_of(
+                lyrics_version_id, track_id, StudioDocumentKind.LYRICS, user_id, product_id
+            )
+        elif plan_version_id is None:  # no ids at all: the current pair
+            lyrics_row = current_lyrics_row
+        else:  # explicit plan only -> that plan alone
+            lyrics_row = None
+        plan = decode_plan(plan_row)
+        lyrics = None
+        if lyrics_row is not None:
             lyrics = decode_lyrics(lyrics_row)
-            issues = check_pair_compatible(plan, lyrics)
-            if issues:
+            if issues := check_pair_compatible(plan, lyrics):
                 raise LyricsIncompatibleWithPlan(issues)
 
         profile = await self._profiles.get(

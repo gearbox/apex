@@ -15,6 +15,7 @@ Conventions (P1-9):
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 
 import msgspec
@@ -26,20 +27,23 @@ from sqlalchemy import (
     literal,
     literal_column,
     select,
+    text,
     tuple_,
     update,
 )
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import aliased
 
-from src.core.enums import StudioDocumentKind
+from src.core.enums import StudioDocumentKind, StudioRunStage, StudioRunStatus
 from src.core.uid import new_id
 from src.db.models.library import LibraryProject
 from src.db.models.studio import (
     StudioArtist,
     StudioDocumentVersion,
     StudioProjectProfile,
+    StudioRun,
     StudioTrack,
 )
 
@@ -57,6 +61,7 @@ __all__ = [
     "StudioArtistRepository",
     "StudioDocumentVersionRepository",
     "StudioProjectRepository",
+    "StudioRunRepository",
     "StudioTrackRepository",
     "VersionDeletionBlockers",
 ]
@@ -65,6 +70,9 @@ SIBLING_CONSTRAINT = "uq_studio_doc_versions_sibling_content"
 """Name of the UNIQUE NULLS NOT DISTINCT constraint that makes version create idempotent."""
 
 _FRESH: Mapping[str, Any] = {"populate_existing": True}
+
+_RUN_QUOTA_LOCK_NAMESPACE = 0x57_0D_10
+"""Advisory-lock namespace of the per-user run quota (first key of ``pg_advisory_xact_lock``)."""
 
 
 def _keyset[*Ts](
@@ -443,6 +451,33 @@ class StudioTrackRepository:
         )
         return result.scalar_one_or_none()
 
+    async def get_with_current_versions(
+        self, track_id: UUID, *, user_id: UUID, product_id: str
+    ) -> tuple[StudioTrack, StudioDocumentVersion | None, StudioDocumentVersion | None] | None:
+        """The track and the rows its current pointers name, read in ONE statement.
+
+        One statement is one ``READ COMMITTED`` snapshot, so the pointers and the rows always
+        agree: a concurrent "switch current + delete the old version" can never leave a pointer
+        read here naming a row that is gone. No lock is taken (the lock order is untouched).
+
+        Returns:
+            ``(track, current plan row, current lyrics row)``; a row is ``None`` exactly when its
+            pointer is ``None`` (the foreign keys make a dangling pointer impossible, so a caller
+            that sees a non-null pointer with a ``None`` row has found a broken invariant).
+            ``None`` when the track is not the caller's.
+        """
+        plan = aliased(StudioDocumentVersion)
+        lyrics = aliased(StudioDocumentVersion)
+        result = await self._session.execute(
+            select(StudioTrack, plan, lyrics)
+            .outerjoin(plan, plan.id == StudioTrack.current_plan_version_id)
+            .outerjoin(lyrics, lyrics.id == StudioTrack.current_lyrics_version_id)
+            .where(*self._owned(track_id, user_id, product_id))
+            .execution_options(**_FRESH)
+        )
+        row = result.one_or_none()
+        return None if row is None else (row[0], row[1], row[2])
+
     async def lock(self, track_id: UUID, *, user_id: UUID, product_id: str) -> StudioTrack | None:
         """``SELECT … FOR UPDATE`` the track: serializes version numbers and pointer changes."""
         result = await self._session.execute(
@@ -787,3 +822,340 @@ class StudioDocumentVersionRepository:
             .returning(StudioDocumentVersion.id)
         )
         return result.scalar_one_or_none() is not None
+
+
+class StudioRunRepository:
+    """Data access for ``studio_runs``.
+
+    Every state change is one guarded ``UPDATE … WHERE status = <expected> RETURNING`` that bumps
+    ``revision``; a method that returns ``None`` lost the race (the run is already past the state
+    the caller expected), which is how a run stays *terminal once*. No method commits or flushes.
+    Lock order across the studio: track row, then run rows.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    @staticmethod
+    def _owned(run_id: UUID, user_id: UUID, product_id: str) -> tuple[Any, ...]:
+        return (
+            StudioRun.id == run_id,
+            StudioRun.user_id == user_id,
+            StudioRun.product_id == product_id,
+        )
+
+    # -- create / read -----------------------------------------------------------------------
+
+    async def insert(
+        self,
+        *,
+        run_id: UUID,
+        user_id: UUID,
+        product_id: str,
+        track_id: UUID,
+        kind: str,
+        idempotency_key: str,
+        request_hash: str,
+        request: Mapping[str, object],
+        model_key: str,
+        price_tokens: int,
+    ) -> StudioRun:
+        """Insert a ``queued`` run.
+
+        Raises:
+            sqlalchemy.exc.IntegrityError: Another active run holds the track
+                (``uq_studio_runs_one_active_per_track``) or the idempotency key was taken
+                (``uq_studio_runs_user_idempotency``); call inside ``session.begin_nested()``.
+        """
+        result = await self._session.execute(
+            pg_insert(StudioRun)
+            .values(
+                id=run_id,
+                user_id=user_id,
+                product_id=product_id,
+                track_id=track_id,
+                kind=kind,
+                status=StudioRunStatus.QUEUED.value,
+                idempotency_key=idempotency_key,
+                request_hash=request_hash,
+                request=dict(request),
+                model_key=model_key,
+                price_tokens=price_tokens,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH)
+        )
+        return result.scalar_one()
+
+    async def set_billing_account(self, run_id: UUID, account_id: UUID) -> None:
+        """Record the account a run reserved on (set in the submit transaction, no revision bump)."""
+        await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id)
+            .values(billing_account_id=account_id)
+            .execution_options(synchronize_session=False)
+        )
+
+    async def get(self, run_id: UUID, *, user_id: UUID, product_id: str) -> StudioRun | None:
+        result = await self._session.execute(
+            select(StudioRun)
+            .where(*self._owned(run_id, user_id, product_id))
+            .execution_options(**_FRESH)
+        )
+        return result.scalar_one_or_none()
+
+    async def get_by_key(
+        self, *, user_id: UUID, product_id: str, idempotency_key: str
+    ) -> StudioRun | None:
+        result = await self._session.execute(
+            select(StudioRun)
+            .where(
+                StudioRun.user_id == user_id,
+                StudioRun.product_id == product_id,
+                StudioRun.idempotency_key == idempotency_key,
+            )
+            .execution_options(**_FRESH)
+        )
+        return result.scalar_one_or_none()
+
+    async def list_page(
+        self,
+        track_id: UUID,
+        *,
+        user_id: UUID,
+        product_id: str,
+        limit: int,
+        cursor_ts: datetime | None,
+        cursor_id: UUID | None,
+    ) -> Sequence[StudioRun]:
+        """Newest-first keyset page of a track's runs (``limit + 1`` rows)."""
+        query = select(StudioRun).where(
+            StudioRun.track_id == track_id,
+            StudioRun.user_id == user_id,
+            StudioRun.product_id == product_id,
+        )
+        result = await self._session.execute(
+            _keyset(
+                query, StudioRun.created_at, StudioRun.id, cursor_ts, cursor_id, limit
+            ).execution_options(**_FRESH)
+        )
+        return result.scalars().all()
+
+    # -- limits ------------------------------------------------------------------------------
+
+    async def lock_user_quota(self, user_id: UUID) -> None:
+        """Serialize the per-user limit checks of concurrent submits (released at commit).
+
+        Taken after the track lock; nothing takes it before one, so it joins no cycle. A hash
+        collision only serializes two unrelated users.
+        """
+        await self._session.execute(
+            text("SELECT pg_advisory_xact_lock(:ns, hashtext(:uid))"),
+            {"ns": _RUN_QUOTA_LOCK_NAMESPACE, "uid": str(user_id)},
+        )
+
+    async def count_created_in_last_hour(self, *, user_id: UUID, product_id: str) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(StudioRun)
+            .where(
+                StudioRun.user_id == user_id,
+                StudioRun.product_id == product_id,
+                StudioRun.created_at > func.now() - timedelta(hours=1),
+            )
+        )
+        return result.scalar_one()
+
+    async def count_active(self, *, user_id: UUID, product_id: str) -> int:
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(StudioRun)
+            .where(
+                StudioRun.user_id == user_id,
+                StudioRun.product_id == product_id,
+                StudioRun.status.in_([s.value for s in StudioRunStatus.active()]),
+            )
+        )
+        return result.scalar_one()
+
+    async def has_active_for_track(self, track_id: UUID) -> bool:
+        result = await self._session.execute(
+            select(StudioRun.id)
+            .where(
+                StudioRun.track_id == track_id,
+                StudioRun.status.in_([s.value for s in StudioRunStatus.active()]),
+            )
+            .limit(1)
+        )
+        return result.first() is not None
+
+    # -- transitions (all guarded; ``None`` = the run was no longer in the expected state) ---
+
+    async def cancel_queued(
+        self, run_id: UUID, *, user_id: UUID, product_id: str
+    ) -> StudioRun | None:
+        """``queued → cancelled``."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(
+                *self._owned(run_id, user_id, product_id),
+                StudioRun.status == StudioRunStatus.QUEUED.value,
+            )
+            .values(
+                status=StudioRunStatus.CANCELLED.value,
+                stage=None,
+                finished_at=func.now(),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def claim_queued(self, limit: int) -> Sequence[StudioRun]:
+        """Lock up to ``limit`` queued runs, oldest first, skipping rows another worker holds."""
+        result = await self._session.execute(
+            select(StudioRun)
+            .where(StudioRun.status == StudioRunStatus.QUEUED.value)
+            .order_by(StudioRun.created_at, StudioRun.id)
+            .limit(limit)
+            .with_for_update(skip_locked=True)
+            .execution_options(**_FRESH)
+        )
+        return result.scalars().all()
+
+    async def mark_running(
+        self,
+        run_id: UUID,
+        *,
+        lease_seconds: int,
+        model_id: str,
+        prompt_version: str,
+        context_snapshot: Mapping[str, object],
+    ) -> StudioRun | None:
+        """``queued → running`` (stage ``context``), stamping the lease and the snapshot."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.QUEUED.value)
+            .values(
+                status=StudioRunStatus.RUNNING.value,
+                stage=StudioRunStage.CONTEXT.value,
+                started_at=func.now(),
+                lease_expires_at=func.now() + timedelta(seconds=lease_seconds),
+                model_id=model_id,
+                prompt_version=prompt_version,
+                context_snapshot=dict(context_snapshot),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def set_stage(self, run_id: UUID, stage: StudioRunStage) -> StudioRun | None:
+        """Move a ``running`` run to ``stage``; ``None`` when it is no longer running."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.RUNNING.value)
+            .values(stage=stage.value, revision=StudioRun.revision + 1)
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def finish_succeeded(
+        self,
+        run_id: UUID,
+        *,
+        result_plan_version_id: UUID | None,
+        warnings: Sequence[Mapping[str, object]],
+        llm_calls: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> StudioRun | None:
+        """``running → succeeded``."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.RUNNING.value)
+            .values(
+                status=StudioRunStatus.SUCCEEDED.value,
+                stage=None,
+                result_plan_version_id=result_plan_version_id,
+                warnings=[dict(w) for w in warnings],
+                llm_calls=llm_calls,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                finished_at=func.now(),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def finish_failed(
+        self,
+        run_id: UUID,
+        *,
+        error_code: str,
+        error_detail: Mapping[str, object] | None,
+        llm_calls: int,
+        prompt_tokens: int,
+        completion_tokens: int,
+    ) -> StudioRun | None:
+        """``running → failed``."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.RUNNING.value)
+            .values(
+                status=StudioRunStatus.FAILED.value,
+                stage=None,
+                error_code=error_code,
+                error_detail=dict(error_detail) if error_detail is not None else None,
+                llm_calls=llm_calls,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                finished_at=func.now(),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def fail_queued(self, run_id: UUID, *, error_code: str) -> StudioRun | None:
+        """``queued → failed`` - a run the worker could not even start (context build failed)."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.QUEUED.value)
+            .values(
+                status=StudioRunStatus.FAILED.value,
+                stage=None,
+                error_code=error_code,
+                finished_at=func.now(),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalar_one_or_none()
+
+    async def sweep_expired(self, *, error_code: str) -> Sequence[StudioRun]:
+        """``running`` runs past their lease → ``failed`` (one statement; takes only run locks)."""
+        result = await self._session.execute(
+            update(StudioRun)
+            .where(
+                StudioRun.status == StudioRunStatus.RUNNING.value,
+                StudioRun.lease_expires_at < func.now(),
+            )
+            .values(
+                status=StudioRunStatus.FAILED.value,
+                stage=None,
+                error_code=error_code,
+                finished_at=func.now(),
+                revision=StudioRun.revision + 1,
+            )
+            .returning(StudioRun)
+            .execution_options(**_FRESH, synchronize_session=False)
+        )
+        return result.scalars().all()

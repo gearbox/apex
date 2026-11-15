@@ -20,16 +20,20 @@ if TYPE_CHECKING:
 _MIGRATION_PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "055_studio_foundation.py"
 )
+_MIGRATION_057_PATH = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "057_studio_runs.py"
+)
 _TABLES = (
     "studio_artists",
     "studio_project_profiles",
     "studio_tracks",
     "studio_document_versions",
+    "studio_runs",  # added by 057; it references the tracks, so 055 cannot be undone without it
 )
 
 
-def _load_migration() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("revision_055", _MIGRATION_PATH)
+def _load_migration(path: Path = _MIGRATION_PATH, name: str = "revision_055") -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -37,8 +41,12 @@ def _load_migration() -> ModuleType:
     return module
 
 
-def _run(connection: Connection, action: str) -> None:
-    migration = _load_migration()
+def _run(connection: Connection, action: str, *, revision: str = "055") -> None:
+    migration = (
+        _load_migration()
+        if revision == "055"
+        else _load_migration(_MIGRATION_057_PATH, "revision_057")
+    )
     with Operations.context(MigrationContext.configure(connection)):
         getattr(migration, action)()
 
@@ -72,10 +80,13 @@ async def test_upgrade_downgrade_upgrade_round_trip(db_engine: AsyncEngine) -> N
         transaction = await connection.begin()
         assert await _tables(connection) == set(_TABLES)
 
+        # newest first: 057's table references 055's tracks
+        await connection.run_sync(_run, "downgrade", revision="057")
         await connection.run_sync(_run, "downgrade")
         assert await _tables(connection) == set()
 
         await connection.run_sync(_run, "upgrade")
+        await connection.run_sync(_run, "upgrade", revision="057")
         assert await _tables(connection) == set(_TABLES)
         await transaction.rollback()
 

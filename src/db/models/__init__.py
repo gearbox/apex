@@ -35,7 +35,13 @@ from .storage import (
     StorageCleanupRecord,
     UserImage,
 )
-from .studio import StudioArtist, StudioDocumentVersion, StudioProjectProfile, StudioTrack
+from .studio import (
+    StudioArtist,
+    StudioDocumentVersion,
+    StudioProjectProfile,
+    StudioRun,
+    StudioTrack,
+)
 from .user import RefreshToken, User
 from .user_identity import UserIdentity
 
@@ -78,6 +84,7 @@ __all__ = [
     "StudioArtist",
     "StudioDocumentVersion",
     "StudioProjectProfile",
+    "StudioRun",
     "StudioTrack",
     "TokenAccount",
     "TokenTransaction",

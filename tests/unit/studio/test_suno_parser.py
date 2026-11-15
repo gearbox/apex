@@ -252,7 +252,9 @@ class TestTextHandling:
 
     def test_deterministic(self) -> None:
         text = "[Verse]\n[soft]\na\n\n[Chorus: x]\nb"
-        assert parse(text, "a, b, 120 bpm", "c") == parse(text, "a, b, 120 bpm", "c")
+        first = parse(text, "a, b, 120 bpm", "c")
+        second = parse(text, "a, b, 120 bpm", "c")
+        assert first == second
 
 
 class TestInlineTags:
@@ -340,5 +342,6 @@ class TestStyleAndExclude:
         assert parsed == ParsedSuno((), None, (), (), ())
 
     def test_warnings_are_comparable_values(self) -> None:
-        assert ImportWarning("x", 3) == ImportWarning("x", 3)
+        parsed = parse("[Verse]\na\n[whispered]")  # a delivery tag with no line after it
+        assert parsed.warnings == (ImportWarning("dangling_delivery", 3),)
         assert ImportWarning("x") != ImportWarning("x", 3)

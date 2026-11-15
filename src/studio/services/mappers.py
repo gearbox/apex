@@ -12,11 +12,19 @@ from src.api.schemas.studio import (
     TrackOut,
     VersionSummary,
 )
-from src.core.enums import StudioDocumentKind, StudioDocumentOrigin, StudioReleaseKind
+from src.api.schemas.studio_runs import RunOut, RunWarningOut
+from src.core.enums import (
+    StudioDocumentKind,
+    StudioDocumentOrigin,
+    StudioReleaseKind,
+    StudioRunKind,
+    StudioRunStage,
+    StudioRunStatus,
+)
 from src.studio.documents import LyricsDocument, PlanDocument, decode_stored
 
 if TYPE_CHECKING:
-    from src.db.models.studio import StudioArtist, StudioDocumentVersion, StudioTrack
+    from src.db.models.studio import StudioArtist, StudioDocumentVersion, StudioRun, StudioTrack
     from src.db.repositories.studio import ProjectListRow
 
 __all__ = [
@@ -29,6 +37,8 @@ __all__ = [
     "plan_version_detail",
     "project_out",
     "require_current_row",
+    "require_current_rows",
+    "run_out",
     "track_out",
     "version_detail",
     "version_summary",
@@ -97,6 +107,27 @@ def require_current_row(row: StudioDocumentVersion | None) -> StudioDocumentVers
     if row is None:
         raise RuntimeError(DANGLING_CURRENT_POINTER)
     return row
+
+
+def require_current_rows(
+    track: StudioTrack,
+    plan_row: StudioDocumentVersion | None,
+    lyrics_row: StudioDocumentVersion | None,
+) -> tuple[StudioDocumentVersion | None, StudioDocumentVersion | None]:
+    """The rows of a track's current pointers, as read together with the track in one statement.
+
+    A row is ``None`` exactly when its pointer is. Because the pointers and the rows came from
+    one snapshot (``StudioTrackRepository.get_with_current_versions``), a non-null pointer without
+    its row is the broken invariant of :func:`require_current_row`, not a race.
+
+    Raises:
+        RuntimeError: A non-null pointer has no row.
+    """
+    if track.current_plan_version_id is not None:
+        plan_row = require_current_row(plan_row)
+    if track.current_lyrics_version_id is not None:
+        lyrics_row = require_current_row(lyrics_row)
+    return plan_row, lyrics_row
 
 
 def decode_plan(version: StudioDocumentVersion) -> PlanDocument:
@@ -181,4 +212,27 @@ def version_detail(
         )
     return lyrics_version_detail(
         version, track, document if isinstance(document, LyricsDocument) else None
+    )
+
+
+def run_out(row: StudioRun) -> RunOut:
+    """The API view of a run row - ids, codes and timestamps only."""
+    return RunOut(
+        id=row.id,
+        track_id=row.track_id,
+        kind=StudioRunKind(row.kind),
+        status=StudioRunStatus(row.status),
+        stage=StudioRunStage(row.stage) if row.stage is not None else None,
+        revision=row.revision,
+        price_tokens=row.price_tokens,
+        model_key=row.model_key,
+        result_plan_version_id=row.result_plan_version_id,
+        result_lyrics_version_id=row.result_lyrics_version_id,
+        warnings=[RunWarningOut(code=str(w["code"]), path=w.get("path")) for w in row.warnings],
+        error_code=row.error_code,
+        error_detail=row.error_detail,
+        llm_calls=row.llm_calls,
+        created_at=row.created_at,
+        started_at=row.started_at,
+        finished_at=row.finished_at,
     )

@@ -9,13 +9,14 @@ import structlog
 
 from src.api.schemas.studio import TrackCreate, TrackDetail, TrackOut, TrackPatch
 from src.db.repositories.studio import (
-    StudioDocumentVersionRepository,
     StudioProjectRepository,
+    StudioRunRepository,
     StudioTrackRepository,
 )
 from src.studio.constraints import collect_length_issues
 from src.studio.errors import (
     DocumentIssue,
+    RunInProgress,
     StudioDocumentInvalid,
     StudioNotFound,
     TrackLimitReached,
@@ -24,7 +25,7 @@ from src.studio.errors import (
 from src.studio.services.mappers import (
     lyrics_version_detail,
     plan_version_detail,
-    require_current_row,
+    require_current_rows,
     track_out,
 )
 from src.studio.validation import normalize_text
@@ -66,7 +67,7 @@ class TrackService:
         self._session = session
         self._profiles = StudioProjectRepository(session)
         self._tracks = StudioTrackRepository(session)
-        self._versions = StudioDocumentVersionRepository(session)
+        self._runs = StudioRunRepository(session)
 
     async def create(
         self, library_project_id: UUID, user_id: UUID, product_id: str, title: str
@@ -144,23 +145,21 @@ class TrackService:
         return [track_out(t) for t in reordered]
 
     async def get_detail(self, track_id: UUID, user_id: UUID, product_id: str) -> TrackDetail:
-        track = await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
-        if track is None:
+        # The track and the rows its pointers name come from ONE statement, so a concurrent
+        # "switch current + delete the old version" cannot leave a pointer without its row.
+        found = await self._tracks.get_with_current_versions(
+            track_id, user_id=user_id, product_id=product_id
+        )
+        if found is None:
             raise StudioNotFound
+        track = found[0]
         # A non-null pointer whose row cannot be read is a broken invariant: raise (RD5), do not
         # return a track that silently claims to have no current document.
-        current_plan = None
-        if track.current_plan_version_id is not None:
-            row = await self._versions.get_on_track(
-                track.current_plan_version_id, track_id, user_id=user_id, product_id=product_id
-            )
-            current_plan = plan_version_detail(require_current_row(row), track)
-        current_lyrics = None
-        if track.current_lyrics_version_id is not None:
-            row = await self._versions.get_on_track(
-                track.current_lyrics_version_id, track_id, user_id=user_id, product_id=product_id
-            )
-            current_lyrics = lyrics_version_detail(require_current_row(row), track)
+        plan_row, lyrics_row = require_current_rows(track, found[1], found[2])
+        current_plan = plan_version_detail(plan_row, track) if plan_row is not None else None
+        current_lyrics = (
+            lyrics_version_detail(lyrics_row, track) if lyrics_row is not None else None
+        )
         base = track_out(track)
         return TrackDetail(
             id=base.id,
@@ -195,7 +194,14 @@ class TrackService:
         return track_out(updated)
 
     async def delete(self, track_id: UUID, user_id: UUID, product_id: str) -> None:
-        """Delete a track and (by cascade) all its versions. Positions of the others are kept."""
+        """Delete a track and (by cascade) all its versions and finished runs.
+
+        Positions of the others are kept.
+
+        Raises:
+            StudioNotFound: No such track for the caller.
+            RunInProgress: The track has a queued or running run.
+        """
         # Lock order is always profile -> track, so a delete cannot interleave with a reorder.
         track = await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
         if track is None:
@@ -204,6 +210,10 @@ class TrackService:
         track = await self._tracks.lock(track_id, user_id=user_id, product_id=product_id)
         if track is None:  # deleted while waiting for the profile lock
             raise StudioNotFound
+        # A cascade would delete a queued / running run - and its paid reservation - unrefunded.
+        # Submit needs this track's lock too, so no run can become active after this check.
+        if await self._runs.has_active_for_track(track_id):
+            raise RunInProgress
         await self._tracks.delete(track_id, user_id=user_id, product_id=product_id)
         logger.info(
             "studio.track_deleted", track_id=str(track_id), project_id=str(track.library_project_id)

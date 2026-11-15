@@ -15,7 +15,6 @@ Keeping them in this one pure module is what makes ``render -> import -> render`
 
 from __future__ import annotations
 
-import re
 from typing import TYPE_CHECKING, Final
 
 from src.core.enums import StudioSectionKind as K
@@ -68,8 +67,25 @@ _DISPLAY_NAMES: Final[Mapping[K, str]] = {
     K.POST_CHORUS: "Post-Chorus",
 }
 
-_HEADER: Final = re.compile(r"^(?P<name>.+?)(?:\s+(?P<n>\d{1,2}))?$")
-"""A header name with an optional trailing number: ``Verse``, ``Verse 2``, ``Pre-Chorus 12``."""
+_MAX_NUMBER_DIGITS: Final = 2
+"""A header name may end in a number of one or two digits (``Verse 2``, ``Pre-Chorus 12``)."""
+
+
+def _base_name(name: str) -> str | None:
+    """``name`` without an optional trailing ``<whitespace><1-2 digits>``; ``None`` if it is empty
+    or spans lines. Linear time.
+
+    Reads from the end, so there is nothing to backtrack over: a header line can be as long as the
+    Lyrics box allows (20,000 characters) and ``resolve_kind`` runs for every bracket line.
+    """
+    text = name.strip()
+    end = len(text)
+    start = end
+    while start > 0 and end - start < _MAX_NUMBER_DIGITS and text[start - 1].isdecimal():
+        start -= 1
+    if start < end and text[start - 1 : start].isspace():
+        text = text[:start].rstrip()
+    return text if text and "\n" not in text else None
 
 
 def _key(name: str) -> str:
@@ -117,10 +133,8 @@ def resolve_kind(name: str) -> K | None:
     A trailing number of one or two digits is ignored. Matching is casefolded and treats ``-``
     like a space, so ``Pre-Chorus``, ``pre chorus`` and ``PRE-CHORUS 2`` are the same name.
     """
-    match = _HEADER.match(name.strip())
-    if match is None:
-        return None
-    return ALIASES.get(_key(match.group("name")))
+    base = _base_name(name)
+    return None if base is None else ALIASES.get(_key(base))
 
 
 def split_header(content: str) -> tuple[str, list[str]]:

@@ -52,6 +52,7 @@ class EventType(StrEnum):
     GPU_SESSION_CREDIT_WARNING = "gpu_session.credit_warning"
     GPU_DEPLOYMENT_STATUS_CHANGED = "gpu_session.deployment_status_changed"
     GPU_SESSION_OPERATION_UPDATED = "gpu_session.operation_updated"
+    STUDIO_RUN_UPDATED = "studio.run.updated"
 
 
 # --- Payloads ---
@@ -130,6 +131,23 @@ class GpuSessionCreditWarningPayload(msgspec.Struct, kw_only=True):
     minutes_remaining: int
     terminate_at: datetime | None
     balance: int
+
+
+class StudioRunUpdatedPayload(msgspec.Struct, kw_only=True):
+    """Emitted after every committed status or stage change of a studio planner run.
+
+    ``revision`` strictly increases with every change; a client applies a frame only when its
+    ``revision`` is greater than the cached one (delivery is lossy, ``GET /v1/studio/runs/{id}``
+    is the fallback). Carries ids and codes only - never the brief, the prompts or model output.
+    """
+
+    run_id: UUID
+    track_id: UUID
+    kind: str
+    status: str
+    stage: str | None
+    revision: int
+    error_code: str | None = None
 
 
 # --- Envelope ---

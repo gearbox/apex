@@ -22,13 +22,22 @@ __all__ = [
     "ArtistNameConflict",
     "ArtistNotFound",
     "DocumentIssue",
+    "IdempotencyConflict",
+    "IdempotencyKeyRequired",
     "ImportInvalid",
     "InvalidCursor",
     "LyricsIncompatibleWithPlan",
+    "MemoriesNotAvailable",
     "ParentVersionNotFound",
     "PlanRequired",
     "PlanVersionNotFound",
     "ProjectHasTracks",
+    "RunInProgress",
+    "RunKindNotAvailable",
+    "RunLimitReached",
+    "RunNotCancellable",
+    "RunNotFound",
+    "RunRateLimited",
     "StudioDocumentInvalid",
     "StudioDocumentSchemaError",
     "StudioError",
@@ -103,7 +112,39 @@ class PlanVersionNotFound(StudioError):
     message = "Plan version not found on this track."
 
 
+class RunNotFound(StudioError):
+    """No such run for the caller."""
+
+    code = "run_not_found"
+    status_code = 404
+    message = "Run not found."
+
+
 # --- 400 / 422 -------------------------------------------------------------------------------
+
+
+class IdempotencyKeyRequired(StudioError):
+    """``POST .../runs`` needs a usable ``Idempotency-Key`` header (1-128 characters)."""
+
+    code = "idempotency_key_required"
+    status_code = 400
+    message = "An Idempotency-Key header of 1 to 128 characters is required."
+
+
+class RunKindNotAvailable(StudioError):
+    """The run kind is declared but not implemented yet."""
+
+    code = "run_kind_not_available"
+    status_code = 422
+    message = "This kind of run is not available yet."
+
+
+class MemoriesNotAvailable(StudioError):
+    """Artist memories cannot ground a run yet."""
+
+    code = "memories_not_available"
+    status_code = 422
+    message = "Artist memories are not available yet."
 
 
 class InvalidCursor(StudioError):
@@ -226,6 +267,46 @@ class LyricsIncompatibleWithPlan(StudioError):
     def __init__(self, issues: tuple[DocumentIssue, ...]) -> None:
         super().__init__(_issues_detail(issues))
         self.issues = issues
+
+
+class RunInProgress(StudioError):
+    """The track already has a queued or running run (also: the track cannot be deleted)."""
+
+    code = "run_in_progress"
+    status_code = 409
+    message = "The track already has a run in progress."
+
+
+class RunLimitReached(StudioError):
+    """The user already has the maximum number of queued or running runs."""
+
+    code = "run_limit_reached"
+    status_code = 409
+    message = "The maximum number of active runs has been reached."
+
+
+class RunNotCancellable(StudioError):
+    """Only a ``queued`` run can be cancelled."""
+
+    code = "run_not_cancellable"
+    status_code = 409
+    message = "Only a queued run can be cancelled."
+
+
+class IdempotencyConflict(StudioError):
+    """The Idempotency-Key was already used for a different request."""
+
+    code = "idempotency_conflict"
+    status_code = 409
+    message = "This Idempotency-Key was already used with a different request."
+
+
+class RunRateLimited(StudioError):
+    """Too many runs created in the last hour."""
+
+    code = "run_rate_limited"
+    status_code = 429
+    message = "Too many runs were started recently; try again later."
 
 
 class VersionIsCurrent(StudioError):
