@@ -21,6 +21,9 @@ _THIRD_PARTY_LOGGER_LEVELS: Final[dict[str, int]] = {
     "httpcore": logging.WARNING,
     "httpx": logging.WARNING,
     "urllib3": logging.WARNING,
+    # Studio planner runs: nothing from the graph runtime or its tracing client belongs in logs.
+    "langgraph": logging.WARNING,
+    "langsmith": logging.WARNING,
 }
 
 

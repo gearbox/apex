@@ -327,6 +327,17 @@ enabled (independently of `*_VIDEO_WORKER_IN_PROCESS`); a standalone worker is o
 | Variable | Default | Type | Description |
 |----------|---------|------|-------------|
 | `STUDIO_ENABLED` | `false` | `bool` | Global kill switch for `/v1/studio/*`. Studio is exposed only when this is `true` **and** the resolved product lists the `studio` feature (both `vex` and `synthara` do). Otherwise every studio route answers `404` — before authentication and before any DB access — so a disabled feature is indistinguishable from a route that does not exist. Contract: `docs/contracts/studio-contract.md`. |
+| `STUDIO_RUNS_ENABLED` | `false` | `bool` | Separate kill switch for LLM spend. When `false` the four run routes answer `404` and the run worker is not started. When `true`, startup fails unless the model registry below is valid and no LangSmith / LangChain tracing is enabled (`LANGSMITH_TRACING`, `LANGCHAIN_TRACING_V2` truthy, or `LANGSMITH_API_KEY` / `LANGCHAIN_API_KEY` set) — prompts must reach the LLM provider only. Only has effect together with `STUDIO_ENABLED`. |
+| `STUDIO_LLM_MODELS` | `{}` | `json` | Model registry: a JSON object `key → entry`. Entry: `base_url` (https origin + path up to, **not** including, `/chat/completions`), `api_key_env` (the **name** of a process environment variable that holds the key — it must be a real env var, e.g. from compose `env_file`; the key is never configured here and never logged), `model`, `structured_output` (`json_schema` default \| `json_object`), `max_output_tokens` (256–32000, default 8000), `timeout_s` (5–300, default 90), `temperature` (optional), `extra_body` (merged into the request last; may not set `model`, `messages` or `response_format`). Two entries ship in `.env.example`: `grok` and `qwen`. |
+| `STUDIO_LLM_DEFAULT_MODEL` | `grok` | `str` | Registry key used by every run kind without a `STUDIO_LLM_MODEL_BY_KIND` entry. Must be a key of `STUDIO_LLM_MODELS` when runs are enabled. Users never choose the model. |
+| `STUDIO_LLM_MODEL_BY_KIND` | `{}` | `json` | Optional `kind → registry key`, e.g. `{"plan":"qwen"}`. |
+| `STUDIO_RUN_PRICES` | `{"plan":1,"lyrics":1,"revise_lyrics":1}` | `json` | Tokens per run kind (each `>= 0`), reserved when the run is accepted and refunded in full when it fails or is cancelled. `0` writes no ledger rows. |
+| `STUDIO_RUN_DEADLINE_SECONDS` | `180` | `int (30–600)` | Wall-clock budget of one run once it starts. A run past its lease is failed `run_timeout` and refunded; it is never executed twice. |
+| `STUDIO_RUN_MAX_CONCURRENT` | `4` | `int (1–16)` | Runs one worker process executes at once. |
+| `STUDIO_RUN_MAX_ACTIVE_PER_USER` | `3` | `int` | Queued + running runs one user may have (`409 run_limit_reached`). One active run per track is a database constraint (`409 run_in_progress`). |
+| `STUDIO_RUNS_PER_USER_PER_HOUR` | `30` | `int` | Runs one user may create per rolling hour, counted in the database (`429 run_rate_limited`). |
+| `STUDIO_RUN_WORKER_INTERVAL_SECONDS` | `2` | `int (1–60)` | Seconds between run-worker ticks. |
+| `STUDIO_RUN_WORKER_IN_PROCESS` | `true` | `bool` | Start the run worker in this process (leader-elected like the other workers). |
 
 ---
 

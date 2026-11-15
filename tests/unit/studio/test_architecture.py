@@ -31,7 +31,9 @@ STUDIO_FILES = sorted(
         SRC / "db/repositories/studio.py",
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
+        SRC / "api/schemas/studio_runs.py",
         SRC / "api/security/studio.py",
+        SRC / "workers/studio_run.py",
     }
 )
 
@@ -98,10 +100,13 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 3
+    assert len(controllers) == 4
     for path in controllers:
         text = path.read_text()
-        assert "guards = [studio_feature_guard, auth_guard]" in text, path
+        if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth
+            assert "guards = [studio_feature_guard, studio_runs_guard, auth_guard]" in text, path
+        else:
+            assert "guards = [studio_feature_guard, auth_guard]" in text, path
         assert "guards = [auth_guard" not in text, path
 
 
@@ -238,3 +243,140 @@ def test_the_contract_documents_what_p1b_added() -> None:
 def test_hypothesis_is_a_pinned_dev_dependency() -> None:
     assert re.search(r'"hypothesis>=6', (ROOT / "pyproject.toml").read_text())
     assert re.search(r'^name = "hypothesis"', (ROOT / "uv.lock").read_text(), flags=re.MULTILINE)
+
+
+# -- S1-P2a-A: the verification greps of the planner-runs prompt, as durable tests ---------------
+
+PLANNER = SRC / "studio/planner"
+EXECUTOR = SRC / "studio/services/run_executor.py"
+RUN_SERVICE = SRC / "studio/services/run.py"
+
+
+def test_langgraph_is_a_pinned_dependency() -> None:
+    assert re.search(r'"langgraph>=1\.2,<2"', (ROOT / "pyproject.toml").read_text())
+    assert re.search(r'^name = "langgraph"$', (ROOT / "uv.lock").read_text(), flags=re.MULTILINE)
+
+
+def test_langgraph_is_imported_only_under_the_planner_graphs() -> None:
+    allowed = SRC / "studio/planner/graphs"
+    offenders = [
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if allowed not in path.parents
+        and any(m == "langgraph" or m.startswith("langgraph.") for m in _imported_modules(path))
+    ]
+    assert not offenders, offenders
+
+
+def test_no_langchain_or_vendor_sdk_is_a_dependency() -> None:
+    text = (ROOT / "pyproject.toml").read_text()
+    for name in ("langchain", "langchain-openai", "openai", "xai-sdk-chat"):
+        assert not re.search(rf'"{name}[>=<~ "]', text), name
+
+
+@pytest.mark.parametrize(
+    "path", sorted(PLANNER.rglob("*.py")), ids=lambda p: str(p.relative_to(SRC))
+)
+def test_the_planner_imports_ports_only(path: Path) -> None:
+    for module in _imported_modules(path):
+        root = module.split(".")[0]
+        assert root not in {"httpx", "sqlalchemy"}, (path.name, module)
+        assert not module.startswith("src.api"), (path.name, module)
+        assert not module.startswith("src.db"), (path.name, module)
+
+
+def test_the_adapter_names_no_vendor() -> None:
+    text = (SRC / "studio/llm/openai_compatible.py").read_text().replace("OpenAICompatible", "")
+    assert not re.search(r"xai|grok|qwen|dashscope|aliyun|openai", text, flags=re.IGNORECASE)
+
+
+def test_no_model_id_or_vendor_literal_in_the_studio_runs_code() -> None:
+    files = [
+        *SRC.glob("studio/llm/*.py"),
+        *SRC.glob("studio/planner/**/*.py"),
+        SRC / "studio/run_requests.py",
+        SRC / "studio/run_failures.py",
+        SRC / "studio/services/run.py",
+        SRC / "studio/services/run_executor.py",
+        SRC / "studio/services/run_context.py",
+        SRC / "core/llm_models.py",
+        SRC / "workers/studio_run.py",
+    ]
+    for path in files:
+        literals = _code_string_literals(path)
+        assert not [
+            lit for lit in literals if re.search(r"grok|qwen|xai|dashscope|gpt-|claude-", lit, re.I)
+        ], path
+
+
+def test_the_tracing_switches_are_named_only_by_the_startup_guard() -> None:
+    offenders = [
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if re.search(r"LANGSMITH_TRACING|LANGCHAIN_TRACING_V2", path.read_text())
+    ]
+    assert offenders == ["core/llm_tracing.py"]
+
+
+def test_the_graphs_package_pins_tracing_before_langgraph_is_imported() -> None:
+    init = (PLANNER / "graphs/__init__.py").read_text()
+    assert "force_tracing_off()" in init
+    assert "langgraph" not in "".join(
+        line for line in init.splitlines() if line.startswith(("import", "from"))
+    )
+
+
+def test_llm_origin_is_written_in_exactly_one_place() -> None:
+    assert EXECUTOR.read_text().count("origin=StudioDocumentOrigin.LLM") == 1
+    assert "StudioDocumentOrigin" not in RUN_SERVICE.read_text()
+
+
+def test_broad_excepts_exist_only_as_the_documented_run_guards() -> None:
+    """The executor's claim and run guards are the only places a broad error is caught."""
+    assert not re.search(r"except\s+(StudioError|Exception)", RUN_SERVICE.read_text())
+    executor = EXECUTOR.read_text()
+    assert len(re.findall(r"except\s+Exception", executor)) == 2  # claim guard + run guard
+    assert len(re.findall(r"except\s+StudioError", executor)) == 1  # the save step's refusals
+    assert re.findall(r"except\s+VersionUnchanged", executor) == ["except VersionUnchanged"]
+    assert not re.search(r"except\s*:", executor)
+
+
+def test_the_active_run_index_is_named_in_the_migration_and_matched_in_the_service() -> None:
+    migration = (ROOT / "alembic/versions/057_studio_runs.py").read_text()
+    assert "uq_studio_runs_one_active_per_track" in migration
+    assert "uq_studio_runs_one_active_per_track" in (SRC / "db/models/studio.py").read_text()
+    assert "RUN_ONE_ACTIVE_PER_TRACK" in RUN_SERVICE.read_text()
+
+
+def test_the_migration_is_057_after_056() -> None:
+    text = (ROOT / "alembic/versions/057_studio_runs.py").read_text()
+    assert 'revision: str = "057"' in text
+    assert re.search(r'down_revision: str \| Sequence\[str\] \| None = "056"', text)
+
+
+def test_the_run_workers_lease_name_is_stable() -> None:
+    assert 'WORKER_NAME: Final = "studio_run"' in (SRC / "workers/studio_run.py").read_text()
+
+
+def test_the_runs_are_only_wired_behind_the_runs_active_switch() -> None:
+    common = (SRC / "api/dependencies/common.py").read_text()
+    assert common.count("_start_studio_run_worker(") == 2  # the definition and the one call
+    block = common[common.index("if settings.studio_runs_active:") :]
+    assert "_start_studio_run_worker(" in block.split("# Initialize Web Push")[0]
+
+
+def test_the_contract_has_a_planner_runs_section() -> None:
+    contract = (ROOT / "docs/contracts/studio-contract.md").read_text()
+    assert len(re.findall(r"^## 11\. Planner runs", contract, flags=re.MULTILINE)) == 1
+    for needle in (
+        "studio.run.updated",
+        "run_in_progress",
+        "run_not_cancellable",
+        "idempotency_conflict",
+        "plan_invalid",
+        "run_timeout",
+        "content_policy_refused",
+        "Idempotency-Key",
+        "never made current",
+    ):
+        assert needle in contract, needle

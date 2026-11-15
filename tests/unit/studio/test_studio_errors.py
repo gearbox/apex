@@ -41,6 +41,15 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.VersionIsCurrent, 409, "version_is_current"),
     (lambda: e.VersionHasChildren(2), 409, "version_has_children"),
     (lambda: e.VersionIsLyricsBase(1), 409, "version_is_lyrics_base"),
+    (e.RunNotFound, 404, "run_not_found"),
+    (e.IdempotencyKeyRequired, 400, "idempotency_key_required"),
+    (e.RunKindNotAvailable, 422, "run_kind_not_available"),
+    (e.MemoriesNotAvailable, 422, "memories_not_available"),
+    (e.RunInProgress, 409, "run_in_progress"),
+    (e.RunLimitReached, 409, "run_limit_reached"),
+    (e.RunNotCancellable, 409, "run_not_cancellable"),
+    (e.IdempotencyConflict, 409, "idempotency_conflict"),
+    (e.RunRateLimited, 429, "run_rate_limited"),
 ]
 
 

@@ -4,7 +4,7 @@ import base64
 import binascii
 from functools import lru_cache
 from pathlib import Path
-from typing import Annotated, Literal
+from typing import Annotated, Any, Literal
 from urllib.parse import urlparse
 
 from annotated_types import Le
@@ -19,7 +19,9 @@ from src.core.constants import (
     PROVISIONING_REF_PATTERN,
     validate_dev_ref_is_route_safe,
 )
-from src.core.enums import GitHubAuthMode, WorkerMode
+from src.core.enums import GitHubAuthMode, StudioRunKind, WorkerMode
+from src.core.llm_models import LlmModelEntry, parse_model_entries, validate_model_entries
+from src.core.llm_tracing import TracingEnabledError, force_tracing_off
 from src.core.product_registry import PRODUCT_REGISTRY
 from src.core.topup_pricing import build_tiers
 
@@ -972,6 +974,60 @@ class Settings(BaseSettings):
         description=(
             "Global kill switch for /v1/studio (env STUDIO_ENABLED). When false every studio "
             "route answers 404, whatever the product's 'studio' feature flag says."
+        ),
+    )
+    studio_runs_enabled: bool = Field(
+        default=False,
+        description=(
+            "Separate kill switch for LLM spend (env STUDIO_RUNS_ENABLED). When false the studio "
+            "run routes answer 404 and the run worker is not started. Requires "
+            "STUDIO_LLM_MODELS / STUDIO_LLM_DEFAULT_MODEL to be valid when true."
+        ),
+    )
+    studio_llm_models: dict[str, dict[str, Any]] = Field(
+        default_factory=dict,
+        description=(
+            "Model registry (env STUDIO_LLM_MODELS, a JSON object): key -> {base_url, "
+            "api_key_env, model, structured_output, max_output_tokens, timeout_s, temperature, "
+            "extra_body}. api_key_env is the NAME of a process environment variable; the key "
+            "itself is never configured here."
+        ),
+    )
+    studio_llm_default_model: str = Field(
+        default="grok",
+        description="Registry key used by every run kind without a studio_llm_model_by_kind entry.",
+    )
+    studio_llm_model_by_kind: dict[StudioRunKind, str] = Field(
+        default_factory=dict,
+        description='Optional run kind -> registry key, e.g. {"plan": "qwen"}.',
+    )
+    studio_run_prices: dict[StudioRunKind, Annotated[int, Field(ge=0)]] = Field(
+        default={StudioRunKind.PLAN: 1, StudioRunKind.LYRICS: 1, StudioRunKind.REVISE_LYRICS: 1},
+        description=(
+            "Tokens charged per run kind (env STUDIO_RUN_PRICES, a JSON object). Reserved when the "
+            "run is accepted; refunded in full when it fails or is cancelled. 0 writes no ledger rows."
+        ),
+    )
+    studio_run_deadline_seconds: int = Field(
+        default=180, ge=30, le=600, description="Wall-clock budget of one run once it starts."
+    )
+    studio_run_max_concurrent: int = Field(
+        default=4, ge=1, le=16, description="Runs one worker process executes at the same time."
+    )
+    studio_run_max_active_per_user: int = Field(
+        default=3, ge=1, le=50, description="Queued + running runs one user may have."
+    )
+    studio_runs_per_user_per_hour: int = Field(
+        default=30, ge=1, le=10_000, description="Runs one user may create per rolling hour."
+    )
+    studio_run_worker_interval_seconds: int = Field(
+        default=2, ge=1, le=60, description="Seconds between run-worker ticks (sweep + claim)."
+    )
+    studio_run_worker_in_process: bool = Field(
+        default=True,
+        description=(
+            "Start the studio run worker in-process. Set false only when another process runs it; "
+            "without any worker, runs stay queued (and can be cancelled)."
         ),
     )
 
@@ -2141,6 +2197,34 @@ class Settings(BaseSettings):
         return self
 
     @model_validator(mode="after")
+    def validate_studio_runs(self) -> "Settings":
+        """Fail loud on an unusable studio run configuration - before any worker starts.
+
+        Checked only when ``STUDIO_RUNS_ENABLED`` is on, so a disabled feature never blocks boot.
+        Messages name the setting and never an environment value (the API key itself is looked up
+        when the registry is built, see ``src/studio/llm/registry.py``).
+        """
+        missing_prices = set(StudioRunKind) - self.studio_run_prices.keys()
+        if missing_prices:
+            raise ValueError(
+                "studio_run_prices must price every run kind (missing: "
+                + ", ".join(sorted(kind.value for kind in missing_prices))
+                + ")"
+            )
+        if not self.studio_runs_enabled:
+            return self
+        try:
+            validate_model_entries(
+                self.studio_llm_model_entries(),
+                default_key=self.studio_llm_default_model,
+                by_kind=self.studio_llm_model_by_kind,
+            )
+            force_tracing_off()
+        except TracingEnabledError as exc:
+            raise ValueError(str(exc)) from None
+        return self
+
+    @model_validator(mode="after")
     def validate_billing_pricing_tiers(self) -> "Settings":
         """Fail loud on a malformed top-up pricing config.
 
@@ -2227,6 +2311,22 @@ class Settings(BaseSettings):
     def grok_configured(self) -> bool:
         """Check if Grok API is configured."""
         return bool(self.xai_api_key)
+
+    @property
+    def studio_runs_active(self) -> bool:
+        """Whether planner runs are served at all: the studio **and** the runs switch are on.
+
+        Gates everything that spends: the model registry, the HTTP client and the run worker.
+        """
+        return self.studio_enabled and self.studio_runs_enabled
+
+    def studio_llm_model_entries(self) -> dict[str, LlmModelEntry]:
+        """The decoded ``STUDIO_LLM_MODELS`` registry entries.
+
+        Raises:
+            LlmRegistryError: An entry does not decode.
+        """
+        return parse_model_entries(self.studio_llm_models)
 
     @computed_field  # type: ignore[prop-decorator]
     @property

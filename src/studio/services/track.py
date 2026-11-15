@@ -11,11 +11,13 @@ from src.api.schemas.studio import TrackCreate, TrackDetail, TrackOut, TrackPatc
 from src.db.repositories.studio import (
     StudioDocumentVersionRepository,
     StudioProjectRepository,
+    StudioRunRepository,
     StudioTrackRepository,
 )
 from src.studio.constraints import collect_length_issues
 from src.studio.errors import (
     DocumentIssue,
+    RunInProgress,
     StudioDocumentInvalid,
     StudioNotFound,
     TrackLimitReached,
@@ -67,6 +69,7 @@ class TrackService:
         self._profiles = StudioProjectRepository(session)
         self._tracks = StudioTrackRepository(session)
         self._versions = StudioDocumentVersionRepository(session)
+        self._runs = StudioRunRepository(session)
 
     async def create(
         self, library_project_id: UUID, user_id: UUID, product_id: str, title: str
@@ -195,7 +198,14 @@ class TrackService:
         return track_out(updated)
 
     async def delete(self, track_id: UUID, user_id: UUID, product_id: str) -> None:
-        """Delete a track and (by cascade) all its versions. Positions of the others are kept."""
+        """Delete a track and (by cascade) all its versions and finished runs.
+
+        Positions of the others are kept.
+
+        Raises:
+            StudioNotFound: No such track for the caller.
+            RunInProgress: The track has a queued or running run.
+        """
         # Lock order is always profile -> track, so a delete cannot interleave with a reorder.
         track = await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
         if track is None:
@@ -204,6 +214,10 @@ class TrackService:
         track = await self._tracks.lock(track_id, user_id=user_id, product_id=product_id)
         if track is None:  # deleted while waiting for the profile lock
             raise StudioNotFound
+        # A cascade would delete a queued / running run - and its paid reservation - unrefunded.
+        # Submit needs this track's lock too, so no run can become active after this check.
+        if await self._runs.has_active_for_track(track_id):
+            raise RunInProgress
         await self._tracks.delete(track_id, user_id=user_id, product_id=product_id)
         logger.info(
             "studio.track_deleted", track_id=str(track_id), project_id=str(track.library_project_id)

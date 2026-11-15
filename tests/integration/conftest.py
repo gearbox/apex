@@ -39,6 +39,7 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
+from tests.studio_runs_support import RunWorld, make_settings
 from tests.studio_world import StudioWorld
 
 # ---------------------------------------------------------------------------
@@ -671,3 +672,36 @@ async def enabled_studio(studio: StudioWorld) -> StudioWorld:
     """Same as ``studio`` with the studio profile already enabled on the project."""
     await studio.enable()
     return studio
+
+
+# ---------------------------------------------------------------------------
+# Studio planner runs: committed rows + a real pool (the executor opens its own sessions)
+# ---------------------------------------------------------------------------
+
+
+@pytest_asyncio.fixture
+async def make_run_world(
+    db_engine: AsyncEngine, test_database_url: str
+) -> AsyncGenerator[Callable[..., RunWorld]]:
+    """Factory of committed studio-runs worlds (runs enabled); ``**overrides`` are Settings fields.
+
+    Every world it made is cleaned up (users cascade; the immutable ledger is cleared) afterwards.
+    """
+    worlds: list[RunWorld] = []
+
+    def _make(**overrides: Any) -> RunWorld:
+        world = RunWorld(db_engine, test_database_url, make_settings(**overrides))
+        worlds.append(world)
+        return world
+
+    try:
+        yield _make
+    finally:
+        for world in worlds:
+            await world.close()
+
+
+@pytest_asyncio.fixture
+async def run_world(make_run_world: Callable[..., RunWorld]) -> RunWorld:
+    """A committed studio-runs world with the default settings (prices 1/1/1)."""
+    return make_run_world()

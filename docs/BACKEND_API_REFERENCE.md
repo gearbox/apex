@@ -2789,6 +2789,7 @@ data: <JSON-encoded inner payload>
 | `gpu_session.operation_updated` | Typed public projection of a session/deployment operation | `OperationResponse` |
 | `gpu_session.credit_warning` | Session balance is low; emitted once per upward level transition (no warning → warning → critical). Cleared on balance recovery or termination. | `GpuSessionCreditWarningPayload` |
 | `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
+| `studio.run.updated` | A studio planner run changed status or stage (`revision` strictly increases; apply only when greater). See `docs/contracts/studio-contract.md` §11 | `StudioRunUpdatedPayload` |
 | `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
 
 ### Event Payload Schemas
@@ -2870,7 +2871,7 @@ interface SystemNotificationPayload {
 
 | Channel | Subscribers | Events |
 |---------|-------------|--------|
-| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.deployment_status_changed`, `gpu_session.operation_updated`, `gpu_session.credit_warning`, `balance.updated` |
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.deployment_status_changed`, `gpu_session.operation_updated`, `gpu_session.credit_warning`, `balance.updated`, `studio.run.updated` |
 | `system:broadcast` | All connected clients | `system.notification` |
 
 Each SSE connection subscribes to both the per-user channel and `system:broadcast`.

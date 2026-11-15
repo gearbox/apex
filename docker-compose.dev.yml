@@ -52,6 +52,7 @@ services:
       - ./pyproject.toml:/app/pyproject.toml:ro
       - ./uv.lock:/app/uv.lock:ro
       - ./docs:/app/docs:ro
+      - ./.env.example:/app/.env.example:ro
       # Pass through coverage report to local filesystem
       - ./htmlcov:/app/htmlcov
     

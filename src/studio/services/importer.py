@@ -40,8 +40,7 @@ from src.db.repositories.studio import (
     StudioProjectRepository,
     StudioTrackRepository,
 )
-from src.studio.constraints import collect_count_issues
-from src.studio.errors import DocumentIssue, StudioDocumentInvalid, StudioNotFound, VersionUnchanged
+from src.studio.errors import StudioNotFound, VersionUnchanged
 from src.studio.importers import roundtrip
 from src.studio.importers.suno import parse_suno
 from src.studio.importers.suno_build import build_documents, to_import_invalid
@@ -54,7 +53,12 @@ from src.studio.services.mappers import (
     require_current_row,
     version_summary,
 )
-from src.studio.validation import content_hash, normalize_lyrics, normalize_plan
+from src.studio.validation import (
+    content_hash,
+    normalize_lyrics,
+    normalize_plan,
+    validate_built_document,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Callable
@@ -257,13 +261,7 @@ class SunoImportService:
         name: Literal["plan", "lyrics"],
         provenance: Provenance,
     ) -> D:
-        issues: list[DocumentIssue] = []
-        collect_count_issues(document, issues)
-        normalized: D | None = None
-        try:
-            normalized = normalize(document)
-        except StudioDocumentInvalid as exc:
-            issues.extend(exc.issues)
+        normalized, issues = validate_built_document(document, normalize)
         if issues or normalized is None:
             raise to_import_invalid(issues, name, provenance)
         return normalized

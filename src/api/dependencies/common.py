@@ -114,6 +114,7 @@ from src.api.services.video_jobs.worker import AsyncVideoJobWorker
 from src.api.services.workflow import WorkflowService
 from src.core.config import Settings, get_settings
 from src.core.enums import Provider, WorkerMode
+from src.core.llm_tracing import force_tracing_off
 from src.core.product import ProductConfig  # noqa: TC001
 from src.core.product_registry import PRODUCT_REGISTRY, get_product_config_by_slug
 from src.core.redis import get_redis_client
@@ -123,17 +124,21 @@ from src.db.repositories import (
     UserIdentityRepository,
     UserRepository,
 )
+from src.studio.llm.registry import LlmModelRegistry
 from src.studio.services.artist import ArtistService
 from src.studio.services.export import ExportService
 from src.studio.services.importer import SunoImportService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
+from src.studio.services.run import StudioRunService
+from src.studio.services.run_events import StudioRunEvents
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
 from src.workers.push_dispatcher import PushDispatcher
+from src.workers.studio_run import StudioRunWorker
 from src.workers.telegram_dispatcher import TelegramDispatcher
 from src.workers.telegram_link_poller import TelegramLinkPoller
 from src.workers.token_cleanup import TokenCleanupWorker
@@ -192,6 +197,12 @@ class ServiceContainer:
     email_verification_service: EmailVerificationService | None = None
     unified_job_service: UnifiedJobService | None = None
     token_cleanup_worker: TokenCleanupWorker | None = None
+    # Studio planner runs (only when STUDIO_ENABLED and STUDIO_RUNS_ENABLED): the model registry
+    # serves the request-side service; the HTTP client, executor and worker exist only in a
+    # process that runs the worker.
+    studio_llm_registry: LlmModelRegistry | None = None
+    studio_llm_http_client: httpx.AsyncClient | None = None
+    studio_run_worker: StudioRunWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
     media_ingestor: MediaIngestService | None = None
     provider_video_ingestor: MediaIngestService | None = None
@@ -800,6 +811,22 @@ def get_suno_import_service(session: AsyncSession) -> SunoImportService:
     return SunoImportService(session, versions=DocumentVersionService(session))
 
 
+def get_studio_run_service(session: AsyncSession, settings: Settings) -> StudioRunService:
+    """Provide the studio StudioRunService per-request (commit-free; the route commits, then publishes).
+
+    Only reachable behind ``studio_runs_guard``, so the registry exists whenever this runs.
+    """
+    if _services.studio_llm_registry is None:
+        raise RuntimeError("studio runs are not enabled")
+    return StudioRunService(
+        session,
+        billing=get_billing_service(),
+        registry=_services.studio_llm_registry,
+        settings=settings,
+        events=StudioRunEvents(_services.event_bus),
+    )
+
+
 def get_feedback_service(session: AsyncSession) -> FeedbackService:
     """Provide FeedbackService per-request (commit-free; the route commits, then publishes)."""
     return FeedbackService(session=session, ops_event_bus=get_ops_event_bus())
@@ -956,6 +983,47 @@ async def _start_video_lifecycle_workers(
     )
     await reconciler.start()
     return VideoLifecycleWorkers(poller=poller, reconciler=reconciler)
+
+
+async def _start_studio_run_worker(
+    settings: Settings, registry: LlmModelRegistry, *, redis_enabled: bool
+) -> StudioRunWorker:
+    """Build and start the studio run worker (and the HTTP client its model calls share).
+
+    ``langgraph`` is imported here, not at module import, so a process that never runs the planner
+    never loads it.
+    """
+    from src.core.redis import get_operational_redis_client
+    from src.studio.llm.factory import LlmClientFactory
+    from src.studio.services.run_context import ProfileArtistContextProvider
+    from src.studio.services.run_executor import StudioRunExecutor
+
+    if _services.db_manager is None:
+        raise RuntimeError("studio run worker needs the database")
+    # Per-call timeouts come from each registry entry; redirects are never followed (the
+    # Authorization header must not travel to another host).
+    _services.studio_llm_http_client = httpx.AsyncClient(
+        timeout=httpx.Timeout(10.0), follow_redirects=False
+    )
+    executor = StudioRunExecutor(
+        db_manager=_services.db_manager,
+        billing=get_billing_service(),
+        registry=registry,
+        llm_factory=LlmClientFactory(registry, _services.studio_llm_http_client),
+        context_provider=ProfileArtistContextProvider(),
+        events=StudioRunEvents(_services.event_bus),
+        settings=settings,
+    )
+    worker = StudioRunWorker(
+        executor=executor,
+        interval_seconds=settings.studio_run_worker_interval_seconds,
+        max_concurrent=settings.studio_run_max_concurrent,
+        redis_enabled=redis_enabled,
+        redis_client_factory=get_operational_redis_client,
+    )
+    await worker.start()
+    logger.info("studio_run_worker.started")
+    return worker
 
 
 async def init_services(settings: Settings) -> JWTService:
@@ -1658,6 +1726,23 @@ async def init_services(settings: Settings) -> JWTService:
         await _services.token_cleanup_worker.start()
         logger.info("token_cleanup_worker.started")
 
+    # Studio planner runs (LLM spend). A separate kill switch from STUDIO_ENABLED: nothing below
+    # is built unless both are on. The tracing guard comes first - prompts must reach the model
+    # provider only - and the registry fails startup (naming the setting, never a key) when a
+    # model or its API-key environment variable is unusable.
+    if settings.studio_runs_active:
+        force_tracing_off()
+        _services.studio_llm_registry = LlmModelRegistry.from_settings(settings)
+        logger.info(
+            "studio_llm_registry.initialized",
+            models=list(_services.studio_llm_registry.keys),
+            default_model=settings.studio_llm_default_model,
+        )
+        if workers_enabled and settings.studio_run_worker_in_process:
+            _services.studio_run_worker = await _start_studio_run_worker(
+                settings, _services.studio_llm_registry, redis_enabled=redis_enabled
+            )
+
     # Initialize Web Push (requires VAPID keys + Redis — see Settings.push_enabled)
     if settings.push_enabled:
         if settings.vapid_private_key is None or settings.vapid_subject is None:
@@ -1850,6 +1935,7 @@ async def init_services(settings: Settings) -> JWTService:
         w
         for w in (
             _services.token_cleanup_worker,
+            _services.studio_run_worker,
             _services.content_retention_worker,
             _services.aisha_job_poller,
             _services.gpu_provisioning_worker,
@@ -1919,6 +2005,14 @@ async def shutdown_services() -> None:
     # cleanup (rollback + session.close) can still return connections cleanly.
     if _services.token_cleanup_worker is not None:
         await _services.token_cleanup_worker.stop()
+
+    # The run worker drains its in-flight runs, so it stops before the pool and its client close.
+    if _services.studio_run_worker is not None:
+        await _services.studio_run_worker.stop()
+
+    if _services.studio_llm_http_client is not None:
+        await _services.studio_llm_http_client.aclose()
+        logger.info("studio_llm_http_client.closed")
 
     if _services.content_retention_worker is not None:
         await _services.content_retention_worker.stop()
@@ -2064,6 +2158,7 @@ dependencies = {
     "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),
     "studio_export_service": Provide(get_studio_export_service, sync_to_thread=False),
     "studio_suno_import_service": Provide(get_suno_import_service, sync_to_thread=False),
+    "studio_run_service": Provide(get_studio_run_service, sync_to_thread=False),
     # In-product problem reports
     "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
     # Idempotency

@@ -1,6 +1,6 @@
 [project]
 name = "apex"
-version = "0.52.1"
+version = "0.52.2"
 description = "Apex REST API service for AI content generation"
 requires-python = ">=3.13"
 authors = [{ name = "Apex Team" }]
@@ -46,6 +46,7 @@ dependencies = [
     "numpy>=2.3.0",
     "pdqhash==0.2.8",
     "pywebpush>=2.3.0",
+    "langgraph>=1.2,<2",
 ]
 
 [project.optional-dependencies]
@@ -191,7 +192,7 @@ disable_error_code = ["import-untyped"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
-addopts = "-v --cov=src --cov-report=term-missing --cov-report=xml"
+addopts = "-v --cov=src --cov-report=term-missing --cov-report=xml -m 'not live_llm'"
 filterwarnings = [
     "ignore::DeprecationWarning",
     "ignore::pytest.PytestCollectionWarning",
@@ -201,6 +202,7 @@ filterwarnings = [
 ]
 markers = [
     "unit: fast unit tests (no database required)",
+    "live_llm: calls a real LLM provider with real API keys (opt-in: pytest -m live_llm tests/live)",
 ]
 
 [tool.coverage.run]

@@ -24,7 +24,7 @@ from uuid import UUID  # noqa: TC003 — runtime: used in type hints evaluated b
 import msgspec
 
 from src.core.enums import StudioDocumentKind, StudioSectionKind
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_count_issues, collect_length_issues, collect_range_issues
 from src.studio.documents import (
     LyricLine,
     LyricsDocument,
@@ -38,7 +38,7 @@ from src.studio.section_names import is_header_text
 from src.studio.tempo import tempo_of
 
 if TYPE_CHECKING:
-    from collections.abc import Iterable, Sequence
+    from collections.abc import Callable, Iterable, Sequence
 
 __all__ = [
     "MAX_DOCUMENT_BYTES",
@@ -55,6 +55,7 @@ __all__ = [
     "normalize_plan",
     "normalize_text",
     "to_content",
+    "validate_built_document",
 ]
 
 MAX_TOTAL_DURATION_SECONDS: Final = 1800
@@ -441,6 +442,39 @@ def normalize_artist_style(
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
     return style
+
+
+def validate_built_document[D: PlanDocument | LyricsDocument](
+    document: D, normalize: Callable[[D], D]
+) -> tuple[D | None, tuple[DocumentIssue, ...]]:
+    """Validate a document **built in code** exactly as a user-submitted one is validated.
+
+    A document the server assembles itself (the Suno importer, a planner run) skips msgspec's wire
+    validation, so what that would have enforced is checked here: array sizes
+    (:func:`~src.studio.constraints.collect_count_issues`) and integer bounds
+    (:func:`~src.studio.constraints.collect_range_issues`), together with everything ``normalize``
+    reports (empty / reserved / duplicate values, caps, lengths after NFC). One shared sequence, so
+    the importer and the planner can never drift from each other or from the wire rules.
+
+    Args:
+        document: The document as built.
+        normalize: ``normalize_plan``, or ``normalize_lyrics`` bound to its plan.
+
+    Returns:
+        ``(normalized, ())`` when valid; ``(None, issues)`` with **every** issue otherwise. Never
+        raises for validation.
+    """
+    issues: list[DocumentIssue] = []
+    collect_count_issues(document, issues)
+    collect_range_issues(document, issues)
+    normalized: D | None = None
+    try:
+        normalized = normalize(document)
+    except StudioDocumentInvalid as exc:
+        issues.extend(exc.issues)
+    if issues:
+        return None, tuple(issues)
+    return normalized, ()
 
 
 def to_content(document: PlanDocument | LyricsDocument) -> dict[str, object]:

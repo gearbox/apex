@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b: Studio Foundation + Suno import)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a: Studio Foundation, Suno import, Planner runs)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
-> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`) and `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) and `feat/studio-planner-runs` (migration `057_studio_runs`).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). **No LLM planner, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan from a brief (§11). **No lyrics runs yet, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -468,3 +468,144 @@ Other statuses: `404` (not your track, any product mismatch, studio off), `400` 
 - **What the request leaves out is the current plan's, not a default.** Omit `title` and `instrumental` (the usual paste of just the three boxes) and the plan keeps its own title and flag, so `export → paste back` of an unchanged song is a no-op even when the plan's title differs from the track's, or the plan is instrumental. A track with no plan yet uses the track's title and `instrumental: false`. The flag is still never inferred from the text: lyric lines pasted over an instrumental plan are `422 instrumental_with_lyric_lines` until you send `instrumental: false`.
 - The import does not change the track's title, only the plan's.
 
+---
+
+## 11. Planner runs
+
+A **run** is an asynchronous LLM job on a track. In this phase there is one kind, **`plan`**: the user writes a short *brief*, the server asks a language model for a song structure, validates it exactly as it would validate a plan typed by the user, and saves it as an **ordinary plan version** (`origin: "llm"`). `lyrics` and `revise_lyrics` are reserved: they are part of the wire union but answer `422 run_kind_not_available`.
+
+> **Privacy — tell the user.** The brief, the track title, the project concept, the artist (name, persona, voice notes, style tags, things to avoid, aesthetic references) and a short summary of the track's current plan are **sent to the configured LLM provider**. Nothing else leaves the server; the run is never traced to any third-party observability service. The server never logs any of it.
+
+### Gating
+
+Runs sit behind **their own switch**, because they spend money: `STUDIO_RUNS_ENABLED` (default off) **and** the studio gate of §1. While either is off, **all four** run routes answer `404 {"error": "not_found"}` (before authentication). A `404` on `POST …/runs` therefore means "planner runs are off" — hide the "Plan with AI" action; the rest of the studio keeps working. A user never chooses the model; the operator configures it.
+
+### Endpoints
+
+| Method | Path | Success | Notes |
+|---|---|---|---|
+| `POST` | `/v1/studio/tracks/{track_id}/runs` | `202` queued run · `200` replay | **`Idempotency-Key` header required** (1–128 chars) |
+| `GET` | `/v1/studio/runs/{run_id}` | `200` run | the polling fallback of the event |
+| `GET` | `/v1/studio/tracks/{track_id}/runs` | `200` `CursorPage<RunOut>` | newest first; `?limit=1..100` (default 30), `?cursor=` |
+| `POST` | `/v1/studio/runs/{run_id}/cancel` | `200` run | only while `queued` |
+
+All are subject to legal-acceptance enforcement (§1) for mutations, and are scoped to the caller: another user's track or run is `404`.
+
+### Submit
+
+```http
+POST /v1/studio/tracks/{track_id}/runs
+Idempotency-Key: 6f1c…           ← your own unique key per user action, 1–128 characters
+Content-Type: application/json
+
+{ "kind": "plan",
+  "brief": "A slow synthwave song about driving home through the rain.",
+  "language": "en",                ← optional BCP-47-ish tag, like lyrics
+  "memory_ids": [],                ← must be empty for now (422 memories_not_available)
+  "auto_fill": true }
+```
+
+- `brief`: 1–4000 characters. It is NFC-normalized like every studio string, and the 4000 limit is re-checked **after** normalization (`422 document_invalid`, issue `brief` `too_long_after_normalization`; a blank brief is `empty_after_normalization`).
+- Unknown fields are refused (`400`). `kind` is the discriminant: `plan` today; `lyrics` / `revise_lyrics` → `422 run_kind_not_available`.
+- The response is a **`RunOut`** (below) with `status: "queued"`, `revision: 1`. `202` means "accepted"; the work happens in the background.
+
+**Reservation.** The run's price (default **1 token**, configured per kind) is **reserved when the run is accepted**, in the same transaction that creates it: a `402` leaves no run and no ledger row. The price is **refunded in full** when the run ends `failed` or `cancelled`, and kept when it `succeeded`. A price of `0` writes no ledger rows at all. Balance changes arrive as ordinary `balance.updated` events.
+
+#### Idempotency
+
+The same `Idempotency-Key` with the same body returns the **same run** with `200`, creates nothing and reserves nothing — retry freely after a timeout. The same key with a **different** body (or for a **different track**) is `409 idempotency_conflict`. Keys are per user and are kept with the run (they never expire while the run exists). A missing, blank or over-long key is `400 idempotency_key_required`.
+
+#### Limits and errors
+
+| Status | `error` | When |
+|---|---|---|
+| `400` | `idempotency_key_required` | header missing, blank or longer than 128 characters |
+| `400` | *(validation)* | malformed body, unknown field, `brief` empty or over 4000 as sent |
+| `402` | `insufficient_balance` | the account cannot cover the price — nothing was written |
+| `404` | `not_found` | runs disabled, or the track is not yours |
+| `409` | `run_in_progress` | the track already has a `queued` or `running` run (**one active run per track**) |
+| `409` | `run_limit_reached` | you already have 3 active runs (configurable) |
+| `409` | `idempotency_conflict` | see above |
+| `422` | `run_kind_not_available` | `lyrics` / `revise_lyrics` |
+| `422` | `memories_not_available` | `memory_ids` is not empty |
+| `422` | `document_invalid` | the brief is empty or too long after normalization (`detail.issues`) |
+| `429` | `run_rate_limited` | more than 30 runs created in the last hour (configurable) |
+
+`409 run_in_progress` is also what `DELETE /v1/studio/tracks/{id}` answers while the track has an active run (a finished run never blocks a delete; deleting the track removes its runs).
+
+### `RunOut`
+
+```jsonc
+{ "id": "…", "track_id": "…",
+  "kind": "plan",
+  "status": "queued | running | succeeded | failed | cancelled",
+  "stage": null,                      // running only: "context" | "drafting" | "validating" | "revising" | "saving"
+  "revision": 1,                      // strictly increases with every status or stage change
+  "price_tokens": 1, "model_key": "grok",   // the operator's registry key, informational
+  "result_plan_version_id": null,     // set when succeeded
+  "result_lyrics_version_id": null,   // always null for now
+  "warnings": [],                     // [{ "code", "path"? }] — none are emitted yet
+  "error_code": null,                 // set when failed (table below)
+  "error_detail": null,               // failed: issue paths and codes only — never model or user text
+  "llm_calls": 0,                     // model calls made (0–3 for a plan run)
+  "created_at": "…", "started_at": null, "finished_at": null }
+```
+
+It never contains the brief, the artist, the prompts, the model's output or token counts.
+
+### Lifecycle
+
+```
+queued ──claim──▶ running ──▶ succeeded
+   │                 └────▶ failed
+   └──cancel──▶ cancelled
+```
+
+- A run is **terminal once**: `succeeded`, `failed` and `cancelled` never change again. `finished_at` is set exactly when the run is terminal.
+- `running` carries a `stage`: `context` (the worker froze what the model will be told) → `drafting` (first model call) → `validating` → `revising` ↔ `validating` (at most twice) → `saving`. Stages are informational; `status` is authoritative.
+- **Budget:** a plan run makes at most **3** model calls (the first draft and two revisions; a reply that is not valid JSON for the schema is re-asked inside the same budget). The whole run has a **180 s** deadline; a run whose worker died is failed `run_timeout` and refunded — it is never executed twice.
+- **Cancel** works only while `queued`: `POST …/cancel` → `200` with `status: "cancelled"` and a full refund. A `running` or finished run answers `409 run_not_cancellable` (no free spend by start-and-cancel). Another user's run is `404`.
+
+#### `error_code` of a `failed` run
+
+| `error_code` | Meaning | `error_detail` |
+|---|---|---|
+| `llm_unavailable` | the model provider could not be reached or kept failing (after one retry) | — |
+| `llm_rejected` | the provider refused the request | `{ "status_code": 4xx }` |
+| `llm_output_truncated` | the reply hit the output limit | — |
+| `llm_output_invalid` | the reply was not a valid object on the last allowed call | — |
+| `content_policy_refused` | the model declined the brief under the product's content policy | — |
+| `brief_unusable` | the model found the brief too empty or contradictory to plan from | — |
+| `plan_invalid` | after the allowed revisions the plan still failed validation | `{ "issues": [{ "path", "code" }] }` — the §4 vocabulary, with paths in the **plan document** |
+| `run_timeout` | the 180 s deadline passed, or the worker died | — |
+| *any §4–§6 code* | the save step was refused, e.g. `version_limit_reached` | — |
+| `internal_error` | anything unexpected (logged server-side, with no text) | — |
+
+All failures refund the reservation. A failed or cancelled run leaves the track exactly as it was.
+
+### Result: an ordinary version, never made current
+
+A `succeeded` run has `result_plan_version_id`. That version is a plain plan version of §2.2 with `origin: "llm"`, `is_current: false` and `parent_version_id` = the plan that was **current when the run started** (`null` if the track had none). **The run never changes the track's current plan or lyrics** — the user looks at the result (`GET /v1/studio/versions/{id}`, or the version list) and adopts it with `PUT /v1/studio/tracks/{id}/current` (or `POST …/versions` with `make_current`), subject to the usual pair-compatibility rules (§5). If the model's plan is identical to the plan it started from, the result *is* that parent version. Deleting the result version later keeps the run and clears `result_plan_version_id`.
+
+The plan the model returns is validated like user input (§4): normalization, the reserved descriptor / tempo-tag rules, caps and limits. Section ids are minted by the server. `idea` holds the brief (so it is stored with the plan and **never exported** to Suno); `references` stay empty.
+
+### Event: `studio.run.updated`
+
+Published on the user's SSE channel after **every committed status or stage change** (submit, claim, each stage, finish, cancel, sweep):
+
+```json
+{ "event_type": "studio.run.updated",
+  "payload": { "run_id": "…", "track_id": "…", "kind": "plan",
+               "status": "running", "stage": "drafting", "revision": 3, "error_code": null } }
+```
+
+- Delivery is **lossy** like every event: apply a frame only when its `revision` is **strictly greater** than the one you hold for that `run_id`; otherwise ignore it. On connect / reconnect, and whenever you doubt, `GET /v1/studio/runs/{id}` — REST is the complete fallback.
+- The event carries ids and codes only. Fetch the run for the rest, and the version for the result.
+- No text is streamed: a run is a short job and its result arrives whole, as a version.
+
+### Notes for the UI
+
+- Treat `202` and `200` the same way ("here is the run"); generate a fresh `Idempotency-Key` per *user action* (not per retry).
+- While a track's run is `queued` or `running`, disable "Plan with AI" for that track (`run_in_progress` is the server-side guard) and show `stage`.
+- A `failed` run has been refunded already — say so. Offer "try again" with a new key.
+- Show the privacy note (above) next to the brief field, and the price (`price_tokens`) before submitting.

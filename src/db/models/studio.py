@@ -20,6 +20,9 @@ Design notes (see ``docs/contracts/studio-contract.md``):
 * ``tracks -> profile`` and ``profile -> artist`` are NO ACTION (end-of-statement check), not
   RESTRICT: RESTRICT fires immediately and would make the user hard-delete cascade order-dependent.
 * Version numbers come from per-track counters and are never reused (no ``max()+1``).
+* ``studio_runs`` (planner runs, P2a) hangs off a track (``ON DELETE CASCADE``) and points at the
+  versions it produced with ``ON DELETE SET NULL``. A run is terminal once: the CHECKs tie
+  ``finished_at`` to the terminal statuses and a ``failed`` run to its ``error_code``.
 """
 
 from __future__ import annotations
@@ -50,16 +53,27 @@ from src.core.enums import (
     StudioDocumentKind,
     StudioDocumentOrigin,
     StudioReleaseKind,
+    StudioRunKind,
+    StudioRunStage,
+    StudioRunStatus,
 )
 from src.core.uid import new_id
 from src.db.models.base import Base
 
 __all__ = [
+    "RUN_ONE_ACTIVE_PER_TRACK",
+    "RUN_USER_IDEMPOTENCY",
     "StudioArtist",
     "StudioDocumentVersion",
     "StudioProjectProfile",
+    "StudioRun",
     "StudioTrack",
 ]
+
+RUN_ONE_ACTIVE_PER_TRACK = "uq_studio_runs_one_active_per_track"
+"""Partial unique index: at most one queued/running run per track. The authority for 409."""
+RUN_USER_IDEMPOTENCY = "uq_studio_runs_user_idempotency"
+"""``UNIQUE (user_id, idempotency_key)``: a replayed submit is the same run."""
 
 
 def _in_list(column: str, members: type[StrEnum]) -> str:
@@ -335,3 +349,118 @@ class StudioDocumentVersion(Base):
 
     def __repr__(self) -> str:
         return f"<StudioDocumentVersion {self.id} track={self.track_id} {self.kind}#{self.version_number}>"
+
+
+_TERMINAL_RUN_STATUSES = ", ".join(f"'{m.value}'" for m in sorted(StudioRunStatus.terminal()))
+_ACTIVE_RUN_STATUSES = ", ".join(f"'{m.value}'" for m in sorted(StudioRunStatus.active()))
+
+
+class StudioRun(Base):
+    """One planner run: an LLM job that turns a brief into a new plan version of a track.
+
+    The row is the whole state machine (``queued → running → succeeded | failed``,
+    ``queued → cancelled``); every transition is a guarded ``UPDATE … WHERE status = …`` that
+    bumps ``revision``. ``request`` / ``context_snapshot`` hold user text, so nothing outside the
+    owner-scoped repository reads them and no log or ``RunOut`` carries them.
+    """
+
+    __tablename__ = "studio_runs"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    track_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("studio_tracks.id", ondelete="CASCADE"), nullable=False
+    )
+
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    status: Mapped[str] = mapped_column(String(20), nullable=False)
+    stage: Mapped[str | None] = mapped_column(String(20), nullable=True)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("1"))
+
+    idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
+    request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    context_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
+    model_key: Mapped[str] = mapped_column(String(60), nullable=False)
+    model_id: Mapped[str | None] = mapped_column(String(120), nullable=True)
+
+    price_tokens: Mapped[int] = mapped_column(Integer, nullable=False)
+    billing_account_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+
+    result_plan_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("studio_document_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    result_lyrics_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("studio_document_versions.id", ondelete="SET NULL"),
+        nullable=True,
+    )
+    warnings: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
+    error_detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+
+    llm_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
+    completion_tokens: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("0")
+    )
+
+    lease_expires_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
+    started_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    finished_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True), nullable=True)
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        UniqueConstraint("user_id", "idempotency_key", name=RUN_USER_IDEMPOTENCY),
+        CheckConstraint(_in_list("kind", StudioRunKind), name="ck_studio_runs_kind"),
+        CheckConstraint(_in_list("status", StudioRunStatus), name="ck_studio_runs_status"),
+        CheckConstraint(
+            "stage IS NULL OR " + _in_list("stage", StudioRunStage), name="ck_studio_runs_stage"
+        ),
+        CheckConstraint("price_tokens >= 0", name="ck_studio_runs_price"),
+        CheckConstraint("revision >= 1", name="ck_studio_runs_revision"),
+        CheckConstraint(
+            f"(status IN ({_TERMINAL_RUN_STATUSES})) = (finished_at IS NOT NULL)",
+            name="ck_studio_runs_finished",
+        ),
+        CheckConstraint(
+            "status <> 'failed' OR error_code IS NOT NULL", name="ck_studio_runs_failed_code"
+        ),
+        Index(
+            RUN_ONE_ACTIVE_PER_TRACK,
+            "track_id",
+            unique=True,
+            postgresql_where=text(f"status IN ({_ACTIVE_RUN_STATUSES})"),
+        ),
+        Index(
+            "ix_studio_runs_queued",
+            "created_at",
+            postgresql_where=text("status = 'queued'"),
+        ),
+        Index(
+            "ix_studio_runs_running_lease",
+            "lease_expires_at",
+            postgresql_where=text("status = 'running'"),
+        ),
+        Index("ix_studio_runs_user_created", "user_id", text("created_at DESC")),
+        Index(
+            "ix_studio_runs_track_created",
+            "track_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StudioRun {self.id} track={self.track_id} {self.kind} {self.status}>"
