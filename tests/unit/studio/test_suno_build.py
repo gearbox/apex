@@ -113,7 +113,9 @@ class TestSectionIds:
 
     def test_the_same_text_gives_the_same_ids_even_for_another_run(self) -> None:
         text = "[Verse]\na\n\n[Bridge]\nb"
-        assert import_text(lyrics=text)[0] == import_text(lyrics=text)[0]
+        first = import_text(lyrics=text)[0]
+        second = import_text(lyrics=text)[0]
+        assert first == second
 
     def test_the_id_depends_on_the_track(self) -> None:
         other = uuid5(TRACK_ID, "another track")

@@ -34,6 +34,7 @@ from sqlalchemy import (
 from sqlalchemy.dialects.postgresql import ARRAY
 from sqlalchemy.dialects.postgresql import UUID as PG_UUID
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import aliased
 
 from src.core.enums import StudioDocumentKind, StudioRunStage, StudioRunStatus
 from src.core.uid import new_id
@@ -449,6 +450,33 @@ class StudioTrackRepository:
             .execution_options(**_FRESH)
         )
         return result.scalar_one_or_none()
+
+    async def get_with_current_versions(
+        self, track_id: UUID, *, user_id: UUID, product_id: str
+    ) -> tuple[StudioTrack, StudioDocumentVersion | None, StudioDocumentVersion | None] | None:
+        """The track and the rows its current pointers name, read in ONE statement.
+
+        One statement is one ``READ COMMITTED`` snapshot, so the pointers and the rows always
+        agree: a concurrent "switch current + delete the old version" can never leave a pointer
+        read here naming a row that is gone. No lock is taken (the lock order is untouched).
+
+        Returns:
+            ``(track, current plan row, current lyrics row)``; a row is ``None`` exactly when its
+            pointer is ``None`` (the foreign keys make a dangling pointer impossible, so a caller
+            that sees a non-null pointer with a ``None`` row has found a broken invariant).
+            ``None`` when the track is not the caller's.
+        """
+        plan = aliased(StudioDocumentVersion)
+        lyrics = aliased(StudioDocumentVersion)
+        result = await self._session.execute(
+            select(StudioTrack, plan, lyrics)
+            .outerjoin(plan, plan.id == StudioTrack.current_plan_version_id)
+            .outerjoin(lyrics, lyrics.id == StudioTrack.current_lyrics_version_id)
+            .where(*self._owned(track_id, user_id, product_id))
+            .execution_options(**_FRESH)
+        )
+        row = result.one_or_none()
+        return None if row is None else (row[0], row[1], row[2])
 
     async def lock(self, track_id: UUID, *, user_id: UUID, product_id: str) -> StudioTrack | None:
         """``SELECT … FOR UPDATE`` the track: serializes version numbers and pointer changes."""

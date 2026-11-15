@@ -85,7 +85,7 @@ def make_settings(**overrides: Any) -> Settings:
         "llm_models": MODELS,
         "llm_default_model": "grok",
     }
-    return Settings(_env_file=None, **{**base, **overrides})  # type: ignore[call-arg]
+    return Settings(_env_file=None, **base | overrides)  # type: ignore[call-arg]
 
 
 def make_registry(settings: Settings | None = None) -> LlmModelRegistry:
@@ -285,6 +285,38 @@ class RunWorld:
         actor.tracks.append(track.id)
         return track.id
 
+    async def replace_current_plan(
+        self, actor: Actor, track_id: UUID, plan: PlanDocument | None = None
+    ) -> UUID:
+        """What a user does in the UI, in one transaction: make another plan current, then delete
+        the plan (and the lyrics) that were current before.
+
+        The new plan detaches any lyrics it does not fit; the old current lyrics, which the old
+        plan was the base of, go first so the old plan can be deleted. Returns the new plan's id.
+        """
+        from src.api.schemas.studio import PlanVersionCreate
+        from src.core.enums import StudioDocumentOrigin, StudioIncompatibleLyricsPolicy
+        from tests.studio_support import make_plan
+
+        before = await self.track_row(track_id)
+        async with self.factory() as session, session.begin():
+            versions = DocumentVersionService(session)
+            created, _ = await versions.create(
+                track_id,
+                PlanVersionCreate(
+                    content=plan or make_plan(title="Replacement", empty=True),
+                    make_current=True,
+                    incompatible_lyrics=StudioIncompatibleLyricsPolicy.DETACH,
+                ),
+                actor.user_id,
+                PRODUCT,
+                origin=StudioDocumentOrigin.USER,
+            )
+            for old in (before.current_lyrics_version_id, before.current_plan_version_id):
+                if old is not None:
+                    await versions.delete(old, actor.user_id, PRODUCT)
+        return created.version.id
+
     async def submit(
         self,
         actor: Actor,
@@ -394,8 +426,8 @@ class RunWorld:
         """(debits, refunds) counted in the ledger."""
         rows = await self.ledger(actor)
         return (
-            sum(1 for r in rows if r.transaction_type == "debit"),
-            sum(1 for r in rows if r.transaction_type == "refund"),
+            sum(r.transaction_type == "debit" for r in rows),
+            sum(r.transaction_type == "refund" for r in rows),
         )
 
     @staticmethod

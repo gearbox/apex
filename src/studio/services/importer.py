@@ -51,6 +51,7 @@ from src.studio.services.mappers import (
     decode_lyrics,
     decode_plan,
     require_current_row,
+    require_current_rows,
     version_summary,
 )
 from src.studio.validation import (
@@ -123,12 +124,8 @@ class SunoImportService:
             StudioError: Any error of the version create / set-current paths (the whole import
                 is rolled back).
         """
-        track = await self._load_track(track_id, user_id, product_id, lock=not request.dry_run)
-        plan_row = await self._current_row(
-            track.current_plan_version_id, track, user_id, product_id
-        )
-        lyrics_row = await self._current_row(
-            track.current_lyrics_version_id, track, user_id, product_id
+        track, plan_row, lyrics_row = await self._load_track(
+            track_id, user_id, product_id, lock=not request.dry_run
         )
         parent_plan = decode_plan(plan_row) if plan_row is not None else None
         parent_lyrics = decode_lyrics(lyrics_row) if lyrics_row is not None else None
@@ -204,21 +201,45 @@ class SunoImportService:
 
     async def _load_track(
         self, track_id: UUID, user_id: UUID, product_id: str, *, lock: bool
-    ) -> StudioTrack:
-        """The track; a real import locks it first so the pointers read next cannot move."""
-        track = (
-            await self._tracks.lock(track_id, user_id=user_id, product_id=product_id)
-            if lock
-            else await self._tracks.get(track_id, user_id=user_id, product_id=product_id)
+    ) -> tuple[StudioTrack, StudioDocumentVersion | None, StudioDocumentVersion | None]:
+        """The track and the rows its current pointers name, read consistently.
+
+        A real import locks the track first, so the pointers cannot move before the rows are
+        read. A dry run takes no lock: it reads the track and both rows in one statement (one
+        snapshot), so a concurrent "switch current + delete the old version" cannot leave a
+        pointer without its row.
+
+        Raises:
+            StudioNotFound: The track is not the caller's.
+            RuntimeError: A non-null pointer has no row (a broken invariant).
+        """
+        if lock:
+            track = await self._tracks.lock(track_id, user_id=user_id, product_id=product_id)
+            if track is None:
+                raise StudioNotFound
+            return (
+                track,
+                await self._current_row(track.current_plan_version_id, track, user_id, product_id),
+                await self._current_row(
+                    track.current_lyrics_version_id, track, user_id, product_id
+                ),
+            )
+        found = await self._tracks.get_with_current_versions(
+            track_id, user_id=user_id, product_id=product_id
         )
-        if track is None:
+        if found is None:
             raise StudioNotFound
-        return track
+        track = found[0]
+        plan_row, lyrics_row = require_current_rows(track, found[1], found[2])
+        return track, plan_row, lyrics_row
 
     async def _current_row(
         self, version_id: UUID | None, track: StudioTrack, user_id: UUID, product_id: str
     ) -> StudioDocumentVersion | None:
-        """The row a current pointer names; a non-null pointer without a row is a broken invariant."""
+        """The row a current pointer names; a non-null pointer without a row is a broken invariant.
+
+        Only called with the track locked by this transaction.
+        """
         if version_id is None:
             return None
         return require_current_row(

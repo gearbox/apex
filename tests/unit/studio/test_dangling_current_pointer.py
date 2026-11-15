@@ -21,7 +21,11 @@ from src.core.enums import StudioSectionKind as K
 from src.core.uid import new_id
 from src.studio.documents import CURRENT_SCHEMA_VERSION
 from src.studio.errors import LyricsIncompatibleWithPlan
-from src.studio.services.mappers import DANGLING_CURRENT_POINTER, require_current_row
+from src.studio.services.mappers import (
+    DANGLING_CURRENT_POINTER,
+    require_current_row,
+    require_current_rows,
+)
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from tests.studio_support import make_lyrics, make_plan, make_section, to_json
@@ -71,14 +75,18 @@ def _version_service(track: SimpleNamespace, rows: dict[UUID, Any]) -> DocumentV
 
 
 def _track_service(rows: dict[UUID, Any], track: SimpleNamespace) -> tuple[TrackService, AsyncMock]:
+    """A service whose single-statement read answers from ``rows`` (a missing row reads ``None``)."""
     service = TrackService(MagicMock())
 
-    async def get_on_track(version_id: UUID, _track_id: UUID, **_: object) -> Any:
-        return rows.get(version_id)
+    async def get_with_current_versions(_track_id: UUID, **_: object) -> Any:
+        return (
+            track,
+            rows.get(track.current_plan_version_id),
+            rows.get(track.current_lyrics_version_id),
+        )
 
-    lookup = AsyncMock(side_effect=get_on_track)
-    service._tracks = MagicMock(get=AsyncMock(return_value=track))
-    service._versions = MagicMock(get_on_track=lookup)
+    lookup = AsyncMock(side_effect=get_with_current_versions)
+    service._tracks = MagicMock(get_with_current_versions=lookup)
     return service, lookup
 
 
@@ -91,6 +99,32 @@ class TestRequireCurrentRow:
         with pytest.raises(RuntimeError) as exc:
             require_current_row(None)
         assert str(exc.value) == DANGLING_CURRENT_POINTER == "studio current pointer without a row"
+
+
+class TestRequireCurrentRows:
+    """The rows a track's pointers name, read together with the track in one statement."""
+
+    def test_null_pointers_need_no_rows(self) -> None:
+        assert require_current_rows(_track(), None, None) == (None, None)  # type: ignore[arg-type]
+
+    def test_rows_pass_through(self) -> None:
+        plan = _row("plan", make_plan())
+        lyrics = _row("lyrics", make_lyrics())
+        track = _track(plan=plan.id, lyrics=lyrics.id)
+        found = require_current_rows(track, plan, lyrics)  # type: ignore[arg-type]
+        assert found[0] is plan
+        assert found[1] is lyrics
+
+    def test_a_plan_pointer_without_its_row_raises(self) -> None:
+        track = _track(plan=new_id())
+        with pytest.raises(RuntimeError, match="without a row"):
+            require_current_rows(track, None, None)  # type: ignore[arg-type]
+
+    def test_a_lyrics_pointer_without_its_row_raises(self) -> None:
+        plan = _row("plan", make_plan())
+        track = _track(plan=plan.id, lyrics=new_id())
+        with pytest.raises(RuntimeError, match="without a row"):
+            require_current_rows(track, plan, None)  # type: ignore[arg-type]
 
 
 class TestCurrentDocuments:
@@ -187,7 +221,7 @@ class TestTrackDetail:
         service, lookup = _track_service({}, track)
         with pytest.raises(RuntimeError, match="without a row"):
             await service.get_detail(track.id, USER_ID, PRODUCT_ID)
-        lookup.assert_awaited_once()
+        lookup.assert_awaited_once()  # one statement for the track and both rows
 
     async def test_a_dangling_lyrics_pointer_raises_instead_of_returning_none(self) -> None:
         track = _track(lyrics=new_id())
@@ -200,4 +234,4 @@ class TestTrackDetail:
         service, lookup = _track_service({}, track)
         detail = await service.get_detail(track.id, USER_ID, PRODUCT_ID)
         assert (detail.current_plan, detail.current_lyrics) == (None, None)
-        lookup.assert_not_awaited()
+        lookup.assert_awaited_once()

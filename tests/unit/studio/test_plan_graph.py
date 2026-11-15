@@ -247,10 +247,6 @@ async def test_the_graph_can_be_reused_across_runs() -> None:
     assert first.plan.sections[0].id != second.plan.sections[0].id
 
 
-def test_issue_objects_in_the_state_are_plain_issues() -> None:
-    assert DocumentIssue("a", "b").path == "a"
-
-
 # -- invariant 24: no outcome without a plan, and a named error for an impossible state -----------
 
 
@@ -263,7 +259,9 @@ def test_the_outcome_variants_are_frozen_values() -> None:
     refusal = PlanRefused(DraftRefusal.CONTENT_POLICY)
     with pytest.raises(AttributeError):
         refusal.reason = DraftRefusal.BRIEF_UNUSABLE  # type: ignore[misc]
-    assert PlanRejected(()) == PlanRejected(())
+    issue = DocumentIssue("title", "too_long")
+    assert PlanRejected((issue,)) == PlanRejected((DocumentIssue("title", "too_long"),))
+    assert PlanRejected((issue,)) != PlanRejected(())
 
 
 async def test_a_graph_that_ends_without_an_outcome_raises_a_named_error(

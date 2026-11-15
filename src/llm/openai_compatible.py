@@ -13,6 +13,7 @@ from __future__ import annotations
 import asyncio
 import json
 import time
+from dataclasses import dataclass
 from typing import TYPE_CHECKING, Any, Final
 
 import httpx
@@ -48,6 +49,15 @@ _DEFAULT_BACKOFF_SECONDS: Final = 0.5
 _MAX_RETRY_AFTER_SECONDS: Final = 10.0
 _JSON_OBJECT_INSTRUCTION: Final = "Return only a JSON object that matches this JSON Schema:"
 """Provider JSON mode needs the word "JSON" in the prompt, so the schema travels as text."""
+
+
+@dataclass(frozen=True, slots=True)
+class _Retry:
+    """An attempt that may be repeated: why, and how long to wait first."""
+
+    failure: str
+    """``"transport"`` or ``"http_<status>"``; only ever part of the final error's message."""
+    delay: float
 
 
 class OpenAICompatibleLlmAdapter:
@@ -123,30 +133,36 @@ class OpenAICompatibleLlmAdapter:
         headers = {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
         failure = "transport"
         for attempt in range(1, _MAX_ATTEMPTS + 1):
-            started = time.perf_counter()
-            status: int | None = None
-            retry_after: float | None = None
-            try:
-                response = await self._client.post(
-                    self._url, json=body, headers=headers, timeout=self._entry.timeout_s
-                )
-            except (httpx.TimeoutException, httpx.TransportError):
-                failure = "transport"
-            else:
-                status = response.status_code
-                if status == httpx.codes.OK:
-                    return self._payload(response, attempt, started)
-                if status != httpx.codes.TOO_MANY_REQUESTS and status < 500:
-                    self._log(status, started, attempt, usage=None)
-                    raise LlmRejected(status)
-                failure = f"http_{status}"
-                retry_after = _retry_after(response)
-            self._log(status, started, attempt, usage=None)
+            outcome = await self._attempt(body, headers, attempt)
+            if not isinstance(outcome, _Retry):
+                return outcome
+            failure = outcome.failure
             if attempt < _MAX_ATTEMPTS:
-                await self._sleep(
-                    retry_after if retry_after is not None else _DEFAULT_BACKOFF_SECONDS
-                )
+                await self._sleep(outcome.delay)
         raise LlmUnavailable(f"LLM provider unavailable ({failure})")
+
+    async def _attempt(
+        self, body: dict[str, Any], headers: dict[str, str], attempt: int
+    ) -> dict[str, Any] | _Retry:
+        """One request: the payload of a ``200``, a :class:`_Retry`, or ``LlmRejected`` (final 4xx)."""
+        started = time.perf_counter()
+        try:
+            response = await self._client.post(
+                self._url, json=body, headers=headers, timeout=self._entry.timeout_s
+            )
+        except (httpx.TimeoutException, httpx.TransportError):
+            self._log(None, started, attempt, usage=None)
+            return _Retry("transport", _DEFAULT_BACKOFF_SECONDS)
+        status = response.status_code
+        if status == httpx.codes.OK:
+            return self._payload(response, attempt, started)
+        self._log(status, started, attempt, usage=None)
+        if not _is_retryable(status):
+            raise LlmRejected(status)
+        retry_after = _retry_after(response)
+        return _Retry(
+            f"http_{status}", retry_after if retry_after is not None else _DEFAULT_BACKOFF_SECONDS
+        )
 
     def _payload(self, response: httpx.Response, attempt: int, started: float) -> dict[str, Any]:
         try:
@@ -230,6 +246,11 @@ def _put_in_leading_system_message(wire_messages: list[dict[str, Any]], text: st
             message["content"] = f"{message['content']}\n\n{text}"
             return
     wire_messages.insert(0, {"role": "system", "content": text})
+
+
+def _is_retryable(status: int) -> bool:
+    """Whether a non-``200`` status is worth one more attempt: rate limited or a server error."""
+    return status == httpx.codes.TOO_MANY_REQUESTS or status >= 500
 
 
 def _retry_after(response: httpx.Response) -> float | None:

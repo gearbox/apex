@@ -364,7 +364,7 @@ interface SunoExport {
 ## 9. Behavioural notes for the UI
 
 - **Section ids are yours.** Generate a UUID per plan section once and keep it across plan versions — lyrics reference sections by id, so renaming or reordering sections never orphans lyrics.
-- **Open a track with one call:** `GET /tracks/{id}` returns the current plan and lyrics.
+- **Open a track with one call:** `GET /tracks/{id}` returns the current plan and lyrics. The track and the two documents are read as **one snapshot**, so switching the current plan and deleting the old one in another tab never makes this call (or the Suno export of the current pair, or an import preview) fail: you get the pair that was current at that instant, and the next call shows the new one.
 - **Branching history:** every version has `parent_version_id`; a "version tree" view is a straightforward render of `GET /tracks/{id}/versions?kind=…`. Deleting a leaf is allowed; deleting a node with children is not.
 - **Optimistic UI is safe.** Because create is idempotent, a double submit yields one version.
 - **Positions** can have gaps after a track delete; use `position` for ordering only and call the order endpoint to compact.
@@ -544,7 +544,7 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
   "price_tokens": 1, "model_key": "grok",   // the operator's `LLM_MODELS` key, informational
   "result_plan_version_id": null,     // set when succeeded
   "result_lyrics_version_id": null,   // always null for now
-  "warnings": [],                     // [{ "code", "path"? }] — none are emitted yet
+  "warnings": [],                     // [{ "code", "path"? }] — see "Run warnings" below
   "error_code": null,                 // set when failed (table below)
   "error_detail": null,               // failed: issue paths and codes only — never model or user text
   "llm_calls": 0,                     // model calls made (0–3 for a plan run)
@@ -585,7 +585,24 @@ All failures refund the reservation. A failed or cancelled run leaves the track 
 
 ### Result: an ordinary version, never made current
 
-A `succeeded` run has `result_plan_version_id`. That version is a plain plan version of §2.2 with `origin: "llm"`, `is_current: false` and `parent_version_id` = the plan that was **current when the run started** (`null` if the track had none). **The run never changes the track's current plan or lyrics** — the user looks at the result (`GET /v1/studio/versions/{id}`, or the version list) and adopts it with `PUT /v1/studio/tracks/{id}/current` (or `POST …/versions` with `make_current`), subject to the usual pair-compatibility rules (§5). If the model's plan is identical to the plan it started from, the result *is* that parent version. Deleting the result version later keeps the run and clears `result_plan_version_id`.
+A `succeeded` run has `result_plan_version_id`. That version is a plain plan version of §2.2 with `origin: "llm"`, `is_current: false` and `parent_version_id` = the plan that was **current when the run started** (`null` if the track had none) — unless that plan was deleted while the run was working: see "The parent rule" below. **The run never changes the track's current plan or lyrics** — the user looks at the result (`GET /v1/studio/versions/{id}`, or the version list) and adopts it with `PUT /v1/studio/tracks/{id}/current` (or `POST …/versions` with `make_current`), subject to the usual pair-compatibility rules (§5). If the model's plan is identical to the plan it started from, the result *is* that parent version. Deleting the result version later keeps the run and clears `result_plan_version_id`.
+
+#### The parent rule
+
+A run takes a few seconds to a minute and a half, and the user may keep working on the track meanwhile — including switching the current plan and deleting the old one (§5, §6). A result the user has already paid for is never thrown away because of that:
+
+1. The result is a child of the plan that was current when the run **started**.
+2. **If that version no longer exists when the result is saved**, the result becomes a child of the track's **current plan at that moment** (a root version, `parent_version_id: null`, when the track has none), and the run carries the warning `parent_version_replaced`. The run is still `succeeded` and still charged.
+3. A plan that was only *switched away from* (not deleted) is still the parent: the lineage is the plan the run started from.
+4. If the model's plan equals the parent that ends up being used, the result *is* that parent (as above).
+
+#### Run warnings
+
+`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path"?: string }`, with no user text. A run with none has `[]`.
+
+| `code` | Meaning |
+|---|---|
+| `parent_version_replaced` | the plan the run started from was deleted before the result was saved; `parent_version_id` of the result is the track's current plan at save time, or `null` (see "The parent rule"). Offer the user the result as usual; do not treat it as a failure. |
 
 The plan the model returns is validated like user input (§4): normalization, the reserved descriptor / tempo-tag rules, caps and limits. Section ids are minted by the server. `idea` holds the brief (so it is stored with the plan and **never exported** to Suno); `references` stay empty.
 

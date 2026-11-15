@@ -37,6 +37,7 @@ __all__ = [
     "plan_version_detail",
     "project_out",
     "require_current_row",
+    "require_current_rows",
     "run_out",
     "track_out",
     "version_detail",
@@ -106,6 +107,27 @@ def require_current_row(row: StudioDocumentVersion | None) -> StudioDocumentVers
     if row is None:
         raise RuntimeError(DANGLING_CURRENT_POINTER)
     return row
+
+
+def require_current_rows(
+    track: StudioTrack,
+    plan_row: StudioDocumentVersion | None,
+    lyrics_row: StudioDocumentVersion | None,
+) -> tuple[StudioDocumentVersion | None, StudioDocumentVersion | None]:
+    """The rows of a track's current pointers, as read together with the track in one statement.
+
+    A row is ``None`` exactly when its pointer is. Because the pointers and the rows came from
+    one snapshot (``StudioTrackRepository.get_with_current_versions``), a non-null pointer without
+    its row is the broken invariant of :func:`require_current_row`, not a race.
+
+    Raises:
+        RuntimeError: A non-null pointer has no row.
+    """
+    if track.current_plan_version_id is not None:
+        plan_row = require_current_row(plan_row)
+    if track.current_lyrics_version_id is not None:
+        lyrics_row = require_current_row(lyrics_row)
+    return plan_row, lyrics_row
 
 
 def decode_plan(version: StudioDocumentVersion) -> PlanDocument:

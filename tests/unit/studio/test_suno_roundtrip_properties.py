@@ -384,7 +384,9 @@ def test_the_parser_is_deterministic_and_only_ever_refuses_with_import_invalid(
         except ImportInvalid as exc:
             return ("refused", exc.issues, exc.source_lines)
 
-    assert run() == run()
+    first = run()
+    second = run()
+    assert first == second
 
 
 _BRACKETY = st.text(alphabet="[]abc ,:\n\r-", max_size=120)

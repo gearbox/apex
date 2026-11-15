@@ -12,7 +12,6 @@ from typing import TYPE_CHECKING
 from src.core.product_registry import get_product_config_by_slug
 from src.db.repositories.studio import (
     StudioArtistRepository,
-    StudioDocumentVersionRepository,
     StudioProjectRepository,
     StudioTrackRepository,
 )
@@ -24,14 +23,12 @@ from src.studio.planner.context import (
     RunContextRequest,
     RunContextSnapshot,
 )
-from src.studio.services.mappers import decode_plan, require_current_row
+from src.studio.services.mappers import decode_plan, require_current_rows
 
 if TYPE_CHECKING:
-    from uuid import UUID
-
     from sqlalchemy.ext.asyncio import AsyncSession
 
-    from src.db.models.studio import StudioDocumentVersion, StudioRun
+    from src.db.models.studio import StudioRun
     from src.studio.documents import PlanDocument
     from src.studio.planner.context import ArtistContextProvider
     from src.studio.run_requests import PlanRunRequest
@@ -95,14 +92,17 @@ class RunContextBuilder:
         """The snapshot for ``run`` (its owner's track, artist, concept and current documents).
 
         Raises:
-            RuntimeError: The track or a current-version row the track points at is missing - an
-                invariant violation (runs cascade with their track), never a client error.
+            RuntimeError: The track is missing, or a current pointer names a row that is not
+                there - an invariant violation (runs cascade with their track; the pointers and
+                their rows are read in one statement), never a client error.
         """
-        track = await StudioTrackRepository(session).get(
+        found = await StudioTrackRepository(session).get_with_current_versions(
             run.track_id, user_id=run.user_id, product_id=run.product_id
         )
-        if track is None:
+        if found is None:
             raise RuntimeError("studio run without a track")
+        track = found[0]
+        plan_row, lyrics_row = require_current_rows(track, found[1], found[2])
         context = await self._provider.for_run(
             RunContextRequest(
                 track_id=track.id,
@@ -114,9 +114,6 @@ class RunContextBuilder:
             ),
             session=session,
         )
-        versions = StudioDocumentVersionRepository(session)
-        plan_row = await self._current(versions, track.current_plan_version_id, run)
-        lyrics_row = await self._current(versions, track.current_lyrics_version_id, run)
         rating = get_product_config_by_slug(run.product_id).content_policy.rating
         return RunContextSnapshot(
             track_title=track.title,
@@ -129,16 +126,4 @@ class RunContextBuilder:
             lyrics_version_id=lyrics_row.id if lyrics_row else None,
             lyrics_content_hash=lyrics_row.content_hash if lyrics_row else None,
             memories=context.memories,
-        )
-
-    @staticmethod
-    async def _current(
-        versions: StudioDocumentVersionRepository, version_id: UUID | None, run: StudioRun
-    ) -> StudioDocumentVersion | None:
-        if version_id is None:
-            return None
-        return require_current_row(
-            await versions.get_on_track(
-                version_id, run.track_id, user_id=run.user_id, product_id=run.product_id
-            )
         )

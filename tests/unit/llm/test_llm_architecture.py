@@ -69,7 +69,9 @@ def test_the_file_set_is_what_the_layout_says() -> None:
         "registry.py",
         "factory.py",
     }
-    assert not (SRC / "studio" / "llm").exists()
+    # No Python *source* lives under the old studio location. The directory itself may still exist
+    # as a leftover ``__pycache__`` from another checkout, which says nothing about this branch.
+    assert not list((SRC / "studio" / "llm").rglob("*.py"))
 
 
 # -- invariant 21: the layer imports nothing from its consumers ------------------------------------

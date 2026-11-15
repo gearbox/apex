@@ -28,9 +28,9 @@ import structlog
 
 from src.api.schemas.studio import PlanVersionCreate
 from src.core.enums import StudioDocumentOrigin, StudioRunKind, StudioRunStage
-from src.db.repositories.studio import StudioRunRepository
+from src.db.repositories.studio import StudioRunRepository, StudioTrackRepository
 from src.llm.port import LlmReplyError
-from src.studio.errors import StudioError, VersionUnchanged
+from src.studio.errors import ParentVersionNotFound, StudioError, StudioNotFound, VersionUnchanged
 from src.studio.planner.graphs.plan import (
     PlanDeps,
     PlanReady,
@@ -69,6 +69,9 @@ if TYPE_CHECKING:
 __all__ = ["ClaimedRun", "RunSwept", "StudioRunExecutor"]
 
 logger = structlog.get_logger(__name__)
+
+WARNING_PARENT_VERSION_REPLACED = "parent_version_replaced"
+"""Run warning: the plan the run started from was deleted before the result was saved."""
 
 _LEASE_GRACE_SECONDS = 30
 """Added to the deadline: the lease outlives the run's own timeout, so only a dead worker's run
@@ -294,34 +297,21 @@ class StudioRunExecutor:
         """Save the plan as an ordinary version **and** mark the run ``succeeded``, atomically.
 
         The version is a child of the plan that was current at claim, ``origin = llm``, and is
-        never made current. If the run is no longer ``running`` the whole transaction is rolled
-        back, so no version outlives a swept run.
+        never made current. If that plan no longer exists (the user switched and deleted it while
+        the model worked) the result becomes a child of the track's current plan instead - a root
+        when it has none - and the run records ``parent_version_replaced``: a paid, valid result
+        is never thrown away because its lineage anchor is gone. If the run is no longer
+        ``running`` the whole transaction is rolled back, so no version outlives a swept run.
 
         Returns:
             ``True`` when the run is now ``succeeded``; ``False`` when it had been swept.
         """
         async with self._db.session() as session:
-            versions = DocumentVersionService(session)
-            result_id: UUID | None
-            try:
-                created, _ = await versions.create(
-                    claimed.track_id,
-                    PlanVersionCreate(
-                        content=plan,
-                        parent_version_id=claimed.context.plan_version_id,
-                        make_current=False,
-                    ),
-                    claimed.user_id,
-                    claimed.product_id,
-                    origin=StudioDocumentOrigin.LLM,
-                )
-                result_id = created.version.id
-            except VersionUnchanged:
-                result_id = claimed.context.plan_version_id  # the result *is* the parent
+            result_id, warnings = await self._save_result(session, claimed, plan)
             run = await StudioRunRepository(session).finish_succeeded(
                 claimed.run_id,
                 result_plan_version_id=result_id,
-                warnings=[],
+                warnings=warnings,
                 llm_calls=meter.calls,
                 prompt_tokens=meter.prompt_tokens,
                 completion_tokens=meter.completion_tokens,
@@ -332,6 +322,65 @@ class StudioRunExecutor:
                 return False
         await self._events.run_updated(run)
         return True
+
+    async def _save_result(
+        self, session: AsyncSession, claimed: ClaimedRun, plan: PlanDocument
+    ) -> tuple[UUID | None, list[dict[str, str]]]:
+        """Write the result version; returns its id and the run's warnings.
+
+        Raises:
+            ParentVersionNotFound: Even the track's current plan could not be used as the parent
+                (cannot happen: the track lock is held, so the pointer cannot move).
+        """
+        versions = DocumentVersionService(session)
+        try:
+            result_id = await self._save_child(
+                versions, claimed, plan, claimed.context.plan_version_id
+            )
+        except ParentVersionNotFound:
+            return await self._save_under_current_plan(session, versions, claimed, plan)
+        return result_id, []
+
+    async def _save_under_current_plan(
+        self,
+        session: AsyncSession,
+        versions: DocumentVersionService,
+        claimed: ClaimedRun,
+        plan: PlanDocument,
+    ) -> tuple[UUID | None, list[dict[str, str]]]:
+        """The claim-time parent is gone: save under the track's current plan (a root if none).
+
+        The refused ``create`` has locked the track and written nothing, so the pointer read here
+        cannot move before the retry. One retry, never a loop: a second refusal propagates.
+        """
+        track = await StudioTrackRepository(session).lock(
+            claimed.track_id, user_id=claimed.user_id, product_id=claimed.product_id
+        )
+        if track is None:  # pragma: no cover - the refused create locked this very row
+            raise StudioNotFound
+        logger.info("studio.run.parent_replaced", run_id=str(claimed.run_id))
+        result_id = await self._save_child(versions, claimed, plan, track.current_plan_version_id)
+        return result_id, [{"code": WARNING_PARENT_VERSION_REPLACED}]
+
+    @staticmethod
+    async def _save_child(
+        versions: DocumentVersionService,
+        claimed: ClaimedRun,
+        plan: PlanDocument,
+        parent_id: UUID | None,
+    ) -> UUID | None:
+        """Create the result as a child of ``parent_id``; an unchanged plan *is* that parent."""
+        try:
+            created, _ = await versions.create(
+                claimed.track_id,
+                PlanVersionCreate(content=plan, parent_version_id=parent_id, make_current=False),
+                claimed.user_id,
+                claimed.product_id,
+                origin=StudioDocumentOrigin.LLM,
+            )
+        except VersionUnchanged:
+            return parent_id  # the result *is* the parent used in this attempt
+        return created.version.id
 
     async def _finish_failure(
         self, claimed: ClaimedRun, failure: RunFailure, meter: _MeteredLlm
