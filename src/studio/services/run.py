@@ -21,7 +21,6 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
-from src.core.enums import StudioRunKind
 from src.core.uid import new_id
 from src.db.integrity import violated_constraint
 from src.db.models.studio import RUN_ONE_ACTIVE_PER_TRACK, RUN_USER_IDEMPOTENCY
@@ -32,15 +31,14 @@ from src.studio.errors import (
     InvalidCursor,
     MemoriesNotAvailable,
     RunInProgress,
-    RunKindNotAvailable,
     RunLimitReached,
     RunNotCancellable,
     RunNotFound,
     RunRateLimited,
     StudioNotFound,
 )
-from src.studio.run_requests import PlanRunRequest, RunRequest, normalize_plan_run_request
 from src.studio.services.mappers import run_out
+from src.studio.services.run_kinds.intake import IntakeContext, intake_for
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -50,7 +48,9 @@ if TYPE_CHECKING:
     from src.api.schemas.studio_runs import RunOut
     from src.api.services.billing import BalanceEvent, BillingService
     from src.core.config import Settings
+    from src.core.enums import StudioRunKind
     from src.db.models.studio import StudioRun
+    from src.studio.run_requests import RunInputs, RunRequest
     from src.studio.services.run_events import StudioRunEvents
 
 __all__ = ["RunWrite", "StudioRunService", "model_key_for"]
@@ -82,8 +82,12 @@ def model_key_for(
     return by_kind.get(kind, default_key)
 
 
-def _request_hash(track_id: UUID, request: PlanRunRequest) -> str:
-    """Identity of a submit: the track plus the normalized body (same key + same hash = replay)."""
+def _request_hash(track_id: UUID, request: RunRequest) -> str:
+    """Identity of a submit: the track plus the normalized body (same key + same hash = replay).
+
+    The request **as sent** (normalized): never the resolved inputs, so a replay is the same run
+    even after the track's current pointers moved (P2a-40).
+    """
     return hashlib.sha256(f"{track_id}\n".encode() + msgspec.json.encode(request)).hexdigest()
 
 
@@ -116,10 +120,13 @@ class StudioRunService:
         user_id: UUID,
         product_id: str,
     ) -> RunWrite:
-        """Accept a run (or replay it): validate, check the limits, insert it ``queued``, reserve.
+        """Accept a run (or replay it): validate, resolve its inputs, check the limits, insert it
+        ``queued``, reserve.
 
-        The run row and the token reservation are written together; a refusal at any step leaves
-        neither behind.
+        What the run works on (the plan, the lyrics, the language) is resolved here, under the
+        track lock, and stored on the run: a wrong or missing input is a ``4xx`` with no charge,
+        and the worker never looks at the track's current pointers again (P2a-40). The run row and
+        the token reservation are written together; a refusal at any step leaves neither behind.
 
         Args:
             track_id: Track the run is for.
@@ -133,22 +140,27 @@ class StudioRunService:
 
         Raises:
             IdempotencyKeyRequired: No usable key.
-            RunKindNotAvailable: A kind other than ``plan``.
             MemoriesNotAvailable: ``memory_ids`` is not empty.
-            StudioDocumentInvalid: The brief is empty / too long after normalization.
+            StudioDocumentInvalid: The body is invalid after normalization (an empty brief or
+                instruction, a bad avoid word, empty or overlapping targets ...), or an input
+                cannot be used (no vocal section in the plan, no language, lyrics that are not
+                valid today, a target that does not fit).
             IdempotencyConflict: The key belongs to a different request.
             StudioNotFound: The track is not the caller's.
+            PlanRequired: ``lyrics`` without a plan to write for.
+            PlanVersionNotFound: The named plan is not a plan version of this track.
+            LyricsRequired: ``revise_lyrics`` without lyrics to revise.
+            LyricsVersionNotFound: The named lyrics are not a lyrics version of this track.
             RunRateLimited: Too many runs were created in the last hour.
             RunLimitReached: The user has too many active runs.
             RunInProgress: The track already has an active run.
             InsufficientBalanceError: The reservation was refused (``402``).
         """
         key = self._valid_key(idempotency_key)
-        if not isinstance(request, PlanRunRequest):
-            raise RunKindNotAvailable
         if request.memory_ids:
             raise MemoriesNotAvailable
-        normalized = normalize_plan_run_request(request)
+        intake = intake_for(request)
+        normalized = intake.normalize(request)
         request_hash = _request_hash(track_id, normalized)
 
         replay = await self._replay(key, request_hash, user_id, product_id)
@@ -163,6 +175,10 @@ class StudioRunService:
         if replay is not None:
             return replay
 
+        inputs = await intake.resolve_inputs(
+            IntakeContext(self._session, track_id, user_id, product_id), normalized
+        )
+
         await self._runs.lock_user_quota(user_id)
         if (
             await self._runs.count_created_in_last_hour(user_id=user_id, product_id=product_id)
@@ -175,7 +191,7 @@ class StudioRunService:
         ):
             raise RunLimitReached
 
-        kind = StudioRunKind.PLAN
+        kind = intake.kind
         model_key = model_key_for(
             kind,
             by_kind=self._settings.studio_llm_model_by_kind,
@@ -189,6 +205,7 @@ class StudioRunService:
                 key=key,
                 request_hash=request_hash,
                 request=normalized,
+                inputs=inputs,
                 model_key=model_key,
                 price=price,
                 user_id=user_id,
@@ -212,7 +229,8 @@ class StudioRunService:
         kind: StudioRunKind,
         key: str,
         request_hash: str,
-        request: PlanRunRequest,
+        request: RunRequest,
+        inputs: RunInputs | None,
         model_key: str,
         price: int,
         user_id: UUID,
@@ -229,6 +247,7 @@ class StudioRunService:
                 idempotency_key=key,
                 request_hash=request_hash,
                 request=msgspec.to_builtins(request),
+                inputs=msgspec.to_builtins(inputs) if inputs is not None else None,
                 model_key=model_key,
                 price_tokens=price,
             )
@@ -245,7 +264,7 @@ class StudioRunService:
                     session=self._session,
                     product_id=product_id,
                     user_id=user_id,
-                    description="Studio planner run",
+                    description="Studio run",
                 )
                 await self._runs.set_billing_account(run.id, account.id)
                 balance_event = reserved.event

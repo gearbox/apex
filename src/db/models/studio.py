@@ -356,7 +356,7 @@ _ACTIVE_RUN_STATUSES = ", ".join(f"'{m.value}'" for m in sorted(StudioRunStatus.
 
 
 class StudioRun(Base):
-    """One planner run: an LLM job that turns a brief into a new plan version of a track.
+    """One planner run: an LLM job that writes a new plan or lyrics version of a track.
 
     The row is the whole state machine (``queued → running → succeeded | failed``,
     ``queued → cancelled``); every transition is a guarded ``UPDATE … WHERE status = …`` that
@@ -383,6 +383,11 @@ class StudioRun(Base):
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    inputs: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    """What the run works on (``RunInputs``), resolved when it was accepted; ``NULL`` for ``plan``.
+
+    Ids and the language only - never document text. Read by the claim and by the delete guard
+    (a version an active run takes as input cannot be deleted)."""
     context_snapshot: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
     prompt_version: Mapped[str | None] = mapped_column(String(40), nullable=True)
     model_key: Mapped[str] = mapped_column(String(60), nullable=False)

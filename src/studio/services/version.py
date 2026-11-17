@@ -25,7 +25,11 @@ from src.api.schemas.studio import (
     VersionSummary,
 )
 from src.core.enums import StudioDocumentKind, StudioIncompatibleLyricsPolicy
-from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTrackRepository
+from src.db.repositories.studio import (
+    StudioDocumentVersionRepository,
+    StudioRunRepository,
+    StudioTrackRepository,
+)
 from src.studio.documents import (
     CURRENT_SCHEMA_VERSION,
     LyricsDocument,
@@ -43,6 +47,7 @@ from src.studio.errors import (
     StudioError,
     StudioNotFound,
     VersionHasChildren,
+    VersionInUseByRun,
     VersionIsCurrent,
     VersionIsLyricsBase,
     VersionLimitReached,
@@ -87,6 +92,7 @@ class DocumentVersionService:
         self._session = session
         self._tracks = StudioTrackRepository(session)
         self._versions = StudioDocumentVersionRepository(session)
+        self._runs = StudioRunRepository(session)
 
     # -- helpers -----------------------------------------------------------------------------
 
@@ -505,13 +511,15 @@ class DocumentVersionService:
     # -- delete ------------------------------------------------------------------------------
 
     async def delete(self, version_id: UUID, user_id: UUID, product_id: str) -> None:
-        """Delete a version that is not current, has no children and is not a lyrics base.
+        """Delete a version that is not current, has no children, is not a lyrics base and is not
+        the input of a run in progress.
 
         Raises:
             StudioNotFound: No such version for the caller.
             VersionIsCurrent: It is the track's current plan or lyrics.
             VersionHasChildren: Other versions list it as their parent.
             VersionIsLyricsBase: Lyrics versions are based on this plan version.
+            VersionInUseByRun: A queued or running run takes it as its plan or lyrics input.
         """
         version = await self._versions.get(version_id, user_id=user_id, product_id=product_id)
         if version is None:
@@ -550,3 +558,8 @@ class DocumentVersionService:
             raise VersionHasChildren(blockers.child_count)
         if blockers.lyrics_base_count:
             raise VersionIsLyricsBase(blockers.lyrics_base_count)
+        # A lyrics result is tied to its plan's section ids, so a run cannot fall back if its
+        # input disappears mid-run (P2a-41). The caller holds the track lock, and so does ``submit``:
+        # no run can start between this answer and the delete.
+        if await self._runs.active_run_uses_version(version.track_id, version.id):
+            raise VersionInUseByRun

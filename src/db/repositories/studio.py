@@ -26,6 +26,7 @@ from sqlalchemy import (
     func,
     literal,
     literal_column,
+    or_,
     select,
     text,
     tuple_,
@@ -859,8 +860,11 @@ class StudioRunRepository:
         request: Mapping[str, object],
         model_key: str,
         price_tokens: int,
+        inputs: Mapping[str, object] | None = None,
     ) -> StudioRun:
         """Insert a ``queued`` run.
+
+        ``inputs`` is what the run works on, resolved at submit (``None`` for a ``plan`` run).
 
         Raises:
             sqlalchemy.exc.IntegrityError: Another active run holds the track
@@ -879,6 +883,7 @@ class StudioRunRepository:
                 idempotency_key=idempotency_key,
                 request_hash=request_hash,
                 request=dict(request),
+                inputs=dict(inputs) if inputs is not None else None,
                 model_key=model_key,
                 price_tokens=price_tokens,
             )
@@ -989,6 +994,28 @@ class StudioRunRepository:
         )
         return result.first() is not None
 
+    async def active_run_uses_version(self, track_id: UUID, version_id: UUID) -> bool:
+        """Whether an active run of the track takes ``version_id`` as its plan or lyrics input.
+
+        At most one run is active per track (``uq_studio_runs_one_active_per_track``), so this reads
+        one row. The caller holds the track lock, as ``submit`` does, so no new run can slip in
+        between the answer and the action it guards.
+        """
+        needle = str(version_id)
+        result = await self._session.execute(
+            select(StudioRun.id)
+            .where(
+                StudioRun.track_id == track_id,
+                StudioRun.status.in_([s.value for s in StudioRunStatus.active()]),
+                or_(
+                    StudioRun.inputs["plan_version_id"].astext == needle,
+                    StudioRun.inputs["lyrics_version_id"].astext == needle,
+                ),
+            )
+            .limit(1)
+        )
+        return result.first() is not None
+
     # -- transitions (all guarded; ``None`` = the run was no longer in the expected state) ---
 
     async def cancel_queued(
@@ -1072,8 +1099,9 @@ class StudioRunRepository:
         llm_calls: int,
         prompt_tokens: int,
         completion_tokens: int,
+        result_lyrics_version_id: UUID | None = None,
     ) -> StudioRun | None:
-        """``running → succeeded``."""
+        """``running → succeeded``; a plan run sets the plan result, the others the lyrics one."""
         result = await self._session.execute(
             update(StudioRun)
             .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.RUNNING.value)
@@ -1081,6 +1109,7 @@ class StudioRunRepository:
                 status=StudioRunStatus.SUCCEEDED.value,
                 stage=None,
                 result_plan_version_id=result_plan_version_id,
+                result_lyrics_version_id=result_lyrics_version_id,
                 warnings=[dict(w) for w in warnings],
                 llm_calls=llm_calls,
                 prompt_tokens=prompt_tokens,

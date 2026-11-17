@@ -54,6 +54,7 @@ __all__ = [
     "normalize_lyrics",
     "normalize_plan",
     "normalize_text",
+    "normalize_tokens",
     "to_content",
     "validate_built_document",
 ]
@@ -105,7 +106,7 @@ def _has_reserved(value: str) -> bool:
     return any(ch in _RESERVED for ch in value)
 
 
-def _normalize_tokens(
+def normalize_tokens(
     values: Iterable[str],
     path: str,
     issues: list[DocumentIssue],
@@ -141,8 +142,8 @@ def _normalize_tag_pair(
     issues: list[DocumentIssue],
 ) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """Normalize a (tags, avoid) pair and flag tags that appear in both."""
-    norm_tags = _normalize_tokens(tags, tags_path, issues, check_reserved=True)
-    norm_avoid = _normalize_tokens(avoid, avoid_path, issues, check_reserved=True)
+    norm_tags = normalize_tokens(tags, tags_path, issues, check_reserved=True)
+    norm_avoid = normalize_tokens(avoid, avoid_path, issues, check_reserved=True)
     wanted = {tag.casefold() for tag in norm_tags if tag}
     issues.extend(
         DocumentIssue(f"{avoid_path}[{index}]", "tag_conflict")
@@ -232,7 +233,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
     if not title:
         issues.append(DocumentIssue("title", _EMPTY))
 
-    references = _normalize_tokens(
+    references = normalize_tokens(
         plan.references, "references", issues, check_reserved=False, check_duplicates=False
     )
     global_style = _normalize_style(plan.global_style, "global_style", issues)
@@ -256,7 +257,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
                 issues.append(DocumentIssue(f"{base}.label", "reserved_characters"))
 
         style = _normalize_style(section.style, f"{base}.style", issues)
-        delivery = _normalize_tokens(
+        delivery = normalize_tokens(
             section.delivery, f"{base}.delivery", issues, check_reserved=True
         )
         _flag_reserved_descriptors(delivery, f"{base}.delivery", issues)
@@ -359,7 +360,7 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
                 issues.append(DocumentIssue(f"{line_base}.text", _EMPTY))
             elif _has_reserved(text):
                 issues.append(DocumentIssue(f"{line_base}.text", "reserved_characters"))
-            delivery = _normalize_tokens(
+            delivery = normalize_tokens(
                 line.delivery, f"{line_base}.delivery", issues, check_reserved=True
             )
             if delivery and is_header_text(", ".join(delivery)):
@@ -409,7 +410,7 @@ def collect_artist_style(
         style_tags, global_avoid, "style_tags", "global_avoid", issues
     )
     _flag_reserved_tempo_tags(tags, "style_tags", issues)
-    references = _normalize_tokens(
+    references = normalize_tokens(
         aesthetic_references,
         "aesthetic_references",
         issues,

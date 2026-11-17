@@ -1,4 +1,4 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a: Studio Foundation, Suno import, Planner runs)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a: Studio Foundation, Suno import, Planner and lyrics runs)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
 > **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) and `feat/studio-planner-runs` (migration `057_studio_runs`).
@@ -268,13 +268,16 @@ There is deliberately **no silent auto-detach**: dropping the lyrics is always t
 
 ## 6. Deleting versions
 
-`DELETE /versions/{id}` succeeds only if the version is **not current**, has **no children** and is **not the base of a lyrics version**:
+`DELETE /versions/{id}` succeeds only if the version is **not current**, has **no children**, is **not the base of a lyrics version** and is **not the input of a run in progress**:
 
 | Refusal | Code | `detail` |
 |---|---|---|
 | it is the track's current plan or lyrics | `409 version_is_current` | |
 | other versions list it as `parent_version_id` | `409 version_has_children` | `{count}` |
 | lyrics versions are based on this plan | `409 version_is_lyrics_base` | `{count}` |
+| a `queued` or `running` run takes it as its plan or lyrics input (§11) | `409 version_in_use_by_run` | |
+
+`version_in_use_by_run` clears by itself: the run ends (or is cancelled while `queued`) and the version can be deleted. A `lyrics` result is tied to the section ids of its plan, so a plan cannot disappear under a run that is writing lyrics for it.
 
 Version numbers are never reused: after deleting #3, the next version is #4.
 
@@ -289,11 +292,16 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 400 | `invalid_cursor` | malformed `cursor` |
 | 404 | `not_found` | missing, someone else's, or another product's resource (never distinguishable) |
 | 404 | `artist_not_found` | `artist_id` is not one of the caller's artists |
+| 404 | `plan_version_not_found` | a `lyrics` run's `plan_version_id` is not a plan version of this track (§11) |
+| 404 | `lyrics_version_not_found` | a `revise_lyrics` run's `lyrics_version_id` is not a lyrics version of this track (§11) |
 | 409 | `artist_name_conflict` | name already used (case-insensitive) |
 | 409 | `artist_limit_reached` | 50 artists |
 | 409 | `artist_in_use` | `detail: {project_count}` |
 | 409 | `project_has_tracks` | disabling studio on a project with tracks |
 | 409 | `track_limit_reached` | 64 tracks |
+| 409 | `plan_required` | lyrics made current without a plan; a `lyrics` run with no plan to write for (§11) |
+| 409 | `lyrics_required` | a `revise_lyrics` run on a track with no lyrics (§11) |
+| 409 | `version_in_use_by_run` | deleting the input of a run in progress (§6) |
 | 422 | `track_order_mismatch` | `track_ids` is not exactly the project's track set (missing, extra or duplicate id) |
 | 422 | `document_invalid` | §4 — also artist / track / project-profile requests (empty or over-long once normalized, tag conflicts, …) |
 | 422 | `import_invalid` | §10 — pasted Suno text that cannot become valid documents; issues carry the pasted line they come from |
@@ -472,9 +480,17 @@ Other statuses: `404` (not your track, any product mismatch, studio off), `400` 
 
 ## 11. Planner runs
 
-A **run** is an asynchronous LLM job on a track. In this phase there is one kind, **`plan`**: the user writes a short *brief*, the server asks a language model for a song structure, validates it exactly as it would validate a plan typed by the user, and saves it as an **ordinary plan version** (`origin: "llm"`). `lyrics` and `revise_lyrics` are reserved: they are part of the wire union but answer `422 run_kind_not_available`.
+A **run** is an asynchronous LLM job on a track. There are three kinds, one wire union on `kind`:
 
-> **Privacy — tell the user.** The brief, the track title, the project concept, the artist (name, persona, voice notes, style tags, things to avoid, aesthetic references) and a short summary of the track's current plan are **sent to the configured LLM provider**. Nothing else leaves the server; the run is never traced to any third-party observability service. The server never logs any of it.
+| `kind` | What it does | Result |
+|---|---|---|
+| `plan` | the user writes a short *brief*; the model proposes a song structure | a new **plan** version |
+| `lyrics` | the model writes lyrics for a plan version | a new **lyrics** version |
+| `revise_lyrics` | the model rewrites whole sections and/or single lines of existing lyrics, following an instruction | a new **lyrics** version |
+
+In every case the server validates what the model returns **exactly as it would validate a document typed by the user**, and saves it as an **ordinary version** (`origin: "llm"`, never made current).
+
+> **Privacy — tell the user.** What a run sends to the **configured LLM provider**: the track title, the project concept, the artist (name, persona, voice notes, style tags, things to avoid, aesthetic references); for `plan` the brief and a short summary of the track's current plan; for `lyrics` the **whole plan** (title, idea, tempo, tags, every section with its delivery, tags and notes), the optional brief and the avoid words; for `revise_lyrics` the plan, the **current lyrics**, the targets, the instruction and the avoid words. Nothing else leaves the server; a run is never traced to any third-party observability service. The server never logs any of it.
 
 ### Gating
 
@@ -506,9 +522,65 @@ Content-Type: application/json
 ```
 
 - `brief`: 1–4000 characters. It is NFC-normalized like every studio string, and the 4000 limit is re-checked **after** normalization (`422 document_invalid`, issue `brief` `too_long_after_normalization`; a blank brief is `empty_after_normalization`).
-- Unknown fields are refused (`400`). `kind` is the discriminant: `plan` today; `lyrics` / `revise_lyrics` → `422 run_kind_not_available`.
+- Unknown fields are refused (`400`) in every kind. `kind` is the discriminant: `plan`, `lyrics` or `revise_lyrics`.
 - The response is a **`RunOut`** (below) with `status: "queued"`, `revision: 1`. `202` means "accepted"; the work happens in the background.
 
+#### `kind: "lyrics"` — write lyrics for a plan
+
+```jsonc
+{ "kind": "lyrics",
+  "plan_version_id": "…",          // optional; default: the track's current plan
+  "language": "en",                // optional; see "Language" below
+  "line_syllables": { "min": 6, "max": 10 },   // optional; every line should have min..max syllables
+  "avoid_words": ["baby"],         // optional, ≤ 30 items of 1–40 characters
+  "brief": "about leaving a small town",       // optional extra direction, ≤ 4000 characters
+  "memory_ids": [], "auto_fill": true }
+```
+
+- `avoid_words` are normalized like tags (NFC, trimmed, a repeat or an empty item is `422`, issue `avoid_words[i]`; square brackets are refused). They match **whole words or phrases, case-insensitively**, with no stemming: `baby` matches "Oh BABY, come" and not "babysitter".
+- `line_syllables.min > max` is `422` (`line_syllables` / `syllable_range_inverted`).
+- The run writes lines for **every section of the plan that is not instrumental**; instrumental sections get none.
+
+#### `kind: "revise_lyrics"` — rewrite parts of lyrics
+
+```jsonc
+{ "kind": "revise_lyrics",
+  "instruction": "make the chorus more hopeful",     // required, 1–1000 characters
+  "targets": {
+    "sections": ["<plan section id>"],               // rewrite the whole section (its number of lines may change)
+    "lines": [{ "section_id": "<plan section id>", "line": 3 }]   // replace one line, 0-based
+  },
+  "lyrics_version_id": "…",        // optional; default: the track's current lyrics
+  "line_syllables": { "min": 6, "max": 10 },         // optional; default: the input lyrics' own range
+  "avoid_words": [], "memory_ids": [], "auto_fill": true }
+```
+
+- `targets` must name **something** (`422`, `targets` / `targets_required`), without repeats (`duplicate_target`) and without a line whose section is also a section target (`overlapping_targets`). Paths are `targets.sections[i]` / `targets.lines[i]`.
+- **Everything not targeted stays byte-identical** to the input lyrics. A section target **may** name a vocal section that has no lines yet: the revision writes it. A line target never changes the number of lines.
+- The revision starts from the **input lyrics' own plan** (`based_on_plan_version_id` of that lyrics version), which need not be the track's current plan. The language is the lyrics' own.
+
+#### What a run works on is fixed when it is accepted
+
+`plan_version_id` / `lyrics_version_id` / the language are **resolved at submit**, under the track lock, and stored on the run. A wrong or missing input is a `4xx` **with no run and no charge**. After that the run never looks at the track's current pointers again: switching the current plan or lyrics while the run works changes nothing about what it does. An idempotent replay returns the same run even after the pointers moved.
+
+A version that a **queued or running** run takes as input cannot be deleted (`409 version_in_use_by_run`, §6).
+
+| Check at submit | Error |
+|---|---|
+| `lyrics`: `plan_version_id` is not a plan version of this track | `404 plan_version_not_found` |
+| `lyrics`: no `plan_version_id` and the track has no current plan | `409 plan_required` |
+| `lyrics`: the plan is instrumental, or has no section that takes lines | `422 document_invalid` — `plan_version_id` / `plan_has_no_vocal_sections` |
+| `lyrics`: no language (see below) | `422 document_invalid` — `language` / `language_required` |
+| `revise_lyrics`: `lyrics_version_id` is not a lyrics version of this track | `404 lyrics_version_not_found` |
+| `revise_lyrics`: no `lyrics_version_id` and the track has no current lyrics | `409 lyrics_required` |
+| `revise_lyrics`: the input lyrics are **not valid today** against their plan | `422 document_invalid` — the §4 issues, paths prefixed `lyrics.` (fix the lyrics first) |
+| `revise_lyrics`: a section target is not a section of the lyrics' plan | `422` — `targets.sections[i]` / `unknown_section` |
+| `revise_lyrics`: a section target is an instrumental section | `422` — `targets.sections[i]` / `instrumental_section` |
+| `revise_lyrics`: a line target's section has no lines, or `line` is past its last line | `422` — `targets.lines[i]` / `line_out_of_range` |
+
+All target problems are reported together in one `422`.
+
+**Language** (`lyrics`): the request's `language`, else the language of the track's **current lyrics**, else the project artist's default language; with none of them the request is `422 language_required`.
 **Reservation.** The run's price (default **1 token**, configured per kind) is **reserved when the run is accepted**, in the same transaction that creates it: a `402` leaves no run and no ledger row. The price is **refunded in full** when the run ends `failed` or `cancelled`, and kept when it `succeeded`. A price of `0` writes no ledger rows at all. Balance changes arrive as ordinary `balance.updated` events.
 
 #### Idempotency
@@ -523,12 +595,13 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
 | `400` | *(validation)* | malformed body, unknown field, `brief` empty or over 4000 as sent |
 | `402` | `insufficient_balance` | the account cannot cover the price — nothing was written |
 | `404` | `not_found` | runs disabled, or the track is not yours |
+| `404` | `plan_version_not_found` / `lyrics_version_not_found` | the named input is not a version of this track and kind |
+| `409` | `plan_required` / `lyrics_required` | `lyrics` / `revise_lyrics` with nothing to work on |
 | `409` | `run_in_progress` | the track already has a `queued` or `running` run (**one active run per track**) |
 | `409` | `run_limit_reached` | you already have 3 active runs (configurable) |
 | `409` | `idempotency_conflict` | see above |
-| `422` | `run_kind_not_available` | `lyrics` / `revise_lyrics` |
 | `422` | `memories_not_available` | `memory_ids` is not empty |
-| `422` | `document_invalid` | the brief is empty or too long after normalization (`detail.issues`) |
+| `422` | `document_invalid` | the body is invalid after normalization, or an input cannot be used (the table above) — `detail.issues` |
 | `429` | `run_rate_limited` | more than 30 runs created in the last hour (configurable) |
 
 `409 run_in_progress` is also what `DELETE /v1/studio/tracks/{id}` answers while the track has an active run (a finished run never blocks a delete; deleting the track removes its runs).
@@ -537,17 +610,17 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
 
 ```jsonc
 { "id": "…", "track_id": "…",
-  "kind": "plan",
+  "kind": "plan | lyrics | revise_lyrics",
   "status": "queued | running | succeeded | failed | cancelled",
   "stage": null,                      // running only: "context" | "drafting" | "validating" | "revising" | "saving"
   "revision": 1,                      // strictly increases with every status or stage change
   "price_tokens": 1, "model_key": "grok",   // the operator's `LLM_MODELS` key, informational
-  "result_plan_version_id": null,     // set when succeeded
-  "result_lyrics_version_id": null,   // always null for now
-  "warnings": [],                     // [{ "code", "path"? }] — see "Run warnings" below
+  "result_plan_version_id": null,     // set when a plan run succeeded
+  "result_lyrics_version_id": null,   // set when a lyrics / revise_lyrics run succeeded
+  "warnings": [],                     // [{ "code", "path", "count" }] (path / count null when they do not apply)
   "error_code": null,                 // set when failed (table below)
   "error_detail": null,               // failed: issue paths and codes only — never model or user text
-  "llm_calls": 0,                     // model calls made (0–3 for a plan run)
+  "llm_calls": 0,                     // model calls made (plan ≤ 3, lyrics ≤ 5, revise_lyrics ≤ 3)
   "created_at": "…", "started_at": null, "finished_at": null }
 ```
 
@@ -563,7 +636,7 @@ queued ──claim──▶ running ──▶ succeeded
 
 - A run is **terminal once**: `succeeded`, `failed` and `cancelled` never change again. `finished_at` is set exactly when the run is terminal.
 - `running` carries a `stage`: `context` (the worker froze what the model will be told) → `drafting` (first model call) → `validating` → `revising` ↔ `validating` (at most twice) → `saving`. Stages are informational; `status` is authoritative.
-- **Budget:** a plan run makes at most **3** model calls (the first draft and two revisions; a reply that is not valid JSON for the schema is re-asked inside the same budget). The whole run has a **180 s** deadline; a run whose worker died is failed `run_timeout` and refunded — it is never executed twice.
+- **Budget:** a `plan` run makes at most **3** model calls (the first draft and two revisions), a `lyrics` run at most **5** (the draft and three fix rounds), a `revise_lyrics` run at most **3** (the revision and two fix rounds). A reply that is not valid JSON for the schema, or that answers lines nobody asked about, is re-asked inside the same budget. A fix round asks the model for replacements of exactly the lines that were rejected, one for one — every accepted line is frozen — or, when something structural is wrong (a missing section), for the whole reply again. The whole run has a **180 s** deadline; a run whose worker died is failed `run_timeout` and refunded — it is never executed twice.
 - **Cancel** works only while `queued`: `POST …/cancel` → `200` with `status: "cancelled"` and a full refund. A `running` or finished run answers `409 run_not_cancellable` (no free spend by start-and-cancel). Another user's run is `404`.
 
 #### `error_code` of a `failed` run
@@ -575,8 +648,9 @@ queued ──claim──▶ running ──▶ succeeded
 | `llm_output_truncated` | the reply hit the output limit | — |
 | `llm_output_invalid` | the reply was not a valid object on the last allowed call | — |
 | `content_policy_refused` | the model declined the brief under the product's content policy | — |
-| `brief_unusable` | the model found the brief too empty or contradictory to plan from | — |
+| `brief_unusable` | the model found the brief (or, for a revision, the instruction) too empty, unclear or contradictory to act on | — |
 | `plan_invalid` | after the allowed revisions the plan still failed validation | `{ "issues": [{ "path", "code" }] }` — the §4 vocabulary, with paths in the **plan document** |
+| `lyrics_invalid` | after the allowed rounds the lyrics still failed a **hard** check (a bracket in a line, a delivery that reads as a section header, a line over 300 characters, a section over 64 lines, a missing section ...). Soft misses never cause this | `{ "issues": [{ "path", "code" }] }` — paths in the **input plan's sections**: `sections[p]` or `sections[p].lines[j]`, `p` = the section's index in the plan, `j` = the 0-based line. No lyrics document was saved, so these are the only paths that mean something |
 | `run_timeout` | the 180 s deadline passed, or the worker died | — |
 | *any §4–§6 code* | the save step was refused, e.g. `version_limit_reached` | — |
 | `internal_error` | anything unexpected (logged server-side, with no text) | — |
@@ -585,7 +659,7 @@ All failures refund the reservation. A failed or cancelled run leaves the track 
 
 ### Result: an ordinary version, never made current
 
-A `succeeded` run has `result_plan_version_id`. That version is a plain plan version of §2.2 with `origin: "llm"`, `is_current: false` and `parent_version_id` = the plan that was **current when the run started** (`null` if the track had none) — unless that plan was deleted while the run was working: see "The parent rule" below. **The run never changes the track's current plan or lyrics** — the user looks at the result (`GET /v1/studio/versions/{id}`, or the version list) and adopts it with `PUT /v1/studio/tracks/{id}/current` (or `POST …/versions` with `make_current`), subject to the usual pair-compatibility rules (§5). If the model's plan is identical to the plan it started from, the result *is* that parent version. Deleting the result version later keeps the run and clears `result_plan_version_id`.
+A `succeeded` `lyrics` or `revise_lyrics` run has `result_lyrics_version_id` instead; see "Lyrics results" below. A `succeeded` `plan` run has `result_plan_version_id`. That version is a plain plan version of §2.2 with `origin: "llm"`, `is_current: false` and `parent_version_id` = the plan that was **current when the run started** (`null` if the track had none) — unless that plan was deleted while the run was working: see "The parent rule" below. **The run never changes the track's current plan or lyrics** — the user looks at the result (`GET /v1/studio/versions/{id}`, or the version list) and adopts it with `PUT /v1/studio/tracks/{id}/current` (or `POST …/versions` with `make_current`), subject to the usual pair-compatibility rules (§5). If the model's plan is identical to the plan it started from, the result *is* that parent version. Deleting the result version later keeps the run and clears `result_plan_version_id`.
 
 #### The parent rule
 
@@ -596,13 +670,41 @@ A run takes a few seconds to a minute and a half, and the user may keep working 
 3. A plan that was only *switched away from* (not deleted) is still the parent: the lineage is the plan the run started from.
 4. If the model's plan equals the parent that ends up being used, the result *is* that parent (as above).
 
+#### Lyrics results
+
+A `lyrics` or `revise_lyrics` result is a plain **lyrics** version of §2.2 (`origin: "llm"`, `is_current: false`, language and `line_syllables` as the run used them):
+
+| Kind | `based_on_plan_version_id` | `parent_version_id` |
+|---|---|---|
+| `lyrics` | the plan the run wrote for (the one resolved at submit) | the lyrics that were **current when the run started** (`null` if none) — if those were deleted meanwhile, the track's current lyrics at save time (or `null`) and the warning `parent_version_replaced`, exactly like a plan run |
+| `revise_lyrics` | the **input lyrics' plan** | the **input lyrics** (they cannot be deleted while the run is active) |
+
+A revision that changes nothing **succeeds with the input version as its result** (`result_lyrics_version_id` = the version you revised, no new version is written) and the warning `revision_unchanged`. A `lyrics` result equal to its parent *is* that parent.
+
+The run's lyrics are validated like any lyrics you could post (§4) — and then checked **softly** against what you asked for. After the model's call budget is spent:
+
+* a **hard** problem fails the run (`lyrics_invalid`, refunded, no version);
+* a **soft** miss does **not**: the run succeeds and the misses are listed as warnings, because one line you can fix by hand is not worth throwing away a paid, usable draft. The soft checks are *the syllable range* and *the avoid words*; a revision checks **only the lines it changed**, never your own.
+
+##### Syllable counting
+
+Counting depends on the language and is a heuristic, which is why a miss is only ever a warning. Russian, Ukrainian and Bulgarian count one syllable per vowel letter; Serbian, Croatian and Bosnian (Cyrillic or Latin) count vowel letters plus a syllabic *r*; English counts vowel groups with a **±1 tolerance**. A line with a digit, or with a word outside the language's alphabet, is **not counted** (it is skipped and reported as a count). Any other language is not checked at all. The range you asked for is still stored on the result.
+
 #### Run warnings
 
-`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path"?: string }`, with no user text. A run with none has `[]`.
+`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path": string | null, "count": number | null }` (`path` and `count` are `null` when they do not apply), with no user text. A run with none has `[]`. At most 100 are kept: a longer list ends with `warnings_truncated`.
 
 | `code` | Meaning |
 |---|---|
-| `parent_version_replaced` | the plan the run started from was deleted before the result was saved; `parent_version_id` of the result is the track's current plan at save time, or `null` (see "The parent rule"). Offer the user the result as usual; do not treat it as a failure. |
+| `parent_version_replaced` | the version the run started from (the plan, or for `lyrics` the current lyrics) was deleted before the result was saved; `parent_version_id` of the result is the track's current version of that kind at save time, or `null` (see "The parent rule"). Offer the user the result as usual; do not treat it as a failure. |
+| `revision_unchanged` | the revision changed nothing; the result is the version you revised |
+| `syllable_range_missed` | `path`: the line; `count`: the syllables counted (compare with `line_syllables`; English has ±1 tolerance already applied) |
+| `avoid_word_used` | `path`: the line that contains an avoid word or phrase (the word itself is not reported) |
+| `syllable_check_skipped_lines` | `count`: lines that could not be counted (a digit or a word outside the language's alphabet) |
+| `syllable_check_skipped` | a `line_syllables` range was asked for, but the language has no counter |
+| `warnings_truncated` | there were more warnings than are kept |
+
+**Paths.** The `path` of a warning on a **succeeded** run indexes the **result lyrics document**: `sections[i].lines[j]`, both 0-based — exactly the document `GET /v1/studio/versions/{result_lyrics_version_id}` returns. (For a `revision_unchanged` result that is the input lyrics.) The `issues` of a **failed** run's `error_detail` index the **input plan's sections**, as described above. The two are different index spaces on purpose: a failed run saved nothing, so the plan is the only structure the client has.
 
 The plan the model returns is validated like user input (§4): normalization, the reserved descriptor / tempo-tag rules, caps and limits. Section ids are minted by the server. `idea` holds the brief (so it is stored with the plan and **never exported** to Suno); `references` stay empty.
 
@@ -625,4 +727,6 @@ Published on the user's SSE channel after **every committed status or stage chan
 - Treat `202` and `200` the same way ("here is the run"); generate a fresh `Idempotency-Key` per *user action* (not per retry).
 - While a track's run is `queued` or `running`, disable "Plan with AI" for that track (`run_in_progress` is the server-side guard) and show `stage`.
 - A `failed` run has been refunded already — say so. Offer "try again" with a new key.
-- Show the privacy note (above) next to the brief field, and the price (`price_tokens`) before submitting.
+- Show the privacy note (above) next to the brief / instruction field, and the price (`price_tokens`) before submitting.
+- For `revise_lyrics`, let the user pick targets from the lyrics they are looking at (section ids from the plan, 0-based line numbers). If the input lyrics are no longer valid (`422` with `lyrics.`-prefixed issues), send the user to fix them first.
+- After a `lyrics` / `revise_lyrics` success, show the warnings on the lines they point at, and offer the result as a new version — never switch the current lyrics for the user.

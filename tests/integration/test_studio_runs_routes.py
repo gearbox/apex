@@ -295,17 +295,6 @@ class TestSubmit:
         assert response.status_code == 429
         assert response.json()["error"] == "run_rate_limited"
 
-    @pytest.mark.parametrize("kind", ["lyrics", "revise_lyrics"])
-    async def test_422_for_kinds_that_are_not_available(
-        self, client: AsyncTestClient[Litestar], world: RunWorld, kind: str
-    ) -> None:
-        actor = await world.add_actor()
-        track_id = await world.new_track(actor)
-        response = await _post(client, actor, track_id, body={"kind": kind, "brief": "x"})
-        assert response.status_code == 422
-        assert response.json()["error"] == "run_kind_not_available"
-        assert await world.count_runs(actor) == 0
-
     async def test_422_for_memories(
         self, client: AsyncTestClient[Litestar], world: RunWorld
     ) -> None:

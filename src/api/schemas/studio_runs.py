@@ -35,10 +35,12 @@ __all__ = [
 
 
 class RunWarningOut(msgspec.Struct, kw_only=True):
-    """A non-fatal note about a finished run: a stable ``code`` and, where it applies, a ``path``."""
+    """A non-fatal note about a succeeded run: a stable ``code`` and, where it applies, a ``path``
+    and a ``count``. Codes, paths and numbers only - never text."""
 
     code: str
     path: str | None = None
+    count: int | None = None
 
 
 class RunOut(msgspec.Struct, kw_only=True):
