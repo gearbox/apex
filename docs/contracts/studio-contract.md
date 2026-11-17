@@ -686,23 +686,28 @@ The run's lyrics are validated like any lyrics you could post (§4) — and then
 * a **hard** problem fails the run (`lyrics_invalid`, refunded, no version);
 * a **soft** miss does **not**: the run succeeds and the misses are listed as warnings, because one line you can fix by hand is not worth throwing away a paid, usable draft. The soft checks are *the syllable range* and *the avoid words*; a revision checks **only the lines it changed**, never your own.
 
+The same holds when a later **fix round fails**. Once the model has produced a document that validates, the rounds that follow only try to improve it. If one of them fails at the model provider (unreachable, refused, truncated, or no usable reply within the call budget) while only soft misses were left, the run **keeps the valid document**: it `succeeded`, is charged, and carries the soft warnings plus `revision_incomplete`. If a **hard** problem was still open there is no valid document to keep, so the run fails with the provider's own `error_code` (`llm_unavailable`, `llm_rejected`, `llm_output_truncated` or `llm_output_invalid`) and is refunded. A model that *declines* in a fix round is still a refusal (`content_policy_refused` / `brief_unusable`), not a success.
+
 ##### Syllable counting
 
 Counting depends on the language and is a heuristic, which is why a miss is only ever a warning. Russian, Ukrainian and Bulgarian count one syllable per vowel letter; Serbian, Croatian and Bosnian (Cyrillic or Latin) count vowel letters plus a syllabic *r*; English counts vowel groups with a **±1 tolerance**. A line with a digit, or with a word outside the language's alphabet, is **not counted** (it is skipped and reported as a count). Any other language is not checked at all. The range you asked for is still stored on the result.
 
 #### Run warnings
 
-`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path": string | null, "count": number | null }` (`path` and `count` are `null` when they do not apply), with no user text. A run with none has `[]`. At most 100 are kept: a longer list ends with `warnings_truncated`.
+`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path": string | null, "count": number | null }` (`path` and `count` are `null` when they do not apply), with no user text. A run with none has `[]`. At most 100 are kept: a longer list ends with `warnings_truncated` — except that `revision_incomplete`, when it applies, is always kept and comes last (after `warnings_truncated`).
 
 | `code` | Meaning |
 |---|---|
 | `parent_version_replaced` | the version the run started from (the plan, or for `lyrics` the current lyrics) was deleted before the result was saved; `parent_version_id` of the result is the track's current version of that kind at save time, or `null` (see "The parent rule"). Offer the user the result as usual; do not treat it as a failure. |
 | `revision_unchanged` | the revision changed nothing; the result is the version you revised |
+| `revision_incomplete` | the run kept its best valid result because a later fix round failed; some soft warnings may remain. The result is complete and usable; the other warnings say which lines the run could not improve. Always the **last** warning of its run |
 | `syllable_range_missed` | `path`: the line; `count`: the syllables counted (compare with `line_syllables`; English has ±1 tolerance already applied) |
 | `avoid_word_used` | `path`: the line that contains an avoid word or phrase (the word itself is not reported) |
 | `syllable_check_skipped_lines` | `count`: lines that could not be counted (a digit or a word outside the language's alphabet) |
 | `syllable_check_skipped` | a `line_syllables` range was asked for, but the language has no counter |
 | `warnings_truncated` | there were more warnings than are kept |
+
+**Known limit.** The 180 s deadline is not a port failure: if it cancels a run **during a fix round**, the run still ends `failed` / `run_timeout` (and is refunded) even though a valid document existed. Recovering state from a cancelled run is deliberately not attempted.
 
 **Paths.** The `path` of a warning on a **succeeded** run indexes the **result lyrics document**: `sections[i].lines[j]`, both 0-based — exactly the document `GET /v1/studio/versions/{result_lyrics_version_id}` returns. (For a `revision_unchanged` result that is the input lyrics.) The `issues` of a **failed** run's `error_detail` index the **input plan's sections**, as described above. The two are different index spaces on purpose: a failed run saved nothing, so the plan is the only structure the client has.
 
@@ -730,3 +735,4 @@ Published on the user's SSE channel after **every committed status or stage chan
 - Show the privacy note (above) next to the brief / instruction field, and the price (`price_tokens`) before submitting.
 - For `revise_lyrics`, let the user pick targets from the lyrics they are looking at (section ids from the plan, 0-based line numbers). If the input lyrics are no longer valid (`422` with `lyrics.`-prefixed issues), send the user to fix them first.
 - After a `lyrics` / `revise_lyrics` success, show the warnings on the lines they point at, and offer the result as a new version — never switch the current lyrics for the user.
+- A result with `revision_incomplete` is a complete, valid version: offer it like any other, show the soft warnings that remain, and let the user run again if they want those lines improved. A `lyrics_invalid` or `run_timeout` failure never has a result to offer, whatever the run did before it failed.

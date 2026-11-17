@@ -383,8 +383,9 @@ class StudioRun(Base):
     idempotency_key: Mapped[str] = mapped_column(String(128), nullable=False)
     request_hash: Mapped[str] = mapped_column(String(64), nullable=False)
     request: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-    inputs: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
-    """What the run works on (``RunInputs``), resolved when it was accepted; ``NULL`` for ``plan``.
+    inputs: Mapped[dict[str, Any] | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    """What the run works on (``RunInputs``), resolved when it was accepted; SQL ``NULL`` for
+    ``plan`` (``none_as_null``: without it ``None`` is written as the JSON value ``null``).
 
     Ids and the language only - never document text. Read by the claim and by the delete guard
     (a version an active run takes as input cannot be deleted)."""
@@ -410,7 +411,11 @@ class StudioRun(Base):
         JSONB, nullable=False, server_default=text("'[]'::jsonb")
     )
     error_code: Mapped[str | None] = mapped_column(String(60), nullable=True)
-    error_detail: Mapped[dict[str, Any] | None] = mapped_column(JSONB, nullable=True)
+    error_detail: Mapped[dict[str, Any] | None] = mapped_column(
+        JSONB(none_as_null=True), nullable=True
+    )
+    """Issue paths and codes of a failure that has any; SQL ``NULL`` (not the JSON value ``null``)
+    for every other failure and for a run that did not fail."""
 
     llm_calls: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
     prompt_tokens: Mapped[int] = mapped_column(Integer, nullable=False, server_default=text("0"))
@@ -441,6 +446,12 @@ class StudioRun(Base):
         ),
         CheckConstraint(
             "status <> 'failed' OR error_code IS NOT NULL", name="ck_studio_runs_failed_code"
+        ),
+        CheckConstraint("(kind = 'plan') = (inputs IS NULL)", name="ck_studio_runs_inputs_by_kind"),
+        CheckConstraint(
+            "(kind = 'plan' OR result_plan_version_id IS NULL)"
+            " AND (kind <> 'plan' OR result_lyrics_version_id IS NULL)",
+            name="ck_studio_runs_result_by_kind",
         ),
         Index(
             RUN_ONE_ACTIVE_PER_TRACK,

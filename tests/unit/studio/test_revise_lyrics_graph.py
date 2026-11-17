@@ -12,7 +12,14 @@ from hypothesis import strategies as st
 
 from src.core.enums import StudioRunKind
 from src.core.enums import StudioRunStage as Stage
-from src.llm.port import LlmOutputInvalid, LlmResult, LlmUnavailable, LlmUsage
+from src.llm.port import (
+    LlmOutputInvalid,
+    LlmOutputTruncated,
+    LlmRejected,
+    LlmResult,
+    LlmUnavailable,
+    LlmUsage,
+)
 from src.studio.documents import LyricsDocument, SyllableRange
 from src.studio.errors import DocumentIssue
 from src.studio.planner.drafts import (
@@ -31,7 +38,13 @@ from src.studio.planner.graphs.revise_lyrics import (
     run_revise_graph,
 )
 from src.studio.planner.lyric_checks import AVOID_WORD_USED, SYLLABLE_RANGE_MISSED
-from src.studio.planner.outcome import LyricsReady, LyricsRun, RunRefused, RunRejected
+from src.studio.planner.outcome import (
+    REVISION_INCOMPLETE,
+    LyricsReady,
+    LyricsRun,
+    RunRefused,
+    RunRejected,
+)
 from src.studio.planner.prompts.blocks import REASK_MESSAGE
 from src.studio.run_requests import LineTarget, ReviseLyricsRunRequest, ReviseTargets
 from tests.llm_support import FakeLlm
@@ -414,6 +427,85 @@ async def test_port_errors_propagate() -> None:
     with pytest.raises(LlmUnavailable) as caught:
         await _run(FakeLlm(error), _targets(sections=(S2,)))
     assert caught.value is error
+
+
+# -- a fix round that fails at the port never discards a valid revision (invariant 22, R1) -----
+
+SOFT = make_lyrics_revision(sections=[section_lines("s2", FOUR, LONG)])  # one soft miss
+HARD = make_lyrics_revision(sections=[section_lines("s2", FOUR, "oh [no] no")])  # a bracket
+
+
+def _round_fails(reason: str) -> list[Any]:
+    """What the model port does on every call of the round that follows ``SOFT``."""
+    return {
+        "undecodable": [LlmOutputInvalid("bad")] * 2,  # the call cap (3) is reached
+        "unusable": [make_lyrics_patch(make_line_patch("s2", 1, "sneaky"))] * 2,  # not asked for
+        "unavailable": [LlmUnavailable("down")],
+        "truncated": [LlmOutputTruncated("cut")],
+        "rejected": [LlmRejected(400)],
+    }[reason]
+
+
+@pytest.mark.parametrize(
+    "reason", ["undecodable", "unusable", "unavailable", "truncated", "rejected"]
+)
+async def test_a_failed_fix_round_keeps_the_valid_revision_with_revision_incomplete_invariant_22(
+    reason: str,
+) -> None:
+    llm = FakeLlm(SOFT, *_round_fails(reason))
+    run = await _run(llm, _targets(sections=(S2,)))
+
+    ready = _ready(run)
+    assert [(w.code, w.path, w.count) for w in ready.warnings] == [
+        (SYLLABLE_RANGE_MISSED, "sections[1].lines[1]", 10),
+        (REVISION_INCOMPLETE, None, None),
+    ]
+    assert _texts(ready.lyrics)[1] == [FOUR, LONG]  # the revision as it stood
+    assert _texts(ready.lyrics)[0] == [FOUR, LONG, FOUR]  # and the user's own lines, untouched
+
+
+async def test_a_failed_second_fix_keeps_the_result_of_the_first() -> None:
+    eight = "la la la la la la la la"
+    llm = FakeLlm(SOFT, make_lyrics_patch(make_line_patch("s2", 2, eight)), LlmUnavailable("down"))
+    stages: list[Stage] = []
+    run = await _run(llm, _targets(sections=(S2,)), stages)
+
+    ready = _ready(run)
+    assert _texts(ready.lyrics)[1] == [FOUR, eight]
+    assert [(w.code, w.count) for w in ready.warnings] == [
+        (SYLLABLE_RANGE_MISSED, 8),
+        (REVISION_INCOMPLETE, None),
+    ]
+    assert stages[-1] == Stage.REVISING  # it ends at the failed round and does not check again
+
+
+async def test_a_failed_fix_round_with_a_hard_issue_fails_with_the_ports_error() -> None:
+    error = LlmUnavailable("down")
+    with pytest.raises(LlmUnavailable) as caught:
+        await _run(FakeLlm(HARD, error), _targets(sections=(S2,)))
+    assert caught.value is error
+
+
+async def test_a_failed_full_revision_round_with_a_broken_target_fails_with_the_ports_error() -> (
+    None
+):
+    missing = make_lyrics_revision(sections=[section_lines("s1", FOUR)])  # s2 was targeted
+    with pytest.raises(LlmOutputTruncated):
+        await _run(FakeLlm(missing, LlmOutputTruncated("cut")), _targets(sections=(S2,)))
+
+
+async def test_a_refusal_on_the_fix_round_is_still_a_refusal() -> None:
+    llm = FakeLlm(SOFT, refusal_lyrics_patch(DraftRefusal.CONTENT_POLICY))
+    run = await _run(llm, _targets(sections=(S2,)))
+    assert run.outcome == RunRefused(DraftRefusal.CONTENT_POLICY)
+
+
+async def test_only_the_ports_errors_are_kept_other_exceptions_still_fail_the_run() -> None:
+    class Broken(Exception):
+        pass
+
+    with pytest.raises(Broken):
+        await _run(FakeLlm(SOFT, Broken()), _targets(sections=(S2,)))
 
 
 # -- the call cap, whatever the model returns (invariant 12) --------------------------------------

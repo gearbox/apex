@@ -15,6 +15,11 @@ budget and consumes no round. A **round** is one of:
 
 After the budget: a **hard** issue fails the run (``lyrics_invalid``); only **soft** ones (a missed
 syllable range, an avoid-word) succeed with warnings (P2a-44).
+
+A round that fails at the port (an error, an unusable reply on the last call) never discards a
+validated document: when only soft problems were left, the run ends with that document and the
+warning ``revision_incomplete``; with a hard problem there is nothing usable and the error
+propagates (P2a-44, R1). A run that the 180 s deadline cancels mid-round still ends ``run_timeout``.
 """
 
 from __future__ import annotations
@@ -26,7 +31,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime  # noqa: TC002 - runtime: langgraph inspects node signatures
 
 from src.core.enums import StudioRunKind, StudioRunStage
-from src.llm.port import LlmMessage
+from src.llm.port import LlmError, LlmMessage
 from src.studio.documents import (  # noqa: TC001 - runtime: LangGraph reads the state hints
     LyricsDocument,
     PlanDocument,
@@ -52,6 +57,7 @@ from src.studio.planner.outcome import (
     RunRefused,
     RunRejected,
     cap_warnings,
+    kept_after_failed_round,
 )
 from src.studio.planner.prompts.lyrics_v1 import (
     build_lyrics_messages,
@@ -244,10 +250,20 @@ async def _revise(state: LyricsState, runtime: Runtime[LyricsDeps]) -> dict[str,
     findings = state["findings"]
     if findings is None or state["draft"] is None or state["document"] is None:
         raise PlannerStateError("revise ran before check")
-    if findings.structural:
-        update = await _redraft(state, deps, findings)  # no single line can fix this
-    else:
-        update = await _patch(state, deps, findings)
+    try:
+        if findings.structural:
+            update = await _redraft(state, deps, findings)  # no single line can fix this
+        else:
+            update = await _patch(state, deps, findings)
+    except LlmError:
+        if findings.lyrics is None or findings.report is None:
+            raise  # a hard problem is open: there is no valid result to keep
+        # The round was only trying to improve a document that is already usable.
+        return {
+            "outcome": kept_after_failed_round(
+                findings.lyrics, warnings_of(findings.report, findings.lyrics)
+            )
+        }
     return {"revisions": state["revisions"] + 1, **update}
 
 
@@ -324,6 +340,11 @@ def _route(state: LyricsState) -> Literal["revise", "done"]:
     return "done" if state["outcome"] is not None else "revise"
 
 
+def _after_revise(state: LyricsState) -> Literal["check", "done"]:
+    """A round that failed at the port has already set the outcome (R1); otherwise check again."""
+    return "done" if state["outcome"] is not None else "check"
+
+
 def build_lyrics_graph() -> StateGraph[LyricsState, LyricsDeps, LyricsState, LyricsState]:
     """The (uncompiled) lyrics graph."""
     graph: StateGraph[LyricsState, LyricsDeps, LyricsState, LyricsState] = StateGraph(
@@ -335,7 +356,7 @@ def build_lyrics_graph() -> StateGraph[LyricsState, LyricsDeps, LyricsState, Lyr
     graph.add_edge(START, "draft")
     graph.add_edge("draft", "check")
     graph.add_conditional_edges("check", _route, {"revise": "revise", "done": END})
-    graph.add_edge("revise", "check")
+    graph.add_conditional_edges("revise", _after_revise, {"check": "check", "done": END})
     return graph
 
 

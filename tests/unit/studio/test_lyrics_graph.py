@@ -13,7 +13,14 @@ from hypothesis import strategies as st
 
 from src.core.enums import StudioRunKind
 from src.core.enums import StudioRunStage as Stage
-from src.llm.port import LlmOutputInvalid, LlmResult, LlmUnavailable, LlmUsage
+from src.llm.port import (
+    LlmOutputInvalid,
+    LlmOutputTruncated,
+    LlmRejected,
+    LlmResult,
+    LlmUnavailable,
+    LlmUsage,
+)
 from src.studio.documents import SyllableRange
 from src.studio.errors import DocumentIssue
 from src.studio.planner.drafts import (
@@ -36,7 +43,14 @@ from src.studio.planner.lyric_checks import (
     SYLLABLE_CHECK_SKIPPED,
     SYLLABLE_RANGE_MISSED,
 )
-from src.studio.planner.outcome import LyricsReady, LyricsRun, RunRefused, RunRejected
+from src.studio.planner.outcome import (
+    MAX_WARNINGS,
+    REVISION_INCOMPLETE,
+    LyricsReady,
+    LyricsRun,
+    RunRefused,
+    RunRejected,
+)
 from src.studio.planner.prompts.blocks import REASK_MESSAGE
 from src.studio.run_requests import LyricsRunRequest
 from tests.llm_support import FakeLlm
@@ -429,6 +443,127 @@ async def test_an_error_during_a_revision_propagates() -> None:
     llm = FakeLlm(_with("s2", FOUR, "oh [no] no no"), LlmUnavailable("down"))
     with pytest.raises(LlmUnavailable):
         await _run(llm)
+
+
+# -- a fix round that fails at the port never discards a valid result (invariant 22, R1) -------
+
+LONG = "la la la la la la la la la la"  # ten syllables: a soft miss against RANGE
+SOFT = _with("s4", FOUR, LONG)  # validates; one line misses the syllable range
+HARD = _with("s2", FOUR, "oh [no] no no")  # a bracket in a line: nothing usable
+
+
+def _round_fails(reason: str) -> list[Any]:
+    """What the model port does on every call of the round that follows ``SOFT``."""
+    return {
+        "undecodable": [LlmOutputInvalid("bad")] * 4,  # the call cap is reached
+        "unusable": [make_lyrics_patch(make_line_patch("s1", 1, "sneaky"))] * 4,  # not asked for
+        "unavailable": [LlmUnavailable("down")],
+        "truncated": [LlmOutputTruncated("cut")],
+        "rejected": [LlmRejected(400)],
+    }[reason]
+
+
+@pytest.mark.parametrize(
+    "reason", ["undecodable", "unusable", "unavailable", "truncated", "rejected"]
+)
+async def test_a_failed_fix_round_keeps_the_valid_draft_with_revision_incomplete_invariant_22(
+    reason: str,
+) -> None:
+    llm = FakeLlm(SOFT, *_round_fails(reason))
+    run = await _run(llm)
+
+    ready = _ready(run)
+    assert [(w.code, w.path, w.count) for w in ready.warnings] == [
+        (SYLLABLE_RANGE_MISSED, "sections[2].lines[1]", 10),
+        (REVISION_INCOMPLETE, None, None),
+    ]
+    assert [s.section_id for s in ready.lyrics.sections] == [S1, S2, S4]
+    assert ready.lyrics.sections[2].lines[1].text == LONG  # the draft as it stood, unchanged
+
+
+async def test_the_other_soft_warnings_are_kept_next_to_revision_incomplete() -> None:
+    avoid = LyricsRunRequest(avoid_words=("baby",))
+    draft = _with("s1", "oh baby baby", FOUR)
+    run = await _run(
+        FakeLlm(draft, LlmUnavailable("down")),
+        request=avoid,
+        language="de",  # no counter
+    )
+    assert [w.code for w in _ready(run).warnings] == [
+        AVOID_WORD_USED,
+        SYLLABLE_CHECK_SKIPPED,
+        REVISION_INCOMPLETE,
+    ]
+
+
+async def test_a_failed_second_round_keeps_the_result_of_the_first() -> None:
+    # Round 1 fixes s4 line 2 to another miss (a line of eight syllables); round 2 fails at the port.
+    eight = "la la la la la la la la"
+    llm = FakeLlm(
+        SOFT,
+        make_lyrics_patch(make_line_patch("s4", 2, eight)),
+        LlmUnavailable("down"),
+    )
+    stages: list[Stage] = []
+    run = await _run(llm, stages)
+
+    ready = _ready(run)
+    assert ready.lyrics.sections[2].lines[1].text == eight  # the latest valid document, not SOFT
+    assert [(w.code, w.count) for w in ready.warnings] == [
+        (SYLLABLE_RANGE_MISSED, 8),
+        (REVISION_INCOMPLETE, None),
+    ]
+    assert stages == [
+        Stage.DRAFTING,
+        Stage.VALIDATING,
+        Stage.REVISING,
+        Stage.VALIDATING,
+        Stage.REVISING,
+    ]  # the graph ends at the failed round; it does not check again
+
+
+async def test_a_failed_fix_round_with_a_hard_issue_fails_with_the_ports_error() -> None:
+    error = LlmUnavailable("down")
+    with pytest.raises(LlmUnavailable) as caught:
+        await _run(FakeLlm(HARD, error))
+    assert caught.value is error
+
+
+async def test_a_failed_redraft_with_a_hard_issue_fails_with_the_ports_error() -> None:
+    missing = make_lyrics_draft(section_lines("s1", FOUR), section_lines("s2", FOUR))  # no s4
+    with pytest.raises(LlmOutputTruncated):
+        await _run(FakeLlm(missing, LlmOutputTruncated("cut")))
+
+
+async def test_a_refusal_on_the_fix_round_is_still_a_refusal() -> None:
+    llm = FakeLlm(SOFT, refusal_lyrics_patch(DraftRefusal.CONTENT_POLICY))
+    run = await _run(llm)
+    assert run.outcome == RunRefused(DraftRefusal.CONTENT_POLICY)
+
+
+async def test_only_the_ports_errors_are_kept_other_exceptions_still_fail_the_run() -> None:
+    class Broken(Exception):
+        pass
+
+    with pytest.raises(Broken):
+        await _run(FakeLlm(SOFT, Broken()))
+
+
+async def test_revision_incomplete_survives_a_full_warnings_list() -> None:
+    soft_lines = [LONG] * 20  # one syllable-range warning per line
+    draft = make_lyrics_draft(
+        *(section_lines(key, *soft_lines) for key in ("s1", "s2", "s4")),
+    )
+    run = await _run(FakeLlm(draft, LlmUnavailable("down")))  # 60 warnings: not over the cap
+    assert [w.code for w in _ready(run).warnings][-1] == REVISION_INCOMPLETE
+
+    soft_lines = [LONG] * 40
+    draft = make_lyrics_draft(
+        *(section_lines(key, *soft_lines) for key in ("s1", "s2", "s4")),
+    )
+    warnings = _ready(await _run(FakeLlm(draft, LlmUnavailable("down")))).warnings
+    assert len(warnings) == MAX_WARNINGS
+    assert [w.code for w in warnings][-2:] == ["warnings_truncated", REVISION_INCOMPLETE]
 
 
 async def test_a_failing_stage_callback_stops_the_graph() -> None:

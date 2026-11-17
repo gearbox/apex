@@ -21,7 +21,7 @@ from src.studio.planner.drafts import DraftRefusal
 from src.studio.planner.outcome import LyricsReady, PlanReady, RunRefused, RunRejected
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from src.studio.errors import DocumentIssue
     from src.studio.planner.outcome import RunOutcome
@@ -52,6 +52,14 @@ ERR_PLAN_INVALID: Final = "plan_invalid"
 ERR_LYRICS_INVALID: Final = "lyrics_invalid"
 ERR_TIMEOUT: Final = "run_timeout"
 ERR_INTERNAL: Final = "internal_error"
+
+_INVALID_CODE: Final[Mapping[StudioRunKind, str]] = {
+    StudioRunKind.PLAN: ERR_PLAN_INVALID,
+    StudioRunKind.LYRICS: ERR_LYRICS_INVALID,
+    StudioRunKind.REVISE_LYRICS: ERR_LYRICS_INVALID,
+}
+"""The code of a run whose last draft still failed validation, per kind - one entry for **every**
+kind (a test holds it to that), so a new kind cannot fall into another kind's code."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -101,7 +109,5 @@ def failure_of_outcome(outcome: RunOutcome) -> RunFailure | None:
             return RunFailure(ERR_BRIEF_UNUSABLE)
         case RunRefused():
             return RunFailure(ERR_CONTENT_POLICY)
-        case RunRejected(issues=issues, kind=StudioRunKind.PLAN):
-            return RunFailure(ERR_PLAN_INVALID, _issues_detail(issues))
-        case RunRejected(issues=issues):
-            return RunFailure(ERR_LYRICS_INVALID, _issues_detail(issues))
+        case RunRejected(issues=issues, kind=kind):
+            return RunFailure(_INVALID_CODE[kind], _issues_detail(issues))

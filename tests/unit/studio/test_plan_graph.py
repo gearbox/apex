@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from src.core.enums import StudioRunKind
 from src.core.enums import StudioRunStage as Stage
 from src.llm.port import (
     LlmOutputInvalid,
@@ -260,8 +261,10 @@ def test_the_outcome_variants_are_frozen_values() -> None:
     with pytest.raises(AttributeError):
         refusal.reason = DraftRefusal.BRIEF_UNUSABLE  # type: ignore[misc]
     issue = DocumentIssue("title", "too_long")
-    assert PlanRejected((issue,)) == PlanRejected((DocumentIssue("title", "too_long"),))
-    assert PlanRejected((issue,)) != PlanRejected(())
+    plan = StudioRunKind.PLAN
+    assert PlanRejected((issue,), plan) == PlanRejected((DocumentIssue("title", "too_long"),), plan)
+    assert PlanRejected((issue,), plan) != PlanRejected((), plan)
+    assert PlanRejected((issue,), plan) != PlanRejected((issue,), StudioRunKind.LYRICS)
 
 
 async def test_a_graph_that_ends_without_an_outcome_raises_a_named_error(

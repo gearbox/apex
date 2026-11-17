@@ -964,6 +964,7 @@ class TestTerminalOnce:
                 await runs.finish_succeeded(
                     run_id,
                     result_plan_version_id=None,
+                    result_lyrics_version_id=None,
                     warnings=[],
                     llm_calls=9,
                     prompt_tokens=9,
@@ -1033,6 +1034,7 @@ class TestTerminalOnce:
                     request={},
                     model_key="grok",
                     price_tokens=0,
+                    inputs=None,
                 )
 
 

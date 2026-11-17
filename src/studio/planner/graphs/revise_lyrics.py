@@ -10,6 +10,11 @@ fix rounds. A fix is a *patch* (replacements for exactly the changed lines that 
 for one, everything else frozen) or, when the reply broke the targets (something unexpected, or a
 target missing), one more full revision. After the budget a hard issue fails the run
 (``lyrics_invalid``); soft ones become warnings (P2a-44).
+
+A fix round that fails at the port never discards a validated revision: when only soft problems
+were left, the run ends with that revision and the warning ``revision_incomplete``; with a hard
+problem there is nothing usable and the error propagates (R1). A run that the 180 s deadline cancels
+mid-round still ends ``run_timeout``.
 """
 
 from __future__ import annotations
@@ -22,7 +27,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime  # noqa: TC002 - runtime: langgraph inspects node signatures
 
 from src.core.enums import StudioRunKind, StudioRunStage
-from src.llm.port import LlmMessage  # noqa: TC001 - runtime: LangGraph reads the state hints
+from src.llm.port import LlmError, LlmMessage
 from src.studio.documents import (  # noqa: TC001 - runtime: LangGraph reads the state hints
     LyricsDocument,
     PlanDocument,
@@ -48,6 +53,7 @@ from src.studio.planner.outcome import (
     RunRefused,
     RunRejected,
     cap_warnings,
+    kept_after_failed_round,
 )
 from src.studio.planner.prompts.revise_lyrics_v1 import (
     build_revise_fix_messages,
@@ -247,10 +253,20 @@ async def _fix(state: ReviseState, runtime: Runtime[ReviseDeps]) -> dict[str, An
     findings = state["findings"]
     if findings is None or state["echo"] is None or state["document"] is None:
         raise PlannerStateError("fix ran before check")
-    if findings.structural:
-        update = await _again(state, deps, findings)  # the reply broke the targets
-    else:
-        update = await _patch(state, deps, findings)
+    try:
+        if findings.structural:
+            update = await _again(state, deps, findings)  # the reply broke the targets
+        else:
+            update = await _patch(state, deps, findings)
+    except LlmError:
+        if findings.lyrics is None or findings.report is None:
+            raise  # a hard problem is open: there is no valid result to keep
+        # The round was only trying to improve a revision that is already usable.
+        return {
+            "outcome": kept_after_failed_round(
+                findings.lyrics, warnings_of(findings.report, findings.lyrics)
+            )
+        }
     return {"fixes": state["fixes"] + 1, **update}
 
 
@@ -331,6 +347,11 @@ def _route(state: ReviseState) -> Literal["fix", "done"]:
     return "done" if state["outcome"] is not None else "fix"
 
 
+def _after_fix(state: ReviseState) -> Literal["check", "done"]:
+    """A round that failed at the port has already set the outcome (R1); otherwise check again."""
+    return "done" if state["outcome"] is not None else "check"
+
+
 def build_revise_graph() -> StateGraph[ReviseState, ReviseDeps, ReviseState, ReviseState]:
     """The (uncompiled) revise-lyrics graph."""
     graph: StateGraph[ReviseState, ReviseDeps, ReviseState, ReviseState] = StateGraph(
@@ -342,7 +363,7 @@ def build_revise_graph() -> StateGraph[ReviseState, ReviseDeps, ReviseState, Rev
     graph.add_edge(START, "revise")
     graph.add_edge("revise", "check")
     graph.add_conditional_edges("check", _route, {"fix": "fix", "done": END})
-    graph.add_edge("fix", "check")
+    graph.add_conditional_edges("fix", _after_fix, {"check": "check", "done": END})
     return graph
 
 

@@ -860,16 +860,19 @@ class StudioRunRepository:
         request: Mapping[str, object],
         model_key: str,
         price_tokens: int,
-        inputs: Mapping[str, object] | None = None,
+        inputs: Mapping[str, object] | None,
     ) -> StudioRun:
         """Insert a ``queued`` run.
 
-        ``inputs`` is what the run works on, resolved at submit (``None`` for a ``plan`` run).
+        ``inputs`` is what the run works on, resolved at submit: ``None`` for a ``plan`` run and
+        required for every other kind (``ck_studio_runs_inputs_by_kind``). It has no default, so a
+        caller cannot forget it.
 
         Raises:
             sqlalchemy.exc.IntegrityError: Another active run holds the track
-                (``uq_studio_runs_one_active_per_track``) or the idempotency key was taken
-                (``uq_studio_runs_user_idempotency``); call inside ``session.begin_nested()``.
+                (``uq_studio_runs_one_active_per_track``), the idempotency key was taken
+                (``uq_studio_runs_user_idempotency``) or ``inputs`` does not fit ``kind``; call
+                inside ``session.begin_nested()``.
         """
         result = await self._session.execute(
             pg_insert(StudioRun)
@@ -1099,9 +1102,13 @@ class StudioRunRepository:
         llm_calls: int,
         prompt_tokens: int,
         completion_tokens: int,
-        result_lyrics_version_id: UUID | None = None,
+        result_lyrics_version_id: UUID | None,
     ) -> StudioRun | None:
-        """``running → succeeded``; a plan run sets the plan result, the others the lyrics one."""
+        """``running → succeeded``; a plan run sets the plan result, the others the lyrics one.
+
+        Both result ids are required (no default): exactly the kind's own is set
+        (``ck_studio_runs_result_by_kind``).
+        """
         result = await self._session.execute(
             update(StudioRun)
             .where(StudioRun.id == run_id, StudioRun.status == StudioRunStatus.RUNNING.value)
