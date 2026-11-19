@@ -339,9 +339,19 @@ def test_the_graphs_package_pins_tracing_before_langgraph_is_imported() -> None:
     )
 
 
+RUN_KINDS = SRC / "studio/services/run_kinds"
+
+
 def test_llm_origin_is_written_in_exactly_one_place() -> None:
-    assert EXECUTOR.read_text().count("origin=StudioDocumentOrigin.LLM") == 1
+    """Every kind's result goes through ``create_llm_version`` (``run_kinds/base.py``)."""
+    assert "StudioDocumentOrigin" not in EXECUTOR.read_text()
     assert "StudioDocumentOrigin" not in RUN_SERVICE.read_text()
+    writers = {
+        str(path.relative_to(SRC)): path.read_text().count("origin=StudioDocumentOrigin.LLM")
+        for path in SRC.glob("studio/**/*.py")
+        if "origin=StudioDocumentOrigin.LLM" in path.read_text()
+    }
+    assert writers == {"studio/services/run_kinds/base.py": 1}
 
 
 def test_broad_excepts_exist_only_as_the_documented_run_guards() -> None:
@@ -350,8 +360,13 @@ def test_broad_excepts_exist_only_as_the_documented_run_guards() -> None:
     executor = EXECUTOR.read_text()
     assert len(re.findall(r"except\s+Exception", executor)) == 2  # claim guard + run guard
     assert len(re.findall(r"except\s+StudioError", executor)) == 1  # the save step's refusals
-    assert re.findall(r"except\s+VersionUnchanged", executor) == ["except VersionUnchanged"]
     assert not re.search(r"except\s*:", executor)
+    # The two things a save may legitimately swallow live in the shared save helpers, once each.
+    base = (RUN_KINDS / "base.py").read_text()
+    assert re.findall(r"except\s+VersionUnchanged", base) == ["except VersionUnchanged"]
+    assert re.findall(r"except\s+ParentVersionNotFound", base) == ["except ParentVersionNotFound"]
+    for path in RUN_KINDS.glob("*.py"):
+        assert not re.search(r"except\s+(StudioError|Exception|BaseException)", path.read_text())
 
 
 def test_the_active_run_index_is_named_in_the_migration_and_matched_in_the_service() -> None:
@@ -433,6 +448,7 @@ NO_ASSERT_GLOBS = (
     "llm/**/*.py",
     "studio/planner/**/*.py",
     "studio/services/run*.py",
+    "studio/services/run_kinds/*.py",
     "studio/run_*.py",
     "workers/studio_run.py",
 )
@@ -462,6 +478,9 @@ def test_the_no_assert_file_set_covers_the_guarded_modules() -> None:
         "studio/planner/graphs/plan.py",
         "studio/services/run_executor.py",
         "studio/services/run.py",
+        "studio/services/run_kinds/base.py",
+        "studio/services/run_kinds/lyrics.py",
+        "studio/planner/graphs/lyrics.py",
         "studio/run_failures.py",
         "studio/run_requests.py",
         "workers/studio_run.py",
@@ -528,3 +547,98 @@ def test_the_executor_catches_a_timeout_only_around_the_graph() -> None:
     assert isinstance(guarded, ast.Try)
     assert "_run_graph" in ast.unparse(guarded.body[0])
     assert "_finish_success" not in "".join(ast.unparse(stmt) for stmt in guarded.body)
+
+
+# -- S1-P2a-B: the handler seam, lyrics runs ------------------------------------------------------
+
+
+def test_the_executor_names_no_run_kind() -> None:
+    """P2a-48: one executor, one handler per kind; nothing kind-specific leaks back in."""
+    text = EXECUTOR.read_text()
+    for needle in (
+        "PlanRunRequest",
+        "LyricsRunRequest",
+        "ReviseLyricsRunRequest",
+        "compile_plan_graph",
+        "StudioRunKind.PLAN",
+        "StudioRunKind.LYRICS",
+        "StudioRunKind.REVISE_LYRICS",
+        "PlanReady",
+        "LyricsReady",
+        "prompts.",
+    ):
+        assert needle not in text, needle
+    assert not [m for m in _imported_modules(EXECUTOR) if "run_kinds.registry" in m]
+
+
+def test_every_run_kind_has_a_handler() -> None:
+    from src.core.enums import StudioRunKind
+    from src.studio.services.run_kinds.registry import default_handlers
+
+    handlers = default_handlers()
+    assert set(handlers) == set(StudioRunKind)
+    assert all(handler.kind is kind for kind, handler in handlers.items())
+
+
+def test_the_request_side_never_loads_a_graph() -> None:
+    """The API process imports ``run.py`` and ``intake.py``: no handler, no graph, no langgraph."""
+    for path in (RUN_SERVICE, RUN_KINDS / "intake.py"):
+        for module in _imported_modules(path):
+            assert "planner.graphs" not in module, (path.name, module)
+            assert module.split(".")[0] != "langgraph", (path.name, module)
+            for handler in ("run_kinds.plan", "run_kinds.lyrics", "run_kinds.revise_lyrics"):
+                assert not module.endswith(handler), (path.name, module)
+            assert "run_kinds.registry" not in module, (path.name, module)
+
+
+def test_only_the_wiring_imports_the_handler_registry() -> None:
+    importers = sorted(
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if any(m.endswith("run_kinds.registry") for m in _imported_modules(path))
+    )
+    assert importers == ["api/dependencies/common.py"]
+
+
+def test_the_package_init_of_the_handlers_imports_nothing() -> None:
+    assert _imported_modules(RUN_KINDS / "__init__.py") == set()
+
+
+def test_run_kind_not_available_is_gone() -> None:
+    for path in [*SRC.rglob("*.py"), ROOT / "docs/contracts/studio-contract.md"]:
+        assert not re.search(r"RunKindNotAvailable|run_kind_not_available", path.read_text()), path
+
+
+def test_the_migration_is_058_after_057() -> None:
+    text = (ROOT / "alembic/versions/058_studio_run_inputs.py").read_text()
+    assert 'revision: str = "058"' in text
+    assert re.search(r'down_revision: str \| Sequence\[str\] \| None = "057"', text)
+
+
+def test_the_snapshot_is_version_2() -> None:
+    assert re.search(r"snapshot_version: Literal\[2\]", (PLANNER / "context.py").read_text())
+
+
+def test_the_syllable_counters_have_one_home() -> None:
+    text = (PLANNER / "syllables.py").read_text()
+    assert len(re.findall(r"^def counter_for\b", text, flags=re.MULTILINE)) == 1
+    others = [
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if path.name != "syllables.py" and re.search(r"def counter_for\b", path.read_text())
+    ]
+    assert others == []
+
+
+def test_the_planner_modules_of_lyrics_are_pure() -> None:
+    """Counters, checks, mapping and review import neither the database nor the graph library."""
+    for name in ("syllables", "lyric_checks", "lyrics_mapping", "lyrics_review"):
+        for module in _imported_modules(PLANNER / f"{name}.py"):
+            assert module.split(".")[0] not in {"langgraph", "sqlalchemy", "httpx"}, (name, module)
+            assert not module.startswith(("src.api", "src.db")), (name, module)
+
+
+def test_the_version_in_use_guard_is_in_the_errors_the_service_and_the_contract() -> None:
+    assert "version_in_use_by_run" in (SRC / "studio/errors.py").read_text()
+    assert "VersionInUseByRun" in (SRC / "studio/services/version.py").read_text()
+    assert "version_in_use_by_run" in (ROOT / "docs/contracts/studio-contract.md").read_text()

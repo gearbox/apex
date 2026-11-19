@@ -9,6 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final, overload
 
+from src.core.enums import StudioRunKind
 from src.llm.port import (
     LlmOutputInvalid,
     LlmOutputTruncated,
@@ -17,13 +18,13 @@ from src.llm.port import (
 )
 from src.studio.errors import StudioError
 from src.studio.planner.drafts import DraftRefusal
-from src.studio.planner.outcome import PlanReady, PlanRefused, PlanRejected
+from src.studio.planner.outcome import LyricsReady, PlanReady, RunRefused, RunRejected
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import Mapping, Sequence
 
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.outcome import PlanOutcome
+    from src.studio.planner.outcome import RunOutcome
 
 __all__ = [
     "ERR_BRIEF_UNUSABLE",
@@ -33,6 +34,7 @@ __all__ = [
     "ERR_LLM_REJECTED",
     "ERR_LLM_TRUNCATED",
     "ERR_LLM_UNAVAILABLE",
+    "ERR_LYRICS_INVALID",
     "ERR_PLAN_INVALID",
     "ERR_TIMEOUT",
     "RunFailure",
@@ -47,8 +49,17 @@ ERR_LLM_INVALID: Final = "llm_output_invalid"
 ERR_CONTENT_POLICY: Final = "content_policy_refused"
 ERR_BRIEF_UNUSABLE: Final = "brief_unusable"
 ERR_PLAN_INVALID: Final = "plan_invalid"
+ERR_LYRICS_INVALID: Final = "lyrics_invalid"
 ERR_TIMEOUT: Final = "run_timeout"
 ERR_INTERNAL: Final = "internal_error"
+
+_INVALID_CODE: Final[Mapping[StudioRunKind, str]] = {
+    StudioRunKind.PLAN: ERR_PLAN_INVALID,
+    StudioRunKind.LYRICS: ERR_LYRICS_INVALID,
+    StudioRunKind.REVISE_LYRICS: ERR_LYRICS_INVALID,
+}
+"""The code of a run whose last draft still failed validation, per kind - one entry for **every**
+kind (a test holds it to that), so a new kind cannot fall into another kind's code."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -84,19 +95,19 @@ def _issues_detail(issues: Sequence[DocumentIssue]) -> dict[str, object]:
 
 
 @overload
-def failure_of_outcome(outcome: PlanReady) -> None: ...
+def failure_of_outcome(outcome: PlanReady | LyricsReady) -> None: ...
 @overload
-def failure_of_outcome(outcome: PlanRefused | PlanRejected) -> RunFailure: ...
+def failure_of_outcome(outcome: RunRefused | RunRejected) -> RunFailure: ...
 @overload
-def failure_of_outcome(outcome: PlanOutcome) -> RunFailure | None: ...
-def failure_of_outcome(outcome: PlanOutcome) -> RunFailure | None:
-    """The failure a finished graph stands for; ``None`` when it produced a valid plan."""
+def failure_of_outcome(outcome: RunOutcome) -> RunFailure | None: ...
+def failure_of_outcome(outcome: RunOutcome) -> RunFailure | None:
+    """The failure a finished graph stands for; ``None`` when it produced a valid document."""
     match outcome:
-        case PlanReady():
+        case PlanReady() | LyricsReady():
             return None
-        case PlanRefused(reason=DraftRefusal.BRIEF_UNUSABLE):
+        case RunRefused(reason=DraftRefusal.BRIEF_UNUSABLE):
             return RunFailure(ERR_BRIEF_UNUSABLE)
-        case PlanRefused():
+        case RunRefused():
             return RunFailure(ERR_CONTENT_POLICY)
-        case PlanRejected(issues=issues):
-            return RunFailure(ERR_PLAN_INVALID, _issues_detail(issues))
+        case RunRejected(issues=issues, kind=kind):
+            return RunFailure(_INVALID_CODE[kind], _issues_detail(issues))

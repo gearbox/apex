@@ -40,6 +40,7 @@ from src.studio.errors import (
     StudioDocumentSchemaError,
     StudioNotFound,
     VersionHasChildren,
+    VersionInUseByRun,
     VersionIsCurrent,
     VersionIsLyricsBase,
     VersionLimitReached,
@@ -982,6 +983,126 @@ class TestDeleteVersion:
 # ---------------------------------------------------------------------------
 # Reads
 # ---------------------------------------------------------------------------
+
+
+class TestDeleteGuardForRuns:
+    """P2a-41 (invariant 6): a version an *active* run takes as input cannot be deleted."""
+
+    @staticmethod
+    async def _active_run(
+        w: StudioWorld, track: UUID, *, plan: UUID | None = None, lyrics: UUID | None = None
+    ) -> UUID:
+        from src.core.uid import new_id
+        from src.db.repositories.studio import StudioRunRepository
+
+        inputs = (
+            None
+            if plan is None
+            else {
+                "plan_version_id": str(plan),
+                "lyrics_version_id": str(lyrics) if lyrics else None,
+                "language": "en",
+            }
+        )
+        run = await StudioRunRepository(w.session).insert(
+            run_id=new_id(),
+            user_id=w.user_id,
+            product_id=w.product_id,
+            track_id=track,
+            kind="lyrics" if plan else "plan",
+            idempotency_key=uuid4().hex,
+            request_hash="0" * 64,
+            request={"kind": "lyrics"},
+            model_key="grok",
+            price_tokens=0,
+            inputs=inputs,
+        )
+        return run.id
+
+    async def test_the_plan_a_lyrics_run_writes_for_cannot_be_deleted(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track = await w.new_track()
+        keep, _ = await w.plan(track, make_plan(title="keep"))
+        target, _ = await w.plan(track, make_plan(title="target"), make_current=False)
+        await self._active_run(w, track, plan=target.version.id)
+        with pytest.raises(VersionInUseByRun):
+            await w.versions.delete(target.version.id, w.user_id, w.product_id)
+        assert keep.version.is_current
+
+    async def test_the_lyrics_a_revision_works_on_cannot_be_deleted(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track = await w.new_track()
+        plan, verse, _ = _song()
+        base, _ = await w.plan(track, plan)
+        first, _ = await w.lyrics(track, make_lyrics((verse.id, ["a"])), base.version.id)
+        second, _ = await w.lyrics(
+            track, make_lyrics((verse.id, ["b"])), base.version.id
+        )  # current
+        await self._active_run(w, track, plan=base.version.id, lyrics=first.version.id)
+        with pytest.raises(VersionInUseByRun):
+            await w.versions.delete(first.version.id, w.user_id, w.product_id)
+        assert second.version.is_current
+
+    async def test_it_is_deletable_once_the_run_is_terminal(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        from src.db.repositories.studio import StudioRunRepository
+
+        w = enabled_studio
+        track = await w.new_track()
+        await w.plan(track, make_plan(title="keep"))
+        target, _ = await w.plan(track, make_plan(title="target"), make_current=False)
+        run = await self._active_run(w, track, plan=target.version.id)
+        with pytest.raises(VersionInUseByRun):
+            await w.versions.delete(target.version.id, w.user_id, w.product_id)
+
+        cancelled = await StudioRunRepository(w.session).cancel_queued(
+            run, user_id=w.user_id, product_id=w.product_id
+        )
+        assert cancelled is not None
+        await w.versions.delete(target.version.id, w.user_id, w.product_id)
+        assert await w.version_count(track) == 1
+
+    async def test_a_plan_run_has_no_inputs_and_blocks_nothing(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track = await w.new_track()
+        await w.plan(track, make_plan(title="keep"))
+        target, _ = await w.plan(track, make_plan(title="target"), make_current=False)
+        await self._active_run(w, track)  # inputs = NULL
+        await w.versions.delete(target.version.id, w.user_id, w.product_id)
+
+    async def test_a_version_that_is_not_the_runs_input_is_free(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        w = enabled_studio
+        track = await w.new_track()
+        await w.plan(track, make_plan(title="keep"))
+        used, _ = await w.plan(track, make_plan(title="used"), make_current=False)
+        other, _ = await w.plan(track, make_plan(title="other"), make_current=False)
+        await self._active_run(w, track, plan=used.version.id)
+        await w.versions.delete(other.version.id, w.user_id, w.product_id)
+
+    async def test_the_repository_answers_per_track_and_per_status(
+        self, enabled_studio: StudioWorld
+    ) -> None:
+        from src.db.repositories.studio import StudioRunRepository
+
+        w = enabled_studio
+        track = await w.new_track("one")
+        elsewhere = await w.new_track("two")
+        plan, _ = await w.plan(track, make_plan(title="p"))
+        runs = StudioRunRepository(w.session)
+        assert not await runs.active_run_uses_version(track, plan.version.id)
+        await self._active_run(w, track, plan=plan.version.id)
+        assert await runs.active_run_uses_version(track, plan.version.id)
+        assert not await runs.active_run_uses_version(elsewhere, plan.version.id)  # another track
+        assert not await runs.active_run_uses_version(track, uuid4())
 
 
 class TestReads:

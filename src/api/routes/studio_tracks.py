@@ -58,8 +58,8 @@ _ERRORS = {
         data_container=ErrorEnvelope,
         description=(
             "version_unchanged, plan_required, lyrics_incompatible_with_plan, "
-            "version_limit_reached, version_is_current, version_has_children or "
-            "version_is_lyrics_base."
+            "version_limit_reached, version_is_current, version_has_children, "
+            "version_is_lyrics_base or version_in_use_by_run."
         ),
     ),
     422: ResponseSpec(

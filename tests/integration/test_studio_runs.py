@@ -30,7 +30,6 @@ from src.studio.errors import (
     IdempotencyKeyRequired,
     MemoriesNotAvailable,
     RunInProgress,
-    RunKindNotAvailable,
     RunLimitReached,
     RunNotCancellable,
     RunNotFound,
@@ -40,7 +39,7 @@ from src.studio.errors import (
     VersionLimitReached,
 )
 from src.studio.planner.drafts import DraftRefusal
-from src.studio.run_requests import LyricsRunRequest, PlanRunRequest, ReviseLyricsRunRequest
+from src.studio.run_requests import PlanRunRequest
 from src.studio.services.version import DocumentVersionService
 from tests.llm_support import FakeLlm
 from tests.studio_llm import make_draft, refusal_draft
@@ -108,15 +107,6 @@ class TestSubmit:
         )
         assert len(run_world.bus.balance_events) == 1
         assert run_world.bus.balance_events[0].delta == -1
-
-    @pytest.mark.parametrize("kind", [LyricsRunRequest, ReviseLyricsRunRequest])
-    async def test_other_kinds_are_not_available_yet(self, run_world: RunWorld, kind: type) -> None:
-        actor = await run_world.add_actor()
-        track_id = await run_world.new_track(actor)
-        with pytest.raises(RunKindNotAvailable):
-            await run_world.submit(actor, track_id, request=kind())
-        assert await run_world.count_runs(actor) == 0
-        assert await run_world.balance(actor) == 10
 
     async def test_memories_are_not_available_yet(self, run_world: RunWorld) -> None:
         from uuid import uuid4
@@ -974,6 +964,7 @@ class TestTerminalOnce:
                 await runs.finish_succeeded(
                     run_id,
                     result_plan_version_id=None,
+                    result_lyrics_version_id=None,
                     warnings=[],
                     llm_calls=9,
                     prompt_tokens=9,
@@ -1043,6 +1034,7 @@ class TestTerminalOnce:
                     request={},
                     model_key="grok",
                     price_tokens=0,
+                    inputs=None,
                 )
 
 

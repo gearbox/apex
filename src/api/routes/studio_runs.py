@@ -40,18 +40,25 @@ _ERRORS = {
     ),
     402: ResponseSpec(data_container=ErrorEnvelope, description="Insufficient token balance."),
     404: ResponseSpec(
-        data_container=ErrorEnvelope, description="Not found (or studio runs disabled)."
+        data_container=ErrorEnvelope,
+        description=(
+            "Not found (or studio runs disabled): the track or run, plan_version_not_found or "
+            "lyrics_version_not_found."
+        ),
     ),
     409: ResponseSpec(
         data_container=ErrorEnvelope,
         description=(
-            "run_in_progress, run_limit_reached, run_not_cancellable or idempotency_conflict."
+            "run_in_progress, run_limit_reached, run_not_cancellable, idempotency_conflict, "
+            "plan_required (lyrics) or lyrics_required (revise_lyrics)."
         ),
     ),
     422: ResponseSpec(
         data_container=ErrorEnvelope,
         description=(
-            "document_invalid (the brief), run_kind_not_available or memories_not_available."
+            "document_invalid (the body, or an input that cannot be used: no vocal section, no "
+            "language, lyrics that are not valid today, a target that does not fit) or "
+            "memories_not_available."
         ),
     ),
     429: ResponseSpec(data_container=ErrorEnvelope, description="run_rate_limited."),
@@ -86,10 +93,12 @@ class StudioRunController(Controller):
             ),
         ] = None,
     ) -> Response[RunOut]:
-        """Queue a run. The brief is sent to the configured LLM provider.
+        """Queue a run (``plan``, ``lyrics`` or ``revise_lyrics``).
 
-        Answers ``202`` with the queued run, or ``200`` when the key replays an earlier submit.
-        The result is an ordinary plan version that is **never** made current automatically.
+        What the run works on is resolved now and fixed: a missing or wrong input is a ``4xx``
+        with no charge. The brief, plan, lyrics and instruction are sent to the configured LLM
+        provider. Answers ``202`` with the queued run, or ``200`` when the key replays an earlier
+        submit. The result is an ordinary version that is **never** made current automatically.
         """
         write = await studio_run_service.submit(
             track_id,

@@ -12,6 +12,7 @@ from dataclasses import dataclass, field
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
+import msgspec
 from pydantic import SecretStr
 from sqlalchemy import delete, func, select, text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -36,6 +37,7 @@ from src.studio.services.run import RunWrite, StudioRunService
 from src.studio.services.run_context import ProfileArtistContextProvider
 from src.studio.services.run_events import StudioRunEvents
 from src.studio.services.run_executor import ClaimedRun, StudioRunExecutor
+from src.studio.services.run_kinds.registry import default_handlers
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from tests.legal_support import TEST_LEGAL_DIGEST
@@ -46,7 +48,7 @@ if TYPE_CHECKING:
     from src.api.schemas.events import EventType
     from src.api.services.billing import BalanceEvent
     from src.llm.port import StructuredLlmPort
-    from src.studio.documents import PlanDocument
+    from src.studio.documents import LyricsDocument, PlanDocument
 
 __all__ = [
     "PRODUCT",
@@ -260,6 +262,7 @@ class RunWorld:
             context_provider=provider or ProfileArtistContextProvider(),
             events=StudioRunEvents(self.bus),  # type: ignore[arg-type]
             settings=settings or self.settings,
+            handlers=default_handlers(),
         )
 
     # -- data --------------------------------------------------------------------------------
@@ -347,6 +350,113 @@ class RunWorld:
         for item in claimed:
             await executor.execute(item)
         return claimed
+
+    async def create_plan(
+        self, actor: Actor, track_id: UUID, plan: PlanDocument, *, make_current: bool = True
+    ) -> UUID:
+        """A user-made plan version (committed). Returns its id."""
+        from src.api.schemas.studio import PlanVersionCreate
+        from src.core.enums import StudioDocumentOrigin
+
+        async with self.factory() as session, session.begin():
+            created, _ = await DocumentVersionService(session).create(
+                track_id,
+                PlanVersionCreate(content=plan, make_current=make_current),
+                actor.user_id,
+                PRODUCT,
+                origin=StudioDocumentOrigin.USER,
+            )
+        return created.version.id
+
+    async def create_lyrics(
+        self,
+        actor: Actor,
+        track_id: UUID,
+        lyrics: LyricsDocument,
+        *,
+        plan_version_id: UUID,
+        make_current: bool = True,
+        parent_version_id: UUID | None = None,
+    ) -> UUID:
+        """A user-made lyrics version (committed). Returns its id."""
+        from src.api.schemas.studio import LyricsVersionCreate
+        from src.core.enums import StudioDocumentOrigin
+
+        async with self.factory() as session, session.begin():
+            created, _ = await DocumentVersionService(session).create(
+                track_id,
+                LyricsVersionCreate(
+                    content=lyrics,
+                    based_on_plan_version_id=plan_version_id,
+                    parent_version_id=parent_version_id,
+                    make_current=make_current,
+                ),
+                actor.user_id,
+                PRODUCT,
+                origin=StudioDocumentOrigin.USER,
+            )
+        return created.version.id
+
+    async def insert_raw_lyrics(
+        self,
+        actor: Actor,
+        track_id: UUID,
+        *,
+        plan_version_id: UUID,
+        content: dict[str, Any],
+        make_current: bool = False,
+    ) -> UUID:
+        """A lyrics row written **without validation**: what an older, laxer release may have
+        stored (a bracket in a line, a delivery that reads as a header). It still decodes."""
+        from src.core.enums import StudioDocumentKind
+        from src.db.repositories.studio import (
+            StudioDocumentVersionRepository,
+            StudioTrackRepository,
+        )
+        from src.studio.documents import CURRENT_SCHEMA_VERSION
+
+        async with self.factory() as session, session.begin():
+            tracks = StudioTrackRepository(session)
+            await tracks.lock(track_id, user_id=actor.user_id, product_id=PRODUCT)
+            row, _ = await StudioDocumentVersionRepository(session).insert_or_get_sibling(
+                user_id=actor.user_id,
+                product_id=PRODUCT,
+                track_id=track_id,
+                kind=StudioDocumentKind.LYRICS,
+                version_number=await tracks.allocate_version_number(
+                    track_id, StudioDocumentKind.LYRICS
+                ),
+                parent_version_id=None,
+                based_on_plan_version_id=plan_version_id,
+                schema_version=CURRENT_SCHEMA_VERSION[StudioDocumentKind.LYRICS],
+                origin="user",
+                content=content,
+                content_hash=uuid4().hex + uuid4().hex,
+            )
+            if make_current:
+                await tracks.set_current(track_id, lyrics_version_id=row.id)
+        return row.id
+
+    async def set_current(
+        self,
+        actor: Actor,
+        track_id: UUID,
+        *,
+        plan_version_id: Any = msgspec.UNSET,
+        lyrics_version_id: Any = msgspec.UNSET,
+    ) -> None:
+        async with self.factory() as session, session.begin():
+            await DocumentVersionService(session).set_current(
+                track_id,
+                actor.user_id,
+                PRODUCT,
+                plan_version_id=plan_version_id,
+                lyrics_version_id=lyrics_version_id,
+            )
+
+    async def delete_version(self, actor: Actor, version_id: UUID) -> None:
+        async with self.factory() as session, session.begin():
+            await DocumentVersionService(session).delete(version_id, actor.user_id, PRODUCT)
 
     # -- reads -------------------------------------------------------------------------------
 

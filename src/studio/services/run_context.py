@@ -31,7 +31,7 @@ if TYPE_CHECKING:
     from src.db.models.studio import StudioRun
     from src.studio.documents import PlanDocument
     from src.studio.planner.context import ArtistContextProvider
-    from src.studio.run_requests import PlanRunRequest
+    from src.studio.run_requests import RunRequest
 
 __all__ = ["ProfileArtistContextProvider", "RunContextBuilder"]
 
@@ -87,9 +87,12 @@ class RunContextBuilder:
         self._provider = provider
 
     async def build(
-        self, session: AsyncSession, run: StudioRun, request: PlanRunRequest
+        self, session: AsyncSession, run: StudioRun, request: RunRequest
     ) -> RunContextSnapshot:
         """The snapshot for ``run`` (its owner's track, artist, concept and current documents).
+
+        ``plan_version_id`` / ``lyrics_version_id`` are the track's *current* pair as of this read;
+        what the run works on is added by the kind's handler (``input_*``, ``language``).
 
         Raises:
             RuntimeError: The track is missing, or a current pointer names a row that is not

@@ -18,16 +18,13 @@ from src.core.enums import StudioSectionKind
 from src.core.product import ContentRating
 from src.llm.port import LlmMessage
 from src.studio.planner.policy import policy_block
+from src.studio.planner.prompts.blocks import REASK_MESSAGE, artist_lines, block, clean
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.context import (
-        ArtistSnapshot,
-        PlanSummary,
-        RunContextSnapshot,
-    )
+    from src.studio.planner.context import PlanSummary, RunContextSnapshot
     from src.studio.planner.drafts import PlanDraft
     from src.studio.run_requests import PlanRunRequest
 
@@ -60,12 +57,6 @@ Rules for the plan:
 
 If the brief asks for something these rules forbid, set "refusal" to "content_policy" and fill the other fields with empty values. If the brief is too empty or contradictory to plan a song from, set "refusal" to "brief_unusable". Otherwise "refusal" is null."""
 
-REASK_MESSAGE: Final = (
-    "Your reply was not valid for the schema. "
-    "Return only one JSON object that matches the schema exactly."
-)
-"""Sent after a reply that did not decode; the invalid reply itself is never echoed back."""
-
 _REJECTED: Final = (
     "The plan was rejected. Fix exactly these problems and return the full corrected JSON object:"
 )
@@ -88,50 +79,24 @@ ISSUE_EXPLANATIONS: Final[dict[str, str]] = {
 _GENERIC_EXPLANATION: Final = "fix this value"
 
 
-def _clean(text: str) -> str:
-    """User text with the characters that could close a block removed."""
-    return text.replace("<", "").replace(">", "")
-
-
-def _block(name: str, body: str) -> str:
-    return f"<{name}>\n{body}\n</{name}>"
-
-
 def build_system_prompt(rating: ContentRating) -> str:
     """The system message for a product with ``rating``."""
     kinds = ", ".join(kind.value for kind in StudioSectionKind)
     return _SYSTEM_TEMPLATE.format(kinds=kinds, policy=policy_block(rating))
 
 
-def _artist_lines(artist: ArtistSnapshot) -> str:
-    lines = [f"name: {_clean(artist.name)}"]
-    if artist.persona:
-        lines.append(f"persona: {_clean(artist.persona)}")
-    if artist.voice_notes:
-        lines.append(f"voice notes: {_clean(artist.voice_notes)}")
-    if artist.style_tags:
-        lines.append("style tags: " + ", ".join(_clean(tag) for tag in artist.style_tags))
-    if artist.global_avoid:
-        lines.append("things to avoid: " + ", ".join(_clean(tag) for tag in artist.global_avoid))
-    if artist.aesthetic_references:
-        lines.append(
-            "aesthetic references: " + ", ".join(_clean(ref) for ref in artist.aesthetic_references)
-        )
-    return "\n".join(lines)
-
-
 def _plan_lines(plan: PlanSummary) -> str:
-    lines = [f"title: {_clean(plan.title)}"]
+    lines = [f"title: {clean(plan.title)}"]
     if plan.tempo_bpm is not None:
         lines.append(f"tempo: {plan.tempo_bpm}")
     if plan.instrumental:
         lines.append("instrumental: yes")
     if plan.tags:
-        lines.append("tags: " + ", ".join(_clean(tag) for tag in plan.tags))
+        lines.append("tags: " + ", ".join(clean(tag) for tag in plan.tags))
     if plan.avoid:
-        lines.append("avoid: " + ", ".join(_clean(tag) for tag in plan.avoid))
+        lines.append("avoid: " + ", ".join(clean(tag) for tag in plan.avoid))
     for index, section in enumerate(plan.sections, start=1):
-        label = f" ({_clean(section.label)})" if section.label else ""
+        label = f" ({clean(section.label)})" if section.label else ""
         flag = " [instrumental]" if section.instrumental else ""
         lines.append(f"section {index}: {section.kind.value}{label}{flag}")
     return "\n".join(lines)
@@ -144,17 +109,17 @@ def build_plan_messages(context: RunContextSnapshot, request: PlanRunRequest) ->
     """
     blocks: list[str] = []
     if context.track_title:
-        blocks.append(_block("track_title", _clean(context.track_title)))
+        blocks.append(block("track_title", clean(context.track_title)))
     language = request.language or (context.artist.default_language if context.artist else None)
     if language:
-        blocks.append(_block("language", _clean(language)))
+        blocks.append(block("language", clean(language)))
     if context.artist is not None:
-        blocks.append(_block("artist", _artist_lines(context.artist)))
+        blocks.append(block("artist", artist_lines(context.artist)))
     if context.concept:
-        blocks.append(_block("project_concept", _clean(context.concept)))
+        blocks.append(block("project_concept", clean(context.concept)))
     if context.current_plan is not None:
-        blocks.append(_block("current_plan", _plan_lines(context.current_plan)))
-    blocks.append(_block("brief", _clean(request.brief)))
+        blocks.append(block("current_plan", _plan_lines(context.current_plan)))
+    blocks.append(block("brief", clean(request.brief)))
     return [
         LlmMessage("system", build_system_prompt(ContentRating(context.content_rating))),
         LlmMessage("user", "\n\n".join(blocks)),

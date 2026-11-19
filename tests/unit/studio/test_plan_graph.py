@@ -9,6 +9,7 @@ from uuid import UUID
 
 import pytest
 
+from src.core.enums import StudioRunKind
 from src.core.enums import StudioRunStage as Stage
 from src.llm.port import (
     LlmOutputInvalid,
@@ -26,14 +27,14 @@ from src.studio.planner.graphs.plan import (
     MAX_LLM_CALLS,
     PlanDeps,
     PlanReady,
-    PlanRefused,
-    PlanRejected,
     PlanRun,
     build_plan_graph,
     compile_plan_graph,
     initial_state,
     run_plan_graph,
 )
+from src.studio.planner.graphs.plan import RunRefused as PlanRefused
+from src.studio.planner.graphs.plan import RunRejected as PlanRejected
 from src.studio.planner.prompts.plan_v1 import REASK_MESSAGE
 from src.studio.run_requests import PlanRunRequest
 from tests.llm_support import FakeLlm
@@ -260,8 +261,10 @@ def test_the_outcome_variants_are_frozen_values() -> None:
     with pytest.raises(AttributeError):
         refusal.reason = DraftRefusal.BRIEF_UNUSABLE  # type: ignore[misc]
     issue = DocumentIssue("title", "too_long")
-    assert PlanRejected((issue,)) == PlanRejected((DocumentIssue("title", "too_long"),))
-    assert PlanRejected((issue,)) != PlanRejected(())
+    plan = StudioRunKind.PLAN
+    assert PlanRejected((issue,), plan) == PlanRejected((DocumentIssue("title", "too_long"),), plan)
+    assert PlanRejected((issue,), plan) != PlanRejected((), plan)
+    assert PlanRejected((issue,), plan) != PlanRejected((issue,), StudioRunKind.LYRICS)
 
 
 async def test_a_graph_that_ends_without_an_outcome_raises_a_named_error(

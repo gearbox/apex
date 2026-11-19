@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import pytest
 
+from src.core.enums import StudioRunKind
 from src.llm.port import (
     LlmOutputInvalid,
     LlmOutputTruncated,
@@ -13,8 +14,15 @@ from src.llm.port import (
 from src.studio.errors import DocumentIssue, RunInProgress, VersionLimitReached
 from src.studio.planner.drafts import DraftRefusal
 from src.studio.planner.errors import PlannerStateError
-from src.studio.planner.outcome import PlanReady, PlanRefused, PlanRejected
-from src.studio.run_failures import RunFailure, failure_of_error, failure_of_outcome
+from src.studio.planner.outcome import PlanReady
+from src.studio.planner.outcome import RunRefused as PlanRefused
+from src.studio.planner.outcome import RunRejected as PlanRejected
+from src.studio.run_failures import (
+    _INVALID_CODE,
+    RunFailure,
+    failure_of_error,
+    failure_of_outcome,
+)
 from tests.studio_llm import make_draft
 
 pytestmark = pytest.mark.unit
@@ -86,7 +94,7 @@ def test_refusals(reason: DraftRefusal, code: str) -> None:
 
 def test_a_rejected_plan_lists_paths_and_codes_only() -> None:
     issues = (DocumentIssue("sections[1].delivery[0]", "reserved_descriptor"),)
-    failure = failure_of_outcome(PlanRejected(issues))
+    failure = failure_of_outcome(PlanRejected(issues, StudioRunKind.PLAN))
     assert failure == RunFailure(
         "plan_invalid",
         {"issues": [{"path": "sections[1].delivery[0]", "code": "reserved_descriptor"}]},
@@ -108,3 +116,66 @@ def _a_plan():  # type: ignore[no-untyped-def]
     assert plan is not None
     assert not issues
     return plan
+
+
+# -- S1-P2a-B: lyrics and revise_lyrics -----------------------------------------------------------
+
+
+def test_a_lyrics_outcome_that_is_ready_is_not_a_failure() -> None:
+    from src.studio.planner.outcome import LyricsReady
+    from tests.studio_lyrics_support import doc
+
+    assert failure_of_outcome(LyricsReady(doc())) is None
+
+
+@pytest.mark.parametrize("kind", ["lyrics", "revise_lyrics"])
+def test_a_rejected_lyrics_run_lists_paths_and_codes_only(kind: str) -> None:
+    issues = (DocumentIssue("sections[2].lines[0].text", "reserved_characters"),)
+    failure = failure_of_outcome(PlanRejected(issues, StudioRunKind(kind)))
+    assert failure == RunFailure(
+        "lyrics_invalid",
+        {"issues": [{"path": "sections[2].lines[0].text", "code": "reserved_characters"}]},
+    )
+
+
+def test_a_refusal_is_not_tied_to_the_kind_that_asked() -> None:
+    assert failure_of_outcome(PlanRefused(DraftRefusal.CONTENT_POLICY)) == RunFailure(
+        "content_policy_refused"
+    )
+    assert failure_of_outcome(PlanRefused(DraftRefusal.BRIEF_UNUSABLE)) == RunFailure(
+        "brief_unusable"
+    )
+
+
+def test_the_run_outcome_union_is_the_four_variants_the_mapping_handles() -> None:
+    from src.studio.planner import outcome
+    from src.studio.planner.outcome import LyricsReady
+
+    assert set(outcome.RunOutcome.__value__.__args__) == {
+        PlanReady,
+        LyricsReady,
+        PlanRefused,
+        PlanRejected,
+    }
+    assert set(outcome.LyricsOutcome.__value__.__args__) == {LyricsReady, PlanRefused, PlanRejected}
+
+
+def test_a_rejection_must_say_which_kind_it_is_invariant_25() -> None:
+    """No default: a forgotten ``kind`` is an error, not a lyrics run reported as ``plan_invalid``."""
+    with pytest.raises(TypeError):
+        PlanRejected(())  # type: ignore[call-arg]
+
+
+@pytest.mark.parametrize("kind", list(StudioRunKind))
+def test_every_run_kind_maps_to_a_rejection_code_invariant_25(kind: StudioRunKind) -> None:
+    code = _INVALID_CODE[kind]
+    assert failure_of_outcome(PlanRejected((), kind)) == RunFailure(code, {"issues": []})
+
+
+def test_the_rejection_codes_are_the_ones_the_contract_names() -> None:
+    assert set(_INVALID_CODE) == set(StudioRunKind)
+    assert {kind: _INVALID_CODE[kind] for kind in StudioRunKind} == {
+        StudioRunKind.PLAN: "plan_invalid",
+        StudioRunKind.LYRICS: "lyrics_invalid",
+        StudioRunKind.REVISE_LYRICS: "lyrics_invalid",
+    }

@@ -27,13 +27,14 @@ __all__ = [
     "ImportInvalid",
     "InvalidCursor",
     "LyricsIncompatibleWithPlan",
+    "LyricsRequired",
+    "LyricsVersionNotFound",
     "MemoriesNotAvailable",
     "ParentVersionNotFound",
     "PlanRequired",
     "PlanVersionNotFound",
     "ProjectHasTracks",
     "RunInProgress",
-    "RunKindNotAvailable",
     "RunLimitReached",
     "RunNotCancellable",
     "RunNotFound",
@@ -45,6 +46,7 @@ __all__ = [
     "TrackLimitReached",
     "TrackOrderMismatch",
     "VersionHasChildren",
+    "VersionInUseByRun",
     "VersionIsCurrent",
     "VersionIsLyricsBase",
     "VersionLimitReached",
@@ -112,6 +114,14 @@ class PlanVersionNotFound(StudioError):
     message = "Plan version not found on this track."
 
 
+class LyricsVersionNotFound(StudioError):
+    """The lyrics version a revision works on is missing, or is not a lyrics version of this track."""
+
+    code = "lyrics_version_not_found"
+    status_code = 404
+    message = "Lyrics version not found on this track."
+
+
 class RunNotFound(StudioError):
     """No such run for the caller."""
 
@@ -129,14 +139,6 @@ class IdempotencyKeyRequired(StudioError):
     code = "idempotency_key_required"
     status_code = 400
     message = "An Idempotency-Key header of 1 to 128 characters is required."
-
-
-class RunKindNotAvailable(StudioError):
-    """The run kind is declared but not implemented yet."""
-
-    code = "run_kind_not_available"
-    status_code = 422
-    message = "This kind of run is not available yet."
 
 
 class MemoriesNotAvailable(StudioError):
@@ -257,6 +259,14 @@ class PlanRequired(StudioError):
     message = "The track needs a plan first."
 
 
+class LyricsRequired(StudioError):
+    """A revision needs lyrics, and the track has none (and none was named)."""
+
+    code = "lyrics_required"
+    status_code = 409
+    message = "The track needs lyrics first."
+
+
 class LyricsIncompatibleWithPlan(StudioError):
     """The (plan, lyrics) pair is incompatible; ``detail.issues`` says why."""
 
@@ -322,6 +332,14 @@ class VersionHasChildren(StudioError):
 
     def __init__(self, count: int) -> None:
         super().__init__({"count": count})
+
+
+class VersionInUseByRun(StudioError):
+    """An active run takes this version as its input: deleting it would lose the paid result."""
+
+    code = "version_in_use_by_run"
+    status_code = 409
+    message = "A run in progress is working on this version."
 
 
 class VersionIsLyricsBase(StudioError):

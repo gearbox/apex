@@ -77,9 +77,17 @@ class PlanSummary(Struct, frozen=True, kw_only=True):
 
 
 class RunContextSnapshot(Struct, frozen=True, kw_only=True):
-    """The context of one run."""
+    """The context of one run.
 
-    snapshot_version: Literal[1] = 1
+    ``plan_version_id`` / ``lyrics_version_id`` (and their hashes) are the track's **current**
+    pair at claim - the parent a ``lyrics`` result is saved under. What the run actually *works on*
+    is recorded in the ``input_*`` fields (the versions named in the run's inputs); they, and
+    ``language``, are ``None`` for a ``plan`` run. Documents travel in memory, not in the snapshot:
+    versions are immutable and a version an active run uses cannot be deleted, so ids and hashes
+    are enough for the record.
+    """
+
+    snapshot_version: Literal[2] = 2
     track_title: str
     artist: ArtistSnapshot | None
     concept: str | None
@@ -91,6 +99,11 @@ class RunContextSnapshot(Struct, frozen=True, kw_only=True):
     lyrics_content_hash: str | None
     memories: tuple[MemorySnapshot, ...] = ()
     """Always empty in P2a (P2a-2)."""
+    input_plan_version_id: UUID | None = None
+    input_plan_content_hash: str | None = None
+    input_lyrics_version_id: UUID | None = None
+    input_lyrics_content_hash: str | None = None
+    language: str | None = None
 
 
 @dataclass(frozen=True, slots=True)

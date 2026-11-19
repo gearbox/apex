@@ -228,7 +228,10 @@ def run_out(row: StudioRun) -> RunOut:
         model_key=row.model_key,
         result_plan_version_id=row.result_plan_version_id,
         result_lyrics_version_id=row.result_lyrics_version_id,
-        warnings=[RunWarningOut(code=str(w["code"]), path=w.get("path")) for w in row.warnings],
+        warnings=[
+            RunWarningOut(code=str(w["code"]), path=w.get("path"), count=w.get("count"))
+            for w in row.warnings
+        ],
         error_code=row.error_code,
         error_detail=row.error_detail,
         llm_calls=row.llm_calls,

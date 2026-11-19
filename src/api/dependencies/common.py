@@ -1001,6 +1001,7 @@ async def _start_studio_run_worker(
     from src.llm.factory import LlmClientFactory
     from src.studio.services.run_context import ProfileArtistContextProvider
     from src.studio.services.run_executor import StudioRunExecutor
+    from src.studio.services.run_kinds.registry import default_handlers
 
     if _services.db_manager is None:
         raise RuntimeError("studio run worker needs the database")
@@ -1012,6 +1013,7 @@ async def _start_studio_run_worker(
         context_provider=ProfileArtistContextProvider(),
         events=StudioRunEvents(_services.event_bus),
         settings=settings,
+        handlers=default_handlers(),
     )
     worker = StudioRunWorker(
         executor=executor,

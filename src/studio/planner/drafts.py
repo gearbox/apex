@@ -14,11 +14,21 @@ from msgspec import Struct
 
 from src.core.enums import StudioSectionKind
 
-__all__ = ["DraftRefusal", "PlanDraft", "PlanSectionDraft"]
+__all__ = [
+    "DraftRefusal",
+    "LinePatchDraft",
+    "LyricLineDraft",
+    "LyricsDraft",
+    "LyricsPatchDraft",
+    "LyricsRevisionDraft",
+    "LyricsSectionDraft",
+    "PlanDraft",
+    "PlanSectionDraft",
+]
 
 
 class DraftRefusal(StrEnum):
-    """Why the model declined to plan."""
+    """Why the model declined to write."""
 
     CONTENT_POLICY = "content_policy"
     BRIEF_UNUSABLE = "brief_unusable"
@@ -48,3 +58,53 @@ class PlanDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
     tags: list[str]
     avoid: list[str]
     sections: list[PlanSectionDraft]
+
+
+class LyricLineDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """One sung line as the model writes it."""
+
+    text: str
+    delivery: list[str]
+    """Short performance cues for this line; an empty list when there are none."""
+
+
+class LyricsSectionDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """The lines of one plan section."""
+
+    key: str
+    """``s<n>``: the n-th section of the plan (1-based, instrumental ones counted)."""
+    lines: list[LyricLineDraft]
+
+
+class LyricsDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """The model's lyrics for a whole plan."""
+
+    refusal: DraftRefusal | None
+    sections: list[LyricsSectionDraft]
+
+
+class LinePatchDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """The replacement of one line."""
+
+    key: str
+    line: int
+    """1-based, as the model was shown it. The API and every issue path are 0-based."""
+    text: str
+    delivery: list[str]
+
+
+class LyricsPatchDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """The in-run fix of rejected lines: replacements for exactly the lines that were asked for."""
+
+    refusal: DraftRefusal | None
+    lines: list[LinePatchDraft]
+
+
+class LyricsRevisionDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
+    """The first reply of a ``revise_lyrics`` run."""
+
+    refusal: DraftRefusal | None
+    sections: list[LyricsSectionDraft]
+    """New lines for each whole-section target."""
+    lines: list[LinePatchDraft]
+    """One replacement for each single-line target."""

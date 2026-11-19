@@ -19,22 +19,22 @@ from typing import TYPE_CHECKING, Final, Literal, TypedDict, cast
 from langgraph.graph import END, START, StateGraph
 from langgraph.runtime import Runtime  # noqa: TC002 - runtime: langgraph inspects node signatures
 
-from src.core.enums import StudioRunStage
-from src.llm.port import LlmMessage, LlmOutputInvalid
+from src.core.enums import StudioRunKind, StudioRunStage
+from src.llm.port import LlmMessage  # noqa: TC001 - runtime: LangGraph reads the state hints
 from src.studio.errors import DocumentIssue  # noqa: TC001 - runtime: LangGraph reads the state hints
 from src.studio.planner.context import RunContextSnapshot  # noqa: TC001
 from src.studio.planner.drafts import PlanDraft
 from src.studio.planner.errors import PlannerStateError
+from src.studio.planner.graphs.ask import ask_structured
 from src.studio.planner.mapping import draft_key_issues, plan_from_draft
 from src.studio.planner.outcome import (
     PlanOutcome,
     PlanReady,
-    PlanRefused,
-    PlanRejected,
     PlanRun,
+    RunRefused,
+    RunRejected,
 )
 from src.studio.planner.prompts.plan_v1 import (
-    REASK_MESSAGE,
     build_plan_messages,
     build_plan_revision_messages,
 )
@@ -56,10 +56,10 @@ __all__ = [
     "PlanDeps",
     "PlanOutcome",
     "PlanReady",
-    "PlanRefused",
-    "PlanRejected",
     "PlanRun",
     "PlanState",
+    "RunRefused",
+    "RunRejected",
     "build_plan_graph",
     "compile_plan_graph",
     "initial_state",
@@ -115,35 +115,31 @@ def initial_state(context: RunContextSnapshot, request: PlanRunRequest) -> PlanS
     )
 
 
+def _as_is(draft: PlanDraft) -> PlanDraft:
+    return draft
+
+
 async def _ask(
     deps: PlanDeps, messages: tuple[LlmMessage, ...], state: PlanState
 ) -> dict[str, Any]:
     """Ask for a draft, re-asking (within the call budget) when the reply does not decode."""
-    conversation = list(messages)
-    calls = state["llm_calls"]
-    prompt_tokens = state["prompt_tokens"]
-    completion_tokens = state["completion_tokens"]
-    while True:
-        calls += 1
-        try:
-            result = await deps.llm.complete(
-                conversation, schema=PlanDraft, schema_name=PLAN_SCHEMA_NAME
-            )
-        except LlmOutputInvalid as exc:
-            # The reply was paid for even though it is unusable: keep the counters in step.
-            if exc.usage is not None:
-                prompt_tokens += exc.usage.prompt_tokens
-                completion_tokens += exc.usage.completion_tokens
-            if calls >= MAX_LLM_CALLS:
-                raise
-            conversation.append(LlmMessage("user", REASK_MESSAGE))
-            continue
-        return {
-            "draft": result.value,
-            "llm_calls": calls,
-            "prompt_tokens": prompt_tokens + result.usage.prompt_tokens,
-            "completion_tokens": completion_tokens + result.usage.completion_tokens,
-        }
+    asked = await ask_structured(
+        deps.llm,
+        messages,
+        schema=PlanDraft,
+        schema_name=PLAN_SCHEMA_NAME,
+        max_calls=MAX_LLM_CALLS,
+        llm_calls=state["llm_calls"],
+        prompt_tokens=state["prompt_tokens"],
+        completion_tokens=state["completion_tokens"],
+        accept=_as_is,
+    )
+    return {
+        "draft": asked.value,
+        "llm_calls": asked.llm_calls,
+        "prompt_tokens": asked.prompt_tokens,
+        "completion_tokens": asked.completion_tokens,
+    }
 
 
 async def _draft(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, Any]:
@@ -160,13 +156,16 @@ async def _validate(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, A
     if draft is None:
         raise PlannerStateError("validate ran before draft")
     if draft.refusal is not None:
-        return {"issues": (), "outcome": PlanRefused(draft.refusal)}
+        return {"issues": (), "outcome": RunRefused(draft.refusal)}
     plan, plan_issues = validate_plan(plan_from_draft(draft, brief=state["request"].brief))
     issues = (*draft_key_issues(draft), *plan_issues)
     if plan is not None and not issues:
         return {"issues": (), "outcome": PlanReady(plan)}
     can_revise = state["revisions"] < deps.max_revisions and state["llm_calls"] < MAX_LLM_CALLS
-    return {"issues": issues, "outcome": None if can_revise else PlanRejected(issues)}
+    return {
+        "issues": issues,
+        "outcome": None if can_revise else RunRejected(issues, StudioRunKind.PLAN),
+    }
 
 
 async def _revise(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, Any]:

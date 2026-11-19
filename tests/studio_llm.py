@@ -8,15 +8,33 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.core.enums import StudioSectionKind
-from src.studio.planner.drafts import DraftRefusal, PlanDraft, PlanSectionDraft
+from src.studio.planner.drafts import (
+    DraftRefusal,
+    LinePatchDraft,
+    LyricLineDraft,
+    LyricsDraft,
+    LyricsPatchDraft,
+    LyricsRevisionDraft,
+    LyricsSectionDraft,
+    PlanDraft,
+    PlanSectionDraft,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
 __all__ = [
     "make_draft",
+    "make_line_patch",
+    "make_lyrics_draft",
+    "make_lyrics_patch",
+    "make_lyrics_revision",
     "make_section_draft",
     "refusal_draft",
+    "refusal_lyrics_draft",
+    "refusal_lyrics_patch",
+    "refusal_lyrics_revision",
+    "section_lines",
 ]
 
 K = StudioSectionKind
@@ -80,3 +98,57 @@ def refusal_draft(reason: DraftRefusal) -> PlanDraft:
         avoid=[],
         sections=[],
     )
+
+
+# -- lyrics drafts -----------------------------------------------------------------------------
+
+
+def _lines(lines: Sequence[str | LyricLineDraft]) -> list[LyricLineDraft]:
+    return [
+        line if isinstance(line, LyricLineDraft) else LyricLineDraft(text=line, delivery=[])
+        for line in lines
+    ]
+
+
+def section_lines(key: str, *lines: str | LyricLineDraft) -> LyricsSectionDraft:
+    """One section's lines as the model writes them (plain strings become delivery-less lines)."""
+    return LyricsSectionDraft(key=key, lines=_lines(lines))
+
+
+def make_lyrics_draft(
+    *sections: LyricsSectionDraft, refusal: DraftRefusal | None = None
+) -> LyricsDraft:
+    """A lyrics reply made of the given sections."""
+    return LyricsDraft(refusal=refusal, sections=list(sections))
+
+
+def refusal_lyrics_draft(reason: DraftRefusal) -> LyricsDraft:
+    """What a model returns to decline writing lyrics."""
+    return LyricsDraft(refusal=reason, sections=[])
+
+
+def make_line_patch(key: str, line: int, text: str, delivery: Sequence[str] = ()) -> LinePatchDraft:
+    """The replacement of one line (``line`` is 1-based, as the model numbers it)."""
+    return LinePatchDraft(key=key, line=line, text=text, delivery=list(delivery))
+
+
+def make_lyrics_patch(*lines: LinePatchDraft) -> LyricsPatchDraft:
+    """A reply to a patch request."""
+    return LyricsPatchDraft(refusal=None, lines=list(lines))
+
+
+def refusal_lyrics_patch(reason: DraftRefusal) -> LyricsPatchDraft:
+    return LyricsPatchDraft(refusal=reason, lines=[])
+
+
+def make_lyrics_revision(
+    *,
+    sections: Sequence[LyricsSectionDraft] = (),
+    lines: Sequence[LinePatchDraft] = (),
+) -> LyricsRevisionDraft:
+    """The first reply of a revision: new sections and/or replaced lines."""
+    return LyricsRevisionDraft(refusal=None, sections=list(sections), lines=list(lines))
+
+
+def refusal_lyrics_revision(reason: DraftRefusal) -> LyricsRevisionDraft:
+    return LyricsRevisionDraft(refusal=reason, sections=[], lines=[])

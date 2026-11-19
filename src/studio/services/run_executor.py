@@ -2,12 +2,15 @@
 
 ``StudioRunExecutor`` is a process singleton that owns its short transactions: the claim, each
 stage change and the final write are separate commits, so **no database connection is held while a
-model call is awaited**. The success write saves the plan version and marks the run ``succeeded``
+model call is awaited**. The success write saves the result version and marks the run ``succeeded``
 atomically; a crashed or timed-out run is failed and refunded by the sweep and never executed
 twice. Lock order is track, then run.
 
-This module (and only it, via ``src/studio/planner/graphs``) imports ``langgraph``, so processes
-that never run the planner never load it.
+It is **generic over the run kind** (P2a-48): it is given one handler per kind
+(``run_kinds/*.py``) and names none. Request decoding, loading the working documents, the graph and
+which version is saved are the handler's; claim, stages, deadline, metering, the atomic finish,
+failure, refund and sweep are here, once. The handlers - not this module - load ``langgraph``, so
+processes that never run the planner never load it.
 
 Logs carry ids, kinds, stages, model keys, token counts, durations and error codes only - never the
 brief, the artist, a prompt or model output; an unexpected exception is logged as its type and
@@ -19,26 +22,15 @@ from __future__ import annotations
 import asyncio
 import time
 import traceback
-from dataclasses import dataclass
 from typing import TYPE_CHECKING
-from uuid import UUID  # noqa: TC003 - runtime: used in dataclass annotations
 
 import msgspec
 import structlog
 
-from src.api.schemas.studio import PlanVersionCreate
-from src.core.enums import StudioDocumentOrigin, StudioRunKind, StudioRunStage
-from src.db.repositories.studio import StudioRunRepository, StudioTrackRepository
+from src.core.enums import StudioRunKind, StudioRunStage
+from src.db.repositories.studio import StudioRunRepository
 from src.llm.port import LlmReplyError
-from src.studio.errors import ParentVersionNotFound, StudioError, StudioNotFound, VersionUnchanged
-from src.studio.planner.graphs.plan import (
-    PlanDeps,
-    PlanReady,
-    compile_plan_graph,
-    initial_state,
-    run_plan_graph,
-)
-from src.studio.planner.prompts.plan_v1 import PROMPT_VERSION
+from src.studio.errors import StudioError
 from src.studio.run_failures import (
     ERR_INTERNAL,
     ERR_TIMEOUT,
@@ -46,12 +38,11 @@ from src.studio.run_failures import (
     failure_of_error,
     failure_of_outcome,
 )
-from src.studio.run_requests import PlanRunRequest
 from src.studio.services.run_context import RunContextBuilder
-from src.studio.services.version import DocumentVersionService
+from src.studio.services.run_kinds.base import ClaimedRun
 
 if TYPE_CHECKING:
-    from collections.abc import Callable, Sequence
+    from collections.abc import Callable, Mapping, Sequence
 
     from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -61,17 +52,14 @@ if TYPE_CHECKING:
     from src.db.session import DatabaseManager
     from src.llm.port import LlmMessage, LlmResult, LlmUsage, StructuredLlmPort
     from src.llm.registry import LlmModelRegistry
-    from src.studio.documents import PlanDocument
-    from src.studio.planner.context import ArtistContextProvider, RunContextSnapshot
-    from src.studio.planner.graphs.plan import PlanRun
+    from src.studio.planner.context import ArtistContextProvider
+    from src.studio.planner.outcome import RunOutcome
     from src.studio.services.run_events import StudioRunEvents
+    from src.studio.services.run_kinds.base import RunHandler
 
 __all__ = ["ClaimedRun", "RunSwept", "StudioRunExecutor"]
 
 logger = structlog.get_logger(__name__)
-
-WARNING_PARENT_VERSION_REPLACED = "parent_version_replaced"
-"""Run warning: the plan the run started from was deleted before the result was saved."""
 
 _LEASE_GRACE_SECONDS = 30
 """Added to the deadline: the lease outlives the run's own timeout, so only a dead worker's run
@@ -80,21 +68,6 @@ is ever swept."""
 
 class RunSwept(Exception):
     """The run is no longer ``running`` (the sweep failed it): stop and write nothing."""
-
-
-@dataclass(frozen=True, slots=True)
-class ClaimedRun:
-    """A run this worker moved to ``running`` and now executes."""
-
-    run_id: UUID
-    user_id: UUID
-    product_id: str
-    track_id: UUID
-    kind: StudioRunKind
-    request: PlanRunRequest
-    context: RunContextSnapshot
-    model_key: str
-    price_tokens: int
 
 
 class _MeteredLlm:
@@ -146,6 +119,7 @@ class StudioRunExecutor:
         context_provider: ArtistContextProvider[AsyncSession],
         events: StudioRunEvents,
         settings: Settings,
+        handlers: Mapping[StudioRunKind, RunHandler],
     ) -> None:
         self._db = db_manager
         self._billing = billing
@@ -154,7 +128,7 @@ class StudioRunExecutor:
         self._context = RunContextBuilder(context_provider)
         self._events = events
         self._deadline = settings.studio_run_deadline_seconds
-        self._graph = compile_plan_graph()
+        self._handlers = handlers
 
     # -- claim -------------------------------------------------------------------------------
 
@@ -201,15 +175,19 @@ class StudioRunExecutor:
         self, session: AsyncSession, runs: StudioRunRepository, row: StudioRun
     ) -> tuple[ClaimedRun, StudioRun]:
         kind = StudioRunKind(row.kind)
-        request = msgspec.convert(row.request, PlanRunRequest)
+        handler = self._handlers[kind]
+        request = handler.decode_request(row.request)
         context = await self._context.build(session, row, request)
+        # The working documents are loaded here, inside the claim transaction, from the ids the
+        # run was accepted with - never from the track's current pointers.
+        loaded = await handler.load(session, row, request, context)
         entry = self._registry.entry(row.model_key)
         started = await runs.mark_running(
             row.id,
             lease_seconds=self._deadline + _LEASE_GRACE_SECONDS,
             model_id=entry.model,
-            prompt_version=PROMPT_VERSION,
-            context_snapshot=msgspec.to_builtins(context),
+            prompt_version=handler.prompt_version,
+            context_snapshot=msgspec.to_builtins(loaded.context),
         )
         if started is None:  # pragma: no cover - the row is locked by this transaction
             raise RuntimeError("claimed run was not queued")
@@ -221,9 +199,11 @@ class StudioRunExecutor:
                 track_id=row.track_id,
                 kind=kind,
                 request=request,
-                context=context,
+                context=loaded.context,
                 model_key=row.model_key,
                 price_tokens=row.price_tokens,
+                inputs=loaded.inputs,
+                documents=loaded.documents,
             ),
             started,
         )
@@ -239,24 +219,23 @@ class StudioRunExecutor:
         """
         started = time.monotonic()
         meter = _MeteredLlm(self._llm_factory(claimed.model_key))
-        deps = PlanDeps(llm=meter, on_stage=lambda stage: self._on_stage(claimed, stage))
         failure: RunFailure
         try:
+            handler = self._handlers[claimed.kind]
             try:
-                run = await self._run_graph(claimed, deps)
+                outcome = await self._run_graph(claimed, handler, meter)
             except TimeoutError:
                 # The run's own deadline. Only the graph is bounded by it: a timeout raised by the
                 # save step below is not a ``run_timeout`` and must not be reported as one.
                 failure = RunFailure(ERR_TIMEOUT)
             else:
-                match run.outcome:
-                    case PlanReady(plan=plan):
-                        await self._on_stage(claimed, StudioRunStage.SAVING)
-                        if await self._finish_success(claimed, plan, meter):
-                            self._log_finished(claimed, "succeeded", None, meter, started)
-                        return
-                    case unsuccessful:
-                        failure = failure_of_outcome(unsuccessful)
+                unsuccessful = failure_of_outcome(outcome)
+                if unsuccessful is None:
+                    await self._on_stage(claimed, StudioRunStage.SAVING)
+                    if await self._finish_success(claimed, handler, outcome, meter):
+                        self._log_finished(claimed, "succeeded", None, meter, started)
+                    return
+                failure = unsuccessful
         except RunSwept:
             logger.warning("studio.run.swept", run_id=str(claimed.run_id))
             return
@@ -275,10 +254,14 @@ class StudioRunExecutor:
         await self._finish_failure(claimed, failure, meter)
         self._log_finished(claimed, "failed", failure.code, meter, started)
 
-    async def _run_graph(self, claimed: ClaimedRun, deps: PlanDeps) -> PlanRun:
+    async def _run_graph(
+        self, claimed: ClaimedRun, handler: RunHandler, meter: _MeteredLlm
+    ) -> RunOutcome:
         async with asyncio.timeout(self._deadline):
-            return await run_plan_graph(
-                self._graph, initial_state(claimed.context, claimed.request), deps
+            return await handler.run(
+                claimed,
+                llm=meter,
+                on_stage=lambda stage: self._on_stage(claimed, stage),
             )
 
     async def _on_stage(self, claimed: ClaimedRun, stage: StudioRunStage) -> None:
@@ -292,26 +275,31 @@ class StudioRunExecutor:
     # -- finish ------------------------------------------------------------------------------
 
     async def _finish_success(
-        self, claimed: ClaimedRun, plan: PlanDocument, meter: _MeteredLlm
+        self,
+        claimed: ClaimedRun,
+        handler: RunHandler,
+        outcome: RunOutcome,
+        meter: _MeteredLlm,
     ) -> bool:
-        """Save the plan as an ordinary version **and** mark the run ``succeeded``, atomically.
+        """Save the result as an ordinary version **and** mark the run ``succeeded``, atomically.
 
-        The version is a child of the plan that was current at claim, ``origin = llm``, and is
-        never made current. If that plan no longer exists (the user switched and deleted it while
-        the model worked) the result becomes a child of the track's current plan instead - a root
-        when it has none - and the run records ``parent_version_replaced``: a paid, valid result
-        is never thrown away because its lineage anchor is gone. If the run is no longer
-        ``running`` the whole transaction is rolled back, so no version outlives a swept run.
+        *Which* version is saved - its kind, parent, fallback and warnings - is the handler's
+        (``origin = llm``, never made current; if the claim-time parent was deleted the result goes
+        under the track's current version of that kind with ``parent_version_replaced``: a paid,
+        valid result is never thrown away because its lineage anchor is gone). If the run is no
+        longer ``running`` the whole transaction is rolled back, so no version outlives a swept
+        run.
 
         Returns:
             ``True`` when the run is now ``succeeded``; ``False`` when it had been swept.
         """
         async with self._db.session() as session:
-            result_id, warnings = await self._save_result(session, claimed, plan)
+            saved = await handler.save(session, claimed, outcome)
             run = await StudioRunRepository(session).finish_succeeded(
                 claimed.run_id,
-                result_plan_version_id=result_id,
-                warnings=warnings,
+                result_plan_version_id=saved.result_plan_version_id,
+                result_lyrics_version_id=saved.result_lyrics_version_id,
+                warnings=[warning.to_json() for warning in saved.warnings],
                 llm_calls=meter.calls,
                 prompt_tokens=meter.prompt_tokens,
                 completion_tokens=meter.completion_tokens,
@@ -322,65 +310,6 @@ class StudioRunExecutor:
                 return False
         await self._events.run_updated(run)
         return True
-
-    async def _save_result(
-        self, session: AsyncSession, claimed: ClaimedRun, plan: PlanDocument
-    ) -> tuple[UUID | None, list[dict[str, str]]]:
-        """Write the result version; returns its id and the run's warnings.
-
-        Raises:
-            ParentVersionNotFound: Even the track's current plan could not be used as the parent
-                (cannot happen: the track lock is held, so the pointer cannot move).
-        """
-        versions = DocumentVersionService(session)
-        try:
-            result_id = await self._save_child(
-                versions, claimed, plan, claimed.context.plan_version_id
-            )
-        except ParentVersionNotFound:
-            return await self._save_under_current_plan(session, versions, claimed, plan)
-        return result_id, []
-
-    async def _save_under_current_plan(
-        self,
-        session: AsyncSession,
-        versions: DocumentVersionService,
-        claimed: ClaimedRun,
-        plan: PlanDocument,
-    ) -> tuple[UUID | None, list[dict[str, str]]]:
-        """The claim-time parent is gone: save under the track's current plan (a root if none).
-
-        The refused ``create`` has locked the track and written nothing, so the pointer read here
-        cannot move before the retry. One retry, never a loop: a second refusal propagates.
-        """
-        track = await StudioTrackRepository(session).lock(
-            claimed.track_id, user_id=claimed.user_id, product_id=claimed.product_id
-        )
-        if track is None:  # pragma: no cover - the refused create locked this very row
-            raise StudioNotFound
-        logger.info("studio.run.parent_replaced", run_id=str(claimed.run_id))
-        result_id = await self._save_child(versions, claimed, plan, track.current_plan_version_id)
-        return result_id, [{"code": WARNING_PARENT_VERSION_REPLACED}]
-
-    @staticmethod
-    async def _save_child(
-        versions: DocumentVersionService,
-        claimed: ClaimedRun,
-        plan: PlanDocument,
-        parent_id: UUID | None,
-    ) -> UUID | None:
-        """Create the result as a child of ``parent_id``; an unchanged plan *is* that parent."""
-        try:
-            created, _ = await versions.create(
-                claimed.track_id,
-                PlanVersionCreate(content=plan, parent_version_id=parent_id, make_current=False),
-                claimed.user_id,
-                claimed.product_id,
-                origin=StudioDocumentOrigin.LLM,
-            )
-        except VersionUnchanged:
-            return parent_id  # the result *is* the parent used in this attempt
-        return created.version.id
 
     async def _finish_failure(
         self, claimed: ClaimedRun, failure: RunFailure, meter: _MeteredLlm
