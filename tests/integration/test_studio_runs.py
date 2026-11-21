@@ -28,7 +28,6 @@ from src.llm.port import (
 from src.studio.errors import (
     IdempotencyConflict,
     IdempotencyKeyRequired,
-    MemoriesNotAvailable,
     RunInProgress,
     RunLimitReached,
     RunNotCancellable,
@@ -108,14 +107,15 @@ class TestSubmit:
         assert len(run_world.bus.balance_events) == 1
         assert run_world.bus.balance_events[0].delta == -1
 
-    async def test_memories_are_not_available_yet(self, run_world: RunWorld) -> None:
+    async def test_a_pin_needs_an_artist(self, run_world: RunWorld) -> None:
         from uuid import uuid4
 
-        actor = await run_world.add_actor()
+        actor = await run_world.add_actor()  # a project without an artist
         track_id = await run_world.new_track(actor)
         request = PlanRunRequest(brief="x", memory_ids=(uuid4(),))
-        with pytest.raises(MemoriesNotAvailable):
+        with pytest.raises(StudioDocumentInvalid) as raised:
             await run_world.submit(actor, track_id, request=request)
+        assert [(i.path, i.code) for i in raised.value.issues] == [("memory_ids", "no_artist")]
         assert await run_world.count_runs(actor) == 0
 
     @pytest.mark.parametrize("key", ["", "   ", "k" * 129])
@@ -666,7 +666,7 @@ class TestExecution:
         run = await run_world.run(write.run.id)
         assert (run.status, run.stage, run.revision) == ("running", "context", 2)
         assert run.model_id == "model-a"
-        assert run.prompt_version == "plan-v1"
+        assert run.prompt_version == "plan-v2"
         assert run.started_at is not None
         assert run.lease_expires_at is not None
         assert run.lease_expires_at > run.started_at
@@ -849,9 +849,9 @@ class TestExecution:
             async def for_run(self, request, *, session):  # type: ignore[no-untyped-def]
                 if request.track_id == bad_track:
                     raise RuntimeError("context exploded")
-                from src.studio.services.run_context import ProfileArtistContextProvider
+                from src.studio.services.run_context import MemoryArtistContextProvider
 
-                return await ProfileArtistContextProvider().for_run(request, session=session)
+                return await MemoryArtistContextProvider().for_run(request, session=session)
 
         executor = run_world.executor(FakeLlm(make_draft()), provider=Flaky())
         claimed = await executor.claim(4)
@@ -946,7 +946,7 @@ class TestTerminalOnce:
         run_id, user_id = await self._terminal_run(run_world, status)
         before = await run_world.run(run_id)
 
-        async with run_world.factory() as session, session.begin():
+        async with (run_world.factory() as session, session.begin()):
             runs = StudioRunRepository(session)
             assert await runs.set_stage(run_id, StudioRunStage.DRAFTING) is None
             assert await runs.cancel_queued(run_id, user_id=user_id, product_id=PRODUCT) is None
@@ -984,7 +984,7 @@ class TestTerminalOnce:
                 is None
             )
             assert await runs.fail_queued(run_id, error_code="x") is None
-            assert list(await runs.sweep_expired(error_code="run_timeout")) == []
+            assert not list(await runs.sweep_expired(error_code="run_timeout"))
 
         after = await run_world.run(run_id)
         assert (after.status, after.revision, after.error_code, after.llm_calls) == (

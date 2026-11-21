@@ -34,7 +34,7 @@ from src.studio.planner.outcome import (
     RunRefused,
     RunRejected,
 )
-from src.studio.planner.prompts.plan_v1 import (
+from src.studio.planner.prompts.plan_v2 import (
     build_plan_messages,
     build_plan_revision_messages,
 )

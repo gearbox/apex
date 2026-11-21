@@ -167,6 +167,7 @@ class TestSubmit:
         )
         assert (body["price_tokens"], body["model_key"], body["llm_calls"]) == (1, "grok", 0)
         assert body["warnings"] == []
+        assert body["memory_ids_used"] == []  # the selection is made when a worker starts the run
         assert body["result_plan_version_id"] is None
         assert body["error_code"] is None
         assert body["finished_at"] is None
@@ -183,6 +184,7 @@ class TestSubmit:
             "result_plan_version_id",
             "result_lyrics_version_id",
             "warnings",
+            "memory_ids_used",
             "error_code",
             "error_detail",
             "llm_calls",
@@ -295,14 +297,17 @@ class TestSubmit:
         assert response.status_code == 429
         assert response.json()["error"] == "run_rate_limited"
 
-    async def test_422_for_memories(
+    async def test_422_for_a_pin_when_the_project_has_no_artist(
         self, client: AsyncTestClient[Litestar], world: RunWorld
     ) -> None:
         actor = await world.add_actor()
         track_id = await world.new_track(actor)
         response = await _post(client, actor, track_id, body=_body(memory_ids=[str(uuid4())]))
         assert response.status_code == 422
-        assert response.json()["error"] == "memories_not_available"
+        body = response.json()
+        assert body["error"] == "document_invalid"
+        assert body["detail"]["issues"] == [{"path": "memory_ids", "code": "no_artist"}]
+        assert await world.count_runs(actor) == 0
 
     async def test_422_for_a_blank_brief(
         self, client: AsyncTestClient[Litestar], world: RunWorld
@@ -353,6 +358,32 @@ class TestRead:
         assert mine.status_code == 200
         assert mine.json()["id"] == run_id
         assert theirs.status_code == unknown.status_code == 404
+
+    async def test_memories_are_pinned_over_http_and_reported_as_ids_only(
+        self, client: AsyncTestClient[Litestar], world: RunWorld
+    ) -> None:
+        actor = await world.add_actor(artist=True)
+        track_id = await world.new_track(actor)
+        pin = await world.add_memory(actor, title="SECRET-MEMORY-TITLE", body="SECRET-MEMORY-BODY")
+        other = await world.add_memory(actor, salience=5)
+
+        refused = await _post(
+            client, actor, track_id, key="bad", body=_body(memory_ids=[str(uuid4())])
+        )
+        assert (refused.status_code, refused.json()["error"]) == (422, "document_invalid")
+        assert refused.json()["detail"]["issues"] == [
+            {"path": "memory_ids[0]", "code": "memory_not_found"}
+        ]
+        assert await world.count_runs(actor) == 0  # nothing was written or charged
+
+        queued = await _post(client, actor, track_id, body=_body(memory_ids=[str(pin)]))
+        assert queued.status_code == 202
+        assert queued.json()["memory_ids_used"] == []  # the selection happens when the run starts
+        await world.drive(FakeLlm(make_draft()))
+
+        done = await client.get(f"{S}/runs/{queued.json()['id']}", headers=actor.headers)
+        assert done.json()["memory_ids_used"] == [str(pin), str(other)]  # pins first, then fill
+        assert "SECRET-MEMORY" not in done.text  # ids only: the text stays in the memory API
 
     async def test_a_finished_run_reports_its_result_and_no_text(
         self, client: AsyncTestClient[Litestar], world: RunWorld

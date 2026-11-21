@@ -58,6 +58,9 @@ class RunOut(msgspec.Struct, kw_only=True):
     result_plan_version_id: UUID | None
     result_lyrics_version_id: UUID | None
     warnings: list[RunWarningOut]
+    memory_ids_used: list[UUID]
+    """Artist memories the run used, in prompt order: ids only, never their text. Empty until the
+    run starts (the selection is made when a worker claims it) and for a run without memories."""
     error_code: str | None
     error_detail: dict[str, Any] | None
     """Issue paths and codes only (``{"issues": [{"path", "code"}]}``) - never model or user text."""

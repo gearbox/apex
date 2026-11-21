@@ -1,7 +1,7 @@
 """Opt-in smoke test of the configured LLM models: ``pytest -m live_llm tests/live``.
 
 CI never calls a model (the default run excludes ``live_llm``). This sends the studio's real
-``plan-v1`` prompt with a fixed brief to **every** entry of ``LLM_MODELS`` whose API-key environment
+``plan-v2`` prompt with a fixed brief to **every** entry of ``LLM_MODELS`` whose API-key environment
 variable is set, over the real adapter, and asserts that the reply decodes into ``PlanDraft`` -
 which is what proves a model really honours the entry's ``structured_output`` mode. Run it for the
 ``grok`` and ``qwen`` entries before merging and put the result (pass / fail, model ids, token
@@ -26,7 +26,7 @@ from src.studio.planner.context import RunContextSnapshot
 from src.studio.planner.drafts import PlanDraft
 from src.studio.planner.graphs.plan import PLAN_SCHEMA_NAME
 from src.studio.planner.mapping import plan_from_draft
-from src.studio.planner.prompts.plan_v1 import build_plan_messages
+from src.studio.planner.prompts.plan_v2 import build_plan_messages
 from src.studio.planner.validate import validate_plan
 from src.studio.run_requests import PlanRunRequest
 

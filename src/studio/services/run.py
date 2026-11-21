@@ -29,7 +29,6 @@ from src.studio.errors import (
     IdempotencyConflict,
     IdempotencyKeyRequired,
     InvalidCursor,
-    MemoriesNotAvailable,
     RunInProgress,
     RunLimitReached,
     RunNotCancellable,
@@ -38,7 +37,7 @@ from src.studio.errors import (
     StudioNotFound,
 )
 from src.studio.services.mappers import run_out
-from src.studio.services.run_kinds.intake import IntakeContext, intake_for
+from src.studio.services.run_kinds.intake import IntakeContext, check_memory_pins, intake_for
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -125,8 +124,10 @@ class StudioRunService:
 
         What the run works on (the plan, the lyrics, the language) is resolved here, under the
         track lock, and stored on the run: a wrong or missing input is a ``4xx`` with no charge,
-        and the worker never looks at the track's current pointers again (P2a-40). The run row and
-        the token reservation are written together; a refusal at any step leaves neither behind.
+        and the worker never looks at the track's current pointers again (P2a-40). Pinned
+        memories are checked here too; which memories the model is actually given is decided when
+        a worker claims the run (P2b-2). The run row and the token reservation are written
+        together; a refusal at any step leaves neither behind.
 
         Args:
             track_id: Track the run is for.
@@ -140,11 +141,11 @@ class StudioRunService:
 
         Raises:
             IdempotencyKeyRequired: No usable key.
-            MemoriesNotAvailable: ``memory_ids`` is not empty.
             StudioDocumentInvalid: The body is invalid after normalization (an empty brief or
-                instruction, a bad avoid word, empty or overlapping targets ...), or an input
+                instruction, a bad avoid word, empty or overlapping targets ...), an input
                 cannot be used (no vocal section in the plan, no language, lyrics that are not
-                valid today, a target that does not fit).
+                valid today, a target that does not fit), or a pinned memory cannot be used
+                (``memory_ids``: no artist, unknown, archived, repeated, over the budget).
             IdempotencyConflict: The key belongs to a different request.
             StudioNotFound: The track is not the caller's.
             PlanRequired: ``lyrics`` without a plan to write for.
@@ -157,8 +158,6 @@ class StudioRunService:
             InsufficientBalanceError: The reservation was refused (``402``).
         """
         key = self._valid_key(idempotency_key)
-        if request.memory_ids:
-            raise MemoriesNotAvailable
         intake = intake_for(request)
         normalized = intake.normalize(request)
         request_hash = _request_hash(track_id, normalized)
@@ -175,9 +174,10 @@ class StudioRunService:
         if replay is not None:
             return replay
 
-        inputs = await intake.resolve_inputs(
-            IntakeContext(self._session, track_id, user_id, product_id), normalized
-        )
+        intake_context = IntakeContext(self._session, track_id, user_id, product_id)
+        inputs = await intake.resolve_inputs(intake_context, normalized)
+        # Pins are validated like every other input: now, with no charge (P2b-1).
+        await check_memory_pins(intake_context, track.library_project_id, normalized.memory_ids)
 
         await self._runs.lock_user_quota(user_id)
         if (

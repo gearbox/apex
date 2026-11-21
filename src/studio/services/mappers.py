@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 from typing import TYPE_CHECKING, Final, cast
+from uuid import UUID
 
 from src.api.schemas.studio import (
     ArtistOut,
     LyricsVersionDetail,
+    MemoryOut,
     PlanVersionDetail,
     ProjectProfileOut,
     TrackOut,
@@ -16,15 +18,24 @@ from src.api.schemas.studio_runs import RunOut, RunWarningOut
 from src.core.enums import (
     StudioDocumentKind,
     StudioDocumentOrigin,
+    StudioMemoryOrigin,
+    StudioMemoryStatus,
     StudioReleaseKind,
     StudioRunKind,
     StudioRunStage,
     StudioRunStatus,
 )
 from src.studio.documents import LyricsDocument, PlanDocument, decode_stored
+from src.studio.planner.context import MemorySnapshot
 
 if TYPE_CHECKING:
-    from src.db.models.studio import StudioArtist, StudioDocumentVersion, StudioRun, StudioTrack
+    from src.db.models.studio import (
+        StudioArtist,
+        StudioArtistMemory,
+        StudioDocumentVersion,
+        StudioRun,
+        StudioTrack,
+    )
     from src.db.repositories.studio import ProjectListRow
 
 __all__ = [
@@ -34,6 +45,9 @@ __all__ = [
     "decode_plan",
     "is_current",
     "lyrics_version_detail",
+    "memory_ids_used",
+    "memory_out",
+    "memory_snapshot",
     "plan_version_detail",
     "project_out",
     "require_current_row",
@@ -60,6 +74,49 @@ def artist_out(artist: StudioArtist) -> ArtistOut:
         created_at=artist.created_at,
         updated_at=artist.updated_at,
     )
+
+
+def memory_out(memory: StudioArtistMemory) -> MemoryOut:
+    return MemoryOut(
+        id=memory.id,
+        artist_id=memory.artist_id,
+        title=memory.title,
+        body=memory.body,
+        occurred_on=memory.occurred_on,
+        themes=list(memory.themes),
+        imagery=list(memory.imagery),
+        salience=memory.salience,
+        status=StudioMemoryStatus(memory.status),
+        origin=StudioMemoryOrigin(memory.origin),
+        created_at=memory.created_at,
+        updated_at=memory.updated_at,
+    )
+
+
+def memory_snapshot(memory: StudioArtistMemory) -> MemorySnapshot:
+    """A memory as a run records it (P2-M4): the full text and the fields the prompt shows."""
+    return MemorySnapshot(
+        id=memory.id,
+        title=memory.title,
+        body=memory.body,
+        themes=tuple(memory.themes),
+        imagery=tuple(memory.imagery),
+        occurred_on=memory.occurred_on,
+        salience=memory.salience,
+        updated_at=memory.updated_at,
+    )
+
+
+def memory_ids_used(row: StudioRun) -> list[UUID]:
+    """The ids of the memories the run used, in prompt order, from its context snapshot.
+
+    Ids only: the snapshot holds the memories' text, which never leaves the run. A run that has
+    not started has no snapshot yet (nothing used); neither has a run without memories.
+    """
+    snapshot = row.context_snapshot
+    if snapshot is None:
+        return []
+    return [UUID(str(memory["id"])) for memory in snapshot.get("memories", [])]
 
 
 def project_out(row: ProjectListRow) -> ProjectProfileOut:
@@ -232,6 +289,7 @@ def run_out(row: StudioRun) -> RunOut:
             RunWarningOut(code=str(w["code"]), path=w.get("path"), count=w.get("count"))
             for w in row.warnings
         ],
+        memory_ids_used=memory_ids_used(row),
         error_code=row.error_code,
         error_detail=row.error_detail,
         llm_calls=row.llm_calls,

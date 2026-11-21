@@ -29,7 +29,8 @@ __all__ = [
     "LyricsIncompatibleWithPlan",
     "LyricsRequired",
     "LyricsVersionNotFound",
-    "MemoriesNotAvailable",
+    "MemoryLimitReached",
+    "MemoryNotFound",
     "ParentVersionNotFound",
     "PlanRequired",
     "PlanVersionNotFound",
@@ -122,6 +123,14 @@ class LyricsVersionNotFound(StudioError):
     message = "Lyrics version not found on this track."
 
 
+class MemoryNotFound(StudioError):
+    """No such memory for the caller (unknown, or another artist's / user's / product's)."""
+
+    code = "memory_not_found"
+    status_code = 404
+    message = "Memory not found."
+
+
 class RunNotFound(StudioError):
     """No such run for the caller."""
 
@@ -139,14 +148,6 @@ class IdempotencyKeyRequired(StudioError):
     code = "idempotency_key_required"
     status_code = 400
     message = "An Idempotency-Key header of 1 to 128 characters is required."
-
-
-class MemoriesNotAvailable(StudioError):
-    """Artist memories cannot ground a run yet."""
-
-    code = "memories_not_available"
-    status_code = 422
-    message = "Artist memories are not available yet."
 
 
 class InvalidCursor(StudioError):
@@ -225,6 +226,14 @@ class ArtistInUse(StudioError):
 
     def __init__(self, project_count: int | None = None) -> None:
         super().__init__(None if project_count is None else {"project_count": project_count})
+
+
+class MemoryLimitReached(StudioError):
+    """The artist already holds the maximum number of active memories."""
+
+    code = "memory_limit_reached"
+    status_code = 409
+    message = "The maximum number of active memories for this artist has been reached."
 
 
 class ProjectHasTracks(StudioError):

@@ -7,7 +7,7 @@ alone, ``None`` = clear where the field is nullable). Document payloads reuse th
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from typing import Annotated
 from uuid import UUID
 
@@ -19,7 +19,17 @@ from src.core.enums import (
     StudioDocumentOrigin,
     StudioExportTarget,
     StudioIncompatibleLyricsPolicy,
+    StudioMemoryOrigin,
+    StudioMemoryStatus,
     StudioReleaseKind,
+)
+from src.studio.constraints import (
+    MEMORY_BODY_MAX,
+    MEMORY_IMAGE_MAX,
+    MEMORY_IMAGERY_MAX,
+    MEMORY_THEME_MAX,
+    MEMORY_THEMES_MAX,
+    MEMORY_TITLE_MAX,
 )
 from src.studio.documents import (
     LanguageTag,
@@ -38,6 +48,9 @@ __all__ = [
     "ImportWarningOut",
     "LyricsVersionCreate",
     "LyricsVersionDetail",
+    "MemoryCreate",
+    "MemoryOut",
+    "MemoryPatch",
     "PlanVersionCreate",
     "PlanVersionDetail",
     "ProjectProfileOut",
@@ -66,6 +79,15 @@ _AestheticRefs = Annotated[
 _Tags = Annotated[list[Tag], Meta(max_length=40)]
 _TrackTitle = Annotated[str, Meta(min_length=1, max_length=200)]
 _Concept = Annotated[str, Meta(max_length=8000)]
+_MemoryTitle = Annotated[str, Meta(min_length=1, max_length=MEMORY_TITLE_MAX)]
+_MemoryBody = Annotated[str, Meta(min_length=1, max_length=MEMORY_BODY_MAX)]
+_MemoryThemes = Annotated[
+    list[Annotated[str, Meta(max_length=MEMORY_THEME_MAX)]], Meta(max_length=MEMORY_THEMES_MAX)
+]
+_MemoryImagery = Annotated[
+    list[Annotated[str, Meta(max_length=MEMORY_IMAGE_MAX)]], Meta(max_length=MEMORY_IMAGERY_MAX)
+]
+_Salience = Annotated[int, Meta(ge=1, le=5)]
 
 # ---------------------------------------------------------------------------
 # Artists
@@ -104,6 +126,53 @@ class ArtistOut(msgspec.Struct, kw_only=True):
     aesthetic_references: list[str]
     style_tags: list[str]
     global_avoid: list[str]
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Artist memories (P2b)
+# ---------------------------------------------------------------------------
+
+
+class MemoryCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """One episode of the artist's fictional life. ``origin`` is never taken from the client."""
+
+    title: _MemoryTitle
+    body: _MemoryBody
+    occurred_on: date | None = None
+    """A fictional date: used for ordering and display only."""
+    themes: _MemoryThemes = msgspec.field(default_factory=list)
+    imagery: _MemoryImagery = msgspec.field(default_factory=list)
+    """Concrete sensory details the planner may borrow obliquely."""
+    salience: _Salience = 3
+    """1-5: how readily the planner reaches for this memory when it fills the budget itself."""
+
+
+class MemoryPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Tri-state update: omitted keeps the stored value; ``occurred_on: null`` clears the date."""
+
+    title: _MemoryTitle | msgspec.UnsetType = msgspec.UNSET
+    body: _MemoryBody | msgspec.UnsetType = msgspec.UNSET
+    occurred_on: date | msgspec.UnsetType | None = msgspec.UNSET
+    themes: _MemoryThemes | msgspec.UnsetType = msgspec.UNSET
+    imagery: _MemoryImagery | msgspec.UnsetType = msgspec.UNSET
+    salience: _Salience | msgspec.UnsetType = msgspec.UNSET
+    status: StudioMemoryStatus | msgspec.UnsetType = msgspec.UNSET
+    """``archived`` keeps the memory but takes it out of every run; ``active`` brings it back."""
+
+
+class MemoryOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    artist_id: UUID
+    title: str
+    body: str
+    occurred_on: date | None
+    themes: list[str]
+    imagery: list[str]
+    salience: int
+    status: StudioMemoryStatus
+    origin: StudioMemoryOrigin
     created_at: datetime
     updated_at: datetime
 

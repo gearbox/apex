@@ -23,6 +23,7 @@ if TYPE_CHECKING:
 
 __all__ = [
     "MAX_WARNINGS",
+    "PINNED_MEMORY_UNAVAILABLE",
     "REVISION_INCOMPLETE",
     "WARNINGS_TRUNCATED",
     "LyricsOutcome",
@@ -37,6 +38,7 @@ __all__ = [
     "RunWarning",
     "cap_warnings",
     "kept_after_failed_round",
+    "lead_with",
 ]
 
 MAX_WARNINGS: Final = 100
@@ -45,6 +47,9 @@ WARNINGS_TRUNCATED: Final = "warnings_truncated"
 """Last warning of a list that had to be cut at :data:`MAX_WARNINGS`."""
 REVISION_INCOMPLETE: Final = "revision_incomplete"
 """Run warning: a later fix round failed, so the run kept its best valid result."""
+PINNED_MEMORY_UNAVAILABLE: Final = "pinned_memory_unavailable"
+"""Run warning: pinned artist memories were archived, deleted or too large by the time the run
+started, so they were left out (``count`` = how many)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,6 +79,21 @@ def cap_warnings(warnings: Sequence[RunWarning], *, limit: int = MAX_WARNINGS) -
     if len(warnings) <= limit:
         return list(warnings)
     return [*warnings[: limit - 1], RunWarning(WARNINGS_TRUNCATED)]
+
+
+def lead_with(warning: RunWarning, warnings: Sequence[RunWarning]) -> list[RunWarning]:
+    """``warning`` first, then ``warnings``, still within :data:`MAX_WARNINGS`.
+
+    A list that is already full gives up an entry to make room - never ``warning`` (it is first),
+    and never the marker a full list ends with (``warnings_truncated`` / ``revision_incomplete``:
+    the closing entry stays last). Where nothing marks the cut, ``warnings_truncated`` does.
+    """
+    if len(warnings) < MAX_WARNINGS:
+        return [warning, *warnings]
+    *body, last = warnings
+    if last.code in (WARNINGS_TRUNCATED, REVISION_INCOMPLETE):
+        return [warning, *body[:-1], last]
+    return cap_warnings([warning, *warnings])
 
 
 @dataclass(frozen=True, slots=True)

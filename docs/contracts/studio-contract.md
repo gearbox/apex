@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a: Studio Foundation, Suno import, Planner and lyrics runs)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
-> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) and `feat/studio-planner-runs` (migration `057_studio_runs`).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`) and `feat/studio-artist-memories` (migration `059_studio_artist_memories`).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan from a brief (§11). **No lyrics runs yet, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12). **No artist chat, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -16,6 +16,7 @@
 - The current **(plan, lyrics) pair is always compatible**. The server refuses (`409`) any action that would make an incompatible pair current, and a refused action writes nothing.
 - `GET …/exports/suno` renders Suno's **Title / Style / Exclude / Lyrics** fields. It always renders; it never truncates; limits are reported, not enforced.
 - `POST …/imports/suno` is the inverse: paste Suno's Style / Exclude / Lyrics boxes back and the server turns them into the track's next plan and lyrics versions (`origin: "import"`). Deterministic, no LLM, free; `dry_run` previews without writing (§10).
+- An artist can hold up to 200 **memories** (§12): episodes of its fictional life that planner runs use as *inspiration*. You pin the ones you want on a run and let the server fill the rest by salience, within a fixed budget.
 - A plan has a track-level **`instrumental`** flag (independent of its sections and of the lyrics) and may have **no sections** at all (plan **schema v2**, §2.1).
 - Everything sits behind a feature flag: when studio is off for the product (or globally) **every** `/v1/studio/*` route answers `404`, even before authentication.
 
@@ -68,6 +69,27 @@ interface ArtistCreate {             // unknown fields → 400
   aesthetic_references?: string[]; style_tags?: string[]; global_avoid?: string[];
 }
 type ArtistPatch = Partial<ArtistCreate>;   // omitted = keep; null clears persona/voice_notes/default_language
+
+// ----- artist memories (§12) -----------------------------------------------------------
+type MemoryStatus = "active" | "archived";
+interface Memory {
+  id: UUID;
+  artist_id: UUID;
+  title: string;                     // 1–120 after normalization, one line
+  body: string;                      // 1–2000 after normalization, line breaks kept
+  occurred_on: string | null;        // "YYYY-MM-DD": a fictional date, used for ordering and display only
+  themes: string[];                  // ≤ 12 × ≤ 60
+  imagery: string[];                 // ≤ 20 × ≤ 120 — concrete sensory details
+  salience: number;                  // 1–5, default 3
+  status: MemoryStatus;
+  origin: "user" | "chat";           // "user" today; "chat" arrives with the artist chat
+  created_at: ISODateTime; updated_at: ISODateTime;
+}
+interface MemoryCreate {             // unknown fields (including `origin` and `status`) → 400
+  title: string; body: string; occurred_on?: string | null;
+  themes?: string[]; imagery?: string[]; salience?: number;
+}
+type MemoryPatch = Partial<MemoryCreate> & { status?: MemoryStatus };   // omitted = keep; null clears occurred_on
 
 // ----- projects & tracks ---------------------------------------------------------------
 interface ProjectProfile {
@@ -182,6 +204,10 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | POST | `/artists` | 201 `Artist` | max **50** artists per user |
 | GET / PATCH | `/artists/{id}` | 200 `Artist` | |
 | DELETE | `/artists/{id}` | 204 | `409 artist_in_use` while a project uses it |
+| GET | `/artists/{id}/memories` | 200 page of `Memory` | `?status=active\|archived` (default `active`), `limit` 1–50 (30), newest first — see §12 |
+| POST | `/artists/{id}/memories` | 201 `Memory` | max **200 active** per artist; `409 memory_limit_reached` — see §12 |
+| GET / PATCH | `/memories/{id}` | 200 `Memory` | PATCH also archives / restores (`status`) |
+| DELETE | `/memories/{id}` | 204 | always allowed, even while a run uses it — see §12 |
 | GET | `/projects` | 200 page of `ProjectProfile` | newest first |
 | GET | `/projects/{id}` | 200 `ProjectProfile` | `404` if studio is not enabled on that project |
 | PUT | `/projects/{id}` | **201** created / **200** replaced | `{id}` must be one of the caller's library projects |
@@ -292,18 +318,20 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 400 | `invalid_cursor` | malformed `cursor` |
 | 404 | `not_found` | missing, someone else's, or another product's resource (never distinguishable) |
 | 404 | `artist_not_found` | `artist_id` is not one of the caller's artists |
+| 404 | `memory_not_found` | the memory is unknown, or belongs to another user, product or artist (never distinguishable, §12) |
 | 404 | `plan_version_not_found` | a `lyrics` run's `plan_version_id` is not a plan version of this track (§11) |
 | 404 | `lyrics_version_not_found` | a `revise_lyrics` run's `lyrics_version_id` is not a lyrics version of this track (§11) |
 | 409 | `artist_name_conflict` | name already used (case-insensitive) |
 | 409 | `artist_limit_reached` | 50 artists |
 | 409 | `artist_in_use` | `detail: {project_count}` |
+| 409 | `memory_limit_reached` | the artist already has 200 **active** memories (creating, or restoring an archived one, §12) |
 | 409 | `project_has_tracks` | disabling studio on a project with tracks |
 | 409 | `track_limit_reached` | 64 tracks |
 | 409 | `plan_required` | lyrics made current without a plan; a `lyrics` run with no plan to write for (§11) |
 | 409 | `lyrics_required` | a `revise_lyrics` run on a track with no lyrics (§11) |
 | 409 | `version_in_use_by_run` | deleting the input of a run in progress (§6) |
 | 422 | `track_order_mismatch` | `track_ids` is not exactly the project's track set (missing, extra or duplicate id) |
-| 422 | `document_invalid` | §4 — also artist / track / project-profile requests (empty or over-long once normalized, tag conflicts, …) |
+| 422 | `document_invalid` | §4 — also artist / track / project-profile / memory requests (empty or over-long once normalized, tag conflicts, …), and the pinned `memory_ids` of a run (§11, §12) |
 | 422 | `import_invalid` | §10 — pasted Suno text that cannot become valid documents; issues carry the pasted line they come from |
 | 428 | `legal_acceptance_required` | stale legal acceptance on a mutation |
 
@@ -490,7 +518,7 @@ A **run** is an asynchronous LLM job on a track. There are three kinds, one wire
 
 In every case the server validates what the model returns **exactly as it would validate a document typed by the user**, and saves it as an **ordinary version** (`origin: "llm"`, never made current).
 
-> **Privacy — tell the user.** What a run sends to the **configured LLM provider**: the track title, the project concept, the artist (name, persona, voice notes, style tags, things to avoid, aesthetic references); for `plan` the brief and a short summary of the track's current plan; for `lyrics` the **whole plan** (title, idea, tempo, tags, every section with its delivery, tags and notes), the optional brief and the avoid words; for `revise_lyrics` the plan, the **current lyrics**, the targets, the instruction and the avoid words. Nothing else leaves the server; a run is never traced to any third-party observability service. The server never logs any of it.
+> **Privacy — tell the user.** What a run sends to the **configured LLM provider**: the track title, the project concept, the artist (name, persona, voice notes, style tags, things to avoid, aesthetic references) and the **artist memories the run uses** (title, date, salience, themes, imagery and body: §12); for `plan` the brief and a short summary of the track's current plan; for `lyrics` the **whole plan** (title, idea, tempo, tags, every section with its delivery, tags and notes), the optional brief and the avoid words; for `revise_lyrics` the plan, the **current lyrics**, the targets, the instruction and the avoid words. Nothing else leaves the server; a run is never traced to any third-party observability service. The server never logs any of it.
 
 ### Gating
 
@@ -517,11 +545,12 @@ Content-Type: application/json
 { "kind": "plan",
   "brief": "A slow synthwave song about driving home through the rain.",
   "language": "en",                ← optional BCP-47-ish tag, like lyrics
-  "memory_ids": [],                ← must be empty for now (422 memories_not_available)
-  "auto_fill": true }
+  "memory_ids": ["…"],             ← artist memories to pin, in the order the model should see them (§12); [] for none
+  "auto_fill": true }               ← after the pins, fill the rest of the memory budget by salience
 ```
 
 - `brief`: 1–4000 characters. It is NFC-normalized like every studio string, and the 4000 limit is re-checked **after** normalization (`422 document_invalid`, issue `brief` `too_long_after_normalization`; a blank brief is `empty_after_normalization`).
+- `memory_ids` (≤ 50) and `auto_fill` exist on **every** kind and mean the same everywhere; see "Artist memories in a run" below and §12.
 - Unknown fields are refused (`400`) in every kind. `kind` is the discriminant: `plan`, `lyrics` or `revise_lyrics`.
 - The response is a **`RunOut`** (below) with `status: "queued"`, `revision: 1`. `202` means "accepted"; the work happens in the background.
 
@@ -583,6 +612,24 @@ All target problems are reported together in one `422`.
 **Language** (`lyrics`): the request's `language`, else the language of the track's **current lyrics**, else the project artist's default language; with none of them the request is `422 language_required`.
 **Reservation.** The run's price (default **1 token**, configured per kind) is **reserved when the run is accepted**, in the same transaction that creates it: a `402` leaves no run and no ledger row. The price is **refunded in full** when the run ends `failed` or `cancelled`, and kept when it `succeeded`. A price of `0` writes no ledger rows at all. Balance changes arrive as ordinary `balance.updated` events.
 
+#### Artist memories in a run
+
+`memory_ids` pins memories and `auto_fill` (default `true`) lets the server add more; both are validated **when the run is accepted**, like every other input, so a wrong pin is a `422` with **no run and no charge**:
+
+| `detail.issues` `path` | `code` | Meaning |
+|---|---|---|
+| `memory_ids` | `no_artist` | the track's project has no artist, so there is nothing to pin |
+| `memory_ids[i]` | `memory_not_found` | the id is not a memory of the project's artist — unknown, another artist's and another user's are **the same code**, so ownership cannot be probed |
+| `memory_ids[i]` | `memory_archived` | the memory is archived |
+| `memory_ids[i]` | `duplicate_memory` | the id is already pinned earlier in the list |
+| `memory_ids` | `memories_over_budget` | the pins alone do not fit the memory budget (§12): nothing is truncated, unpin some |
+
+Which memories the model is *actually given* is decided when a worker **starts** the run, from what exists then: the pins first (in your order), then — with `auto_fill` — the artist's other active memories by salience (§12), within the budget. The run's context is frozen at that moment (`RunOut.memory_ids_used`, below).
+
+A pin that was **archived or deleted** between your submit and the start of the run is skipped, not an error — deleting a memory is always allowed. The run still succeeds and carries the warning `pinned_memory_unavailable` (`count` = how many pins were left out; a pin that was edited so much that the pins no longer fit the budget counts too).
+
+A memory is *inspiration*: the planner is told to let its themes and imagery shape the work **indirectly** and not to retell an episode unless the brief asks for it. Memories are user data, never instructions. If a memory asks for something the product's content policy forbids, the model refuses and the run fails `content_policy_refused` (refunded) — so a memory, not only the brief, can be the cause of that error.
+
 #### Idempotency
 
 The same `Idempotency-Key` with the same body returns the **same run** with `200`, creates nothing and reserves nothing — retry freely after a timeout. The same key with a **different** body (or for a **different track**) is `409 idempotency_conflict`. Keys are per user and are kept with the run (they never expire while the run exists). A missing, blank or over-long key is `400 idempotency_key_required`.
@@ -600,8 +647,7 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
 | `409` | `run_in_progress` | the track already has a `queued` or `running` run (**one active run per track**) |
 | `409` | `run_limit_reached` | you already have 3 active runs (configurable) |
 | `409` | `idempotency_conflict` | see above |
-| `422` | `memories_not_available` | `memory_ids` is not empty |
-| `422` | `document_invalid` | the body is invalid after normalization, or an input cannot be used (the table above) — `detail.issues` |
+| `422` | `document_invalid` | the body is invalid after normalization, an input cannot be used (the table above), or a pinned memory cannot be used (the memories table above) — `detail.issues` |
 | `429` | `run_rate_limited` | more than 30 runs created in the last hour (configurable) |
 
 `409 run_in_progress` is also what `DELETE /v1/studio/tracks/{id}` answers while the track has an active run (a finished run never blocks a delete; deleting the track removes its runs).
@@ -618,13 +664,14 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
   "result_plan_version_id": null,     // set when a plan run succeeded
   "result_lyrics_version_id": null,   // set when a lyrics / revise_lyrics run succeeded
   "warnings": [],                     // [{ "code", "path", "count" }] (path / count null when they do not apply)
+  "memory_ids_used": [],              // artist memories the model was given, in prompt order — ids only
   "error_code": null,                 // set when failed (table below)
   "error_detail": null,               // failed: issue paths and codes only — never model or user text
   "llm_calls": 0,                     // model calls made (plan ≤ 3, lyrics ≤ 5, revise_lyrics ≤ 3)
   "created_at": "…", "started_at": null, "finished_at": null }
 ```
 
-It never contains the brief, the artist, the prompts, the model's output or token counts.
+`memory_ids_used` is empty until the run starts (the selection is made then) and for a run without memories; fetch the texts with `GET /v1/studio/memories/{id}` (a deleted memory is gone, but the run's own copy is untouched). It never contains the brief, the artist, any memory's text, the prompts, the model's output or token counts.
 
 ### Lifecycle
 
@@ -647,7 +694,7 @@ queued ──claim──▶ running ──▶ succeeded
 | `llm_rejected` | the provider refused the request | `{ "status_code": 4xx }` |
 | `llm_output_truncated` | the reply hit the output limit | — |
 | `llm_output_invalid` | the reply was not a valid object on the last allowed call | — |
-| `content_policy_refused` | the model declined the brief under the product's content policy | — |
+| `content_policy_refused` | the model declined the brief **or one of the artist memories it was given** under the product's content policy | — |
 | `brief_unusable` | the model found the brief (or, for a revision, the instruction) too empty, unclear or contradictory to act on | — |
 | `plan_invalid` | after the allowed revisions the plan still failed validation | `{ "issues": [{ "path", "code" }] }` — the §4 vocabulary, with paths in the **plan document** |
 | `lyrics_invalid` | after the allowed rounds the lyrics still failed a **hard** check (a bracket in a line, a delivery that reads as a section header, a line over 300 characters, a section over 64 lines, a missing section ...). Soft misses never cause this | `{ "issues": [{ "path", "code" }] }` — paths in the **input plan's sections**: `sections[p]` or `sections[p].lines[j]`, `p` = the section's index in the plan, `j` = the 0-based line. No lyrics document was saved, so these are the only paths that mean something |
@@ -694,11 +741,12 @@ Counting depends on the language and is a heuristic, which is why a miss is only
 
 #### Run warnings
 
-`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path": string | null, "count": number | null }` (`path` and `count` are `null` when they do not apply), with no user text. A run with none has `[]`. At most 100 are kept: a longer list ends with `warnings_truncated` — except that `revision_incomplete`, when it applies, is always kept and comes last (after `warnings_truncated`).
+`warnings` lists things worth knowing about a **successful** run; each item is `{ "code": string, "path": string | null, "count": number | null }` (`path` and `count` are `null` when they do not apply), with no user text. A run with none has `[]`. At most 100 are kept: a longer list ends with `warnings_truncated` — except that `pinned_memory_unavailable`, when it applies, is always kept and comes first, and `revision_incomplete`, when it applies, is always kept and comes last (after `warnings_truncated`).
 
 | `code` | Meaning |
 |---|---|
 | `parent_version_replaced` | the version the run started from (the plan, or for `lyrics` the current lyrics) was deleted before the result was saved; `parent_version_id` of the result is the track's current version of that kind at save time, or `null` (see "The parent rule"). Offer the user the result as usual; do not treat it as a failure. |
+| `pinned_memory_unavailable` | `count`: pinned memories that were archived or deleted after you submitted (or no longer fit the budget) and so were **not** used. Any run kind; always the **first** warning when present. The run is otherwise complete |
 | `revision_unchanged` | the revision changed nothing; the result is the version you revised |
 | `revision_incomplete` | the run kept its best valid result because a later fix round failed; some soft warnings may remain. The result is complete and usable; the other warnings say which lines the run could not improve. Always the **last** warning of its run |
 | `syllable_range_missed` | `path`: the line; `count`: the syllables counted (compare with `line_syllables`; English has ±1 tolerance already applied) |
@@ -736,3 +784,69 @@ Published on the user's SSE channel after **every committed status or stage chan
 - For `revise_lyrics`, let the user pick targets from the lyrics they are looking at (section ids from the plan, 0-based line numbers). If the input lyrics are no longer valid (`422` with `lyrics.`-prefixed issues), send the user to fix them first.
 - After a `lyrics` / `revise_lyrics` success, show the warnings on the lines they point at, and offer the result as a new version — never switch the current lyrics for the user.
 - A result with `revision_incomplete` is a complete, valid version: offer it like any other, show the soft warnings that remain, and let the user run again if they want those lines improved. A `lyrics_invalid` or `run_timeout` failure never has a result to offer, whatever the run did before it failed.
+
+---
+
+## 12. Artist memories
+
+A **memory** is one episode of an artist's (fictional) life — a title, a body, themes, concrete imagery, a salience. Planner runs (§11) read them as *inspiration*, so lyrics and plans carry the artist's history without retelling it. Memories belong to the **artist**, not to a project: every project that uses the artist sees the same ones. They never reach the Suno export (§8): they are planner-only.
+
+> **Privacy — tell the user.** A memory's text (title, date, salience, themes, imagery, body) is sent to the **configured LLM provider** when a run uses it, and nowhere else. The server never logs it, a run's response carries only ids, and nothing is traced to any third-party service.
+
+### Fields and limits
+
+| Field | Limit | Notes |
+|---|---|---|
+| `title` | 1–120 | one line: whitespace (line breaks included) is collapsed to single spaces |
+| `body` | 1–2000 | NFC, trimmed; line breaks and blank lines are kept |
+| `occurred_on` | date or `null` | a **fictional** date, `YYYY-MM-DD`; ordering and display only |
+| `themes` | ≤ 12 items × ≤ 60 | trimmed; an empty item, a case-insensitive repeat (`duplicate_tag`) or a square bracket (`reserved_characters`) is refused |
+| `imagery` | ≤ 20 items × ≤ 120 | same rules as `themes` |
+| `salience` | 1–5, default 3 | how readily the planner reaches for it when it fills the budget itself |
+| `status` | `active` \| `archived` | an archived memory is kept but never used by a run; **new memories are always `active`** |
+| `origin` | `user` \| `chat` | read-only; `user` today. Sending it is a `400` |
+
+Every length is **re-checked after normalization** (Unicode NFC can make a value longer than it looked): `422 document_invalid`, issue `title` / `body` / `themes[i]` / `imagery[i]` with `too_long_after_normalization`. All issues of one request are reported together, at the wire path of the value. Nothing is ever truncated.
+
+### Endpoints
+
+All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced on mutations).
+
+| Method | Path | Success |
+|---|---|---|
+| `GET` | `/artists/{artist_id}/memories` | `200` page, newest first (`created_at DESC, id DESC`). `?status=active\|archived` (default `active`), `?limit=1..50` (30), `?cursor=` |
+| `POST` | `/artists/{artist_id}/memories` | `201` `Memory` |
+| `GET` | `/memories/{memory_id}` | `200` `Memory` |
+| `PATCH` | `/memories/{memory_id}` | `200` `Memory` — omitted fields are kept, `occurred_on: null` clears the date, `status` archives or restores |
+| `DELETE` | `/memories/{memory_id}` | `204` |
+
+The list is **not** the selection order (below): it pages by creation time so that editing a salience never moves a memory between pages.
+
+Errors: `404 artist_not_found` (list, create), `404 memory_not_found` (the other three; also another user's, another product's or an unknown id, indistinguishably), `422 document_invalid`, `409 memory_limit_reached`, `400 invalid_cursor`.
+
+### The 200 cap
+
+An artist holds at most **200 active** memories. Creating the 201st, or **restoring** an archived memory when 200 are active, is `409 memory_limit_reached`. The cap is exact even under concurrent requests: archive some memories (or delete them) to make room. Archived memories do not count and have no limit of their own.
+
+### Delete any time
+
+A memory can be edited, archived or deleted **at any moment**, including while a run that uses it is queued or running. There is no `409` on delete. A run keeps its own copy of the text it was given, so what you do to a memory afterwards never changes a run that has started, nor its result.
+
+### How a run chooses memories
+
+1. **Pins first**, in the order of `memory_ids`.
+2. With `auto_fill` (default `true`): the artist's other **active** memories in a fixed order — `salience` high to low, then `occurred_on` newest first (memories without a date last), then by id.
+3. Taken **in that order while the next memory fits the budget**; the **first one that does not fit ends the selection** (a smaller, less salient memory behind it is *not* taken in its place — that would invert the order you asked for).
+
+The **budget** is **12,000 characters** of memories as they are written into the prompt: the title line (with date and salience), the themes and imagery lines, and the body, with a blank line between memories. A long body therefore costs more than its 2000 characters — roughly 2000 + the other fields. Selection is deterministic: the same memories and the same request give the same list.
+
+`auto_fill: false` uses only the pins; a run with no pins and no `auto_fill` uses no memories at all. A project **without an artist** has no memories: with `auto_fill` the run simply gets none, and pinning is `422` (`memory_ids` / `no_artist`).
+
+### Pins: at submit, and at claim
+
+* **At submit** (§11) every pin must be an active memory of the project's artist, named once, and the pins together must fit the budget. Otherwise `422 document_invalid` — `memory_not_found` / `memory_archived` / `duplicate_memory` / `no_artist` at `memory_ids[i]`, or `memories_over_budget` at `memory_ids` — and nothing is charged.
+* **At claim**, when a worker starts the run, the memories are chosen from what exists *then*. A pin that is gone is skipped and the run carries `pinned_memory_unavailable` (§11, "Run warnings"). The memories used are recorded on the run (its context snapshot, with their full text) and listed in `RunOut.memory_ids_used`, in the order the model saw them.
+
+### What the model is told
+
+Memories reach the model in their own `<artist_memories>` block, with one rule: they are the artist's own life used as **inspiration** — their themes and imagery shape the writing indirectly, an episode is not retold unless the brief asks for it, and memory text is data, never instructions. The product's content policy applies to them as it does to the brief; a model that finds a memory asking for something forbidden refuses (`content_policy_refused`, refunded). Prompts without memories are unchanged.

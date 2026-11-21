@@ -26,7 +26,7 @@ from src.core.uid import new_id
 from src.db.repositories.studio import StudioTrackRepository
 from src.studio.services.export import ExportService
 from src.studio.services.importer import SunoImportService
-from src.studio.services.run_context import ProfileArtistContextProvider
+from src.studio.services.run_context import MemoryArtistContextProvider
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from tests.llm_support import FakeLlm
@@ -151,7 +151,7 @@ class _SwitchingProvider:
 
     async def for_run(self, request: RunContextRequest, *, session: AsyncSession) -> ArtistContext:
         self.replacement = await self._world.replace_current_plan(self._actor, self._track_id)
-        return await ProfileArtistContextProvider().for_run(request, session=session)
+        return await MemoryArtistContextProvider().for_run(request, session=session)
 
 
 class TestTheClaimReadsAConsistentSnapshot:

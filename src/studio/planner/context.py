@@ -1,9 +1,10 @@
 """What a run is told about the artist and the project - and the snapshot that records it.
 
-``ArtistContextProvider`` is the planner's port to that knowledge. P2a ships one adapter
-(``ProfileArtistContextProvider``, ``src/studio/services/run_context.py``): the project's artist
-and concept, with **no memories** (P2a-2). The request already carries ``memory_ids`` and
-``auto_fill`` so artist memories (P2b) plug in without changing the run pipeline (P2-M3).
+``ArtistContextProvider`` is the planner's port to that knowledge. Its adapter
+(``MemoryArtistContextProvider``, ``src/studio/services/run_context.py``) returns the project's
+artist and concept and the artist memories the run uses: the pinned ones the request names
+(``memory_ids``), then - with ``auto_fill`` - active ones in a fixed order, within a character
+budget (P2-M2, P2-M3). The selection itself is the pure ``src/studio/planner/memories.py``.
 
 ``RunContextSnapshot`` is stored on the run when it starts: the exact context the model was given,
 immune to later edits of the artist or the plan. It holds user text, so it is never logged or
@@ -48,7 +49,11 @@ class ArtistSnapshot(Struct, frozen=True, kw_only=True):
 
 
 class MemorySnapshot(Struct, frozen=True, kw_only=True):
-    """One artist memory as it was when the run started (P2-M4). Unused until P2b."""
+    """One artist memory as it was when the run started (P2-M4): its full text.
+
+    ``salience`` is part of what the model is shown (``render_memory``), so it is part of the
+    record. The snapshot holds user text: it is never logged or returned by the API.
+    """
 
     id: UUID
     title: str
@@ -56,6 +61,7 @@ class MemorySnapshot(Struct, frozen=True, kw_only=True):
     themes: tuple[str, ...]
     imagery: tuple[str, ...]
     occurred_on: date | None
+    salience: int
     updated_at: datetime
 
 
@@ -87,7 +93,7 @@ class RunContextSnapshot(Struct, frozen=True, kw_only=True):
     are enough for the record.
     """
 
-    snapshot_version: Literal[2] = 2
+    snapshot_version: Literal[3] = 3
     track_title: str
     artist: ArtistSnapshot | None
     concept: str | None
@@ -98,7 +104,10 @@ class RunContextSnapshot(Struct, frozen=True, kw_only=True):
     lyrics_version_id: UUID | None
     lyrics_content_hash: str | None
     memories: tuple[MemorySnapshot, ...] = ()
-    """Always empty in P2a (P2a-2)."""
+    """The memories the model was given, in prompt order (full text, P2-M4)."""
+    unavailable_memory_ids: tuple[UUID, ...] = ()
+    """Pinned memories that were archived or deleted between submit and claim: skipped, not
+    failed (P2b-2). The executor reports them as the run warning ``pinned_memory_unavailable``."""
     input_plan_version_id: UUID | None = None
     input_plan_content_hash: str | None = None
     input_lyrics_version_id: UUID | None = None
@@ -120,11 +129,12 @@ class RunContextRequest:
 
 @dataclass(frozen=True, slots=True)
 class ArtistContext:
-    """What a provider returns: the artist, the project concept and any memories."""
+    """What a provider returns: the artist, the project concept and the selected memories."""
 
     artist: ArtistSnapshot | None
     concept: str | None
     memories: tuple[MemorySnapshot, ...] = ()
+    unavailable_memory_ids: tuple[UUID, ...] = ()
 
 
 class ArtistContextProvider[S](Protocol):

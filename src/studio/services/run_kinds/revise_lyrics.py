@@ -22,7 +22,7 @@ from src.studio.planner.graphs.revise_lyrics import (
     run_revise_graph,
 )
 from src.studio.planner.outcome import LyricsReady, RunWarning, cap_warnings
-from src.studio.planner.prompts.revise_lyrics_v1 import PROMPT_VERSION
+from src.studio.planner.prompts.revise_lyrics_v2 import PROMPT_VERSION
 from src.studio.run_requests import ReviseLyricsRunRequest, RunRequest
 from src.studio.services.mappers import decode_lyrics, decode_plan
 from src.studio.services.run_kinds.base import (

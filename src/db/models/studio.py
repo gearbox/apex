@@ -2,7 +2,7 @@
 
 Graph::
 
-    users ─┬─< studio_artists
+    users ─┬─< studio_artists ─< studio_artist_memories   (CASCADE; scoped through the artist)
            ├─< library_projects ─1:1─ studio_project_profiles >── artist (NO ACTION)
            │                                   │ NO ACTION
            │                                   └─< studio_tracks ─< studio_document_versions
@@ -27,13 +27,14 @@ Design notes (see ``docs/contracts/studio-contract.md``):
 
 from __future__ import annotations
 
-from datetime import datetime
+from datetime import date, datetime
 from enum import StrEnum
 from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
     CheckConstraint,
+    Date,
     DateTime,
     ForeignKey,
     ForeignKeyConstraint,
@@ -52,6 +53,8 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.core.enums import (
     StudioDocumentKind,
     StudioDocumentOrigin,
+    StudioMemoryOrigin,
+    StudioMemoryStatus,
     StudioReleaseKind,
     StudioRunKind,
     StudioRunStage,
@@ -59,11 +62,17 @@ from src.core.enums import (
 )
 from src.core.uid import new_id
 from src.db.models.base import Base
+from src.studio.constraints import (
+    MEMORY_IMAGE_MAX,
+    MEMORY_THEME_MAX,
+    MEMORY_TITLE_MAX,
+)
 
 __all__ = [
     "RUN_ONE_ACTIVE_PER_TRACK",
     "RUN_USER_IDEMPOTENCY",
     "StudioArtist",
+    "StudioArtistMemory",
     "StudioDocumentVersion",
     "StudioProjectProfile",
     "StudioRun",
@@ -145,6 +154,76 @@ class StudioArtist(Base):
 
     def __repr__(self) -> str:
         return f"<StudioArtist {self.id} user={self.user_id}>"
+
+
+class StudioArtistMemory(Base):
+    """One episode of an artist's (fictional) life, used by planner runs as inspiration (P2b).
+
+    Mutable, like the artist it belongs to. It carries **no** ``user_id`` / ``product_id`` of its
+    own: ownership and product scoping are inherited through ``artist_id`` (P2-M1), so every
+    repository read joins the artist, and ``users → studio_artists → memories`` cascades on a user
+    hard-delete. Planner runs copy the text they use into their snapshot (P2-M4), so editing or
+    deleting a memory never changes a run that has started. Lock order: artist, then memory.
+    """
+
+    __tablename__ = "studio_artist_memories"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    artist_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("studio_artists.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    title: Mapped[str] = mapped_column(String(MEMORY_TITLE_MAX), nullable=False)
+    body: Mapped[str] = mapped_column(Text, nullable=False)
+    """At most ``MEMORY_BODY_MAX`` characters, enforced by the service (the column is ``text``)."""
+    occurred_on: Mapped[date | None] = mapped_column(Date, nullable=True)
+    """A fictional date. Used for ordering and display only."""
+    themes: Mapped[list[str]] = mapped_column(
+        ARRAY(String(MEMORY_THEME_MAX)), nullable=False, server_default=text("'{}'")
+    )
+    imagery: Mapped[list[str]] = mapped_column(
+        ARRAY(String(MEMORY_IMAGE_MAX)), nullable=False, server_default=text("'{}'")
+    )
+    salience: Mapped[int] = mapped_column(SmallInteger, nullable=False, server_default=text("3"))
+    status: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=StudioMemoryStatus.ACTIVE.value
+    )
+    origin: Mapped[str] = mapped_column(
+        String(20), nullable=False, server_default=StudioMemoryOrigin.USER.value
+    )
+
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        CheckConstraint("salience BETWEEN 1 AND 5", name="ck_studio_artist_memories_salience"),
+        CheckConstraint(
+            _in_list("status", StudioMemoryStatus), name="ck_studio_artist_memories_status"
+        ),
+        CheckConstraint(
+            _in_list("origin", StudioMemoryOrigin), name="ck_studio_artist_memories_origin"
+        ),
+        # The list: newest first, per artist.
+        Index(
+            "ix_studio_artist_memories_list",
+            "artist_id",
+            text("created_at DESC"),
+            text("id DESC"),
+        ),
+        # Selection (P2-M2): active memories by salience, then recency (undated last), then id.
+        Index(
+            "ix_studio_artist_memories_selection",
+            "artist_id",
+            text("salience DESC"),
+            text("occurred_on DESC NULLS LAST"),
+            "id",
+            postgresql_where=text("status = 'active'"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StudioArtistMemory {self.id} artist={self.artist_id}>"
 
 
 class StudioProjectProfile(Base):

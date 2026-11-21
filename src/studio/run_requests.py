@@ -48,8 +48,12 @@ class PlanRunRequest(
     """The user's own words about the song. Sent to the configured LLM provider."""
     language: LanguageTag | None = None
     memory_ids: _MEMORY_IDS = ()
-    """Artist memories to ground the plan in. Not available yet: non-empty is refused."""
+    """Artist memories to pin, in the order the model should see them (P2-M3). Each must be an
+    active memory of the project's artist, named once; together they must fit the memory budget.
+    The same two fields exist on every run kind."""
     auto_fill: bool = True
+    """After the pins, fill what is left of the budget with the artist's most salient active
+    memories. ``false``: use only the pins."""
 
 
 class LyricsRunRequest(

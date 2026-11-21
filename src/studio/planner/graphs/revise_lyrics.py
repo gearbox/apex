@@ -55,7 +55,7 @@ from src.studio.planner.outcome import (
     cap_warnings,
     kept_after_failed_round,
 )
-from src.studio.planner.prompts.revise_lyrics_v1 import (
+from src.studio.planner.prompts.revise_lyrics_v2 import (
     build_revise_fix_messages,
     build_revise_messages,
     build_revise_redraft_messages,

@@ -59,7 +59,7 @@ from src.studio.planner.outcome import (
     cap_warnings,
     kept_after_failed_round,
 )
-from src.studio.planner.prompts.lyrics_v1 import (
+from src.studio.planner.prompts.lyrics_v2 import (
     build_lyrics_messages,
     build_lyrics_patch_messages,
     build_lyrics_redraft_messages,
