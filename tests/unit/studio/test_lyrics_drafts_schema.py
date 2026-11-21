@@ -63,6 +63,7 @@ def test_every_property_of_every_object_is_required_and_nothing_extra_is_allowed
         assert sorted(obj["required"]) == sorted(obj["properties"])
         assert obj["additionalProperties"] is False
     assert "refusal" in schema["required"]
+    assert "refusal_memories" in schema["required"]  # required, or it would not be in the schema
 
 
 def test_sample_replies_decode_into_the_drafts() -> None:
@@ -70,7 +71,8 @@ def test_sample_replies_decode_into_the_drafts() -> None:
     patch_line = {"key": "s1", "line": 1, "text": "la", "delivery": ["soft"]}
     assert (
         msgspec.convert(
-            {"refusal": None, "sections": [{"key": "s1", "lines": [line]}]}, LyricsDraft
+            {"refusal": None, "refusal_memories": [], "sections": [{"key": "s1", "lines": [line]}]},
+            LyricsDraft,
         )
         .sections[0]
         .lines[0]
@@ -78,28 +80,47 @@ def test_sample_replies_decode_into_the_drafts() -> None:
         == "la la"
     )
     assert (
-        msgspec.convert({"refusal": None, "lines": [patch_line]}, LyricsPatchDraft).lines[0].line
+        msgspec.convert(
+            {"refusal": None, "refusal_memories": [], "lines": [patch_line]}, LyricsPatchDraft
+        )
+        .lines[0]
+        .line
         == 1
     )
     revision = msgspec.convert(
         {
             "refusal": "content_policy",
+            "refusal_memories": ["m1", "m2"],
             "sections": [{"key": "s1", "lines": [line]}],
             "lines": [patch_line],
         },
         LyricsRevisionDraft,
     )
     assert revision.refusal is not None
+    assert revision.refusal_memories == ["m1", "m2"]
 
 
 @pytest.mark.parametrize(
     ("draft", "reply"),
     [
-        (LyricsDraft, {"refusal": None}),  # a missing field is not defaulted
-        (LyricsDraft, {"refusal": None, "sections": [], "extra": 1}),
-        (LyricsPatchDraft, {"refusal": None, "lines": [{"key": "s1", "line": 1, "text": "x"}]}),
+        (
+            LyricsDraft,
+            {"refusal": None, "refusal_memories": []},
+        ),  # a missing field is not defaulted
+        (LyricsDraft, {"refusal": None, "refusal_memories": [], "sections": [], "extra": 1}),
+        (LyricsDraft, {"refusal": None, "sections": []}),  # nor is the list of memory keys
+        (
+            LyricsPatchDraft,
+            {
+                "refusal": None,
+                "refusal_memories": [],
+                "lines": [{"key": "s1", "line": 1, "text": "x"}],
+            },
+        ),
+        (LyricsPatchDraft, {"refusal": None, "lines": []}),
         (LyricLineDraft, {"text": "x"}),
-        (LyricsRevisionDraft, {"refusal": None, "sections": []}),
+        (LyricsRevisionDraft, {"refusal": None, "refusal_memories": [], "sections": []}),
+        (LyricsRevisionDraft, {"refusal": None, "sections": [], "lines": []}),
     ],
 )
 def test_a_reply_that_leaves_a_field_out_or_adds_one_does_not_decode(

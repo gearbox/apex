@@ -215,6 +215,7 @@ def test_the_instruction_and_lyrics_cannot_close_their_blocks() -> None:
 def test_the_patch_request_is_pinned_and_never_carries_line_text() -> None:
     current = LyricsDraft(
         refusal=None,
+        refusal_memories=[],
         sections=[
             LyricsSectionDraft(
                 key="s2", lines=[LyricLineDraft(text="SECRET LINE TEXT", delivery=[])]
@@ -252,7 +253,7 @@ def test_the_revise_fix_uses_the_same_request_over_the_revision_echo() -> None:
 
 
 def test_the_rejection_request_names_keys_lines_and_codes_in_the_models_numbering() -> None:
-    current = LyricsDraft(refusal=None, sections=[])
+    current = LyricsDraft(refusal=None, refusal_memories=[], sections=[])
     issues = [
         DocumentIssue("sections[3]", "missing_section_lines"),
         DocumentIssue("sections[2]", "instrumental_section_has_lines"),
@@ -287,11 +288,14 @@ def test_the_revision_rejection_has_its_own_heading() -> None:
 
 def test_an_unknown_issue_code_gets_a_generic_explanation_not_an_error() -> None:
     _, request = lyrics_v1.build_lyrics_redraft_messages(
-        LyricsDraft(refusal=None, sections=[]), [DocumentIssue("sections[0]", "something_new")]
+        LyricsDraft(refusal=None, refusal_memories=[], sections=[]),
+        [DocumentIssue("sections[0]", "something_new")],
     )
     assert request.content.endswith("- s1: something_new \N{EM DASH} fix this part")
     patch = lyrics_v1.build_lyrics_patch_messages(
-        LyricsDraft(refusal=None, sections=[]), [LineProblem(0, 0, "something_new")], None
+        LyricsDraft(refusal=None, refusal_memories=[], sections=[]),
+        [LineProblem(0, 0, "something_new")],
+        None,
     )[1]
     assert patch.content.endswith("- s1 line 1: fix this line")
 

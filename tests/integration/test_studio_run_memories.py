@@ -36,6 +36,7 @@ from src.studio.services.mappers import run_out
 from tests.llm_support import FakeLlm
 from tests.studio_llm import make_draft, make_lyrics_draft, refusal_draft, section_lines
 from tests.studio_lyrics_support import PLAN, S1, S2, S4, doc
+from tests.studio_memory_support import make_memory
 from tests.studio_runs_support import PRODUCT
 
 if TYPE_CHECKING:
@@ -328,7 +329,7 @@ class TestSelectionAtClaim:
         system, user = llm.calls[0]
         assert system.content.count("- <artist_memories> are episodes") == 1
         assert user.content.count("<artist_memories>") == 1
-        assert "- Rooftop night (salience 3)\n  We watched the trains." in user.content
+        assert "- m1: Rooftop night (salience 3)\n  We watched the trains." in user.content
         run = await run_world.run(run_id)
         assert run.prompt_version == "plan-v2"
         assert run.context_snapshot is not None
@@ -353,7 +354,7 @@ class TestSelectionAtClaim:
         run = await run_world.run(write.run.id)
         assert (run.status, run.prompt_version) == ("succeeded", "lyrics-v2")
         assert _used(run) == [pin]
-        assert "- Platform seven (salience 3)" in llm.calls[0][1].content
+        assert "- m1: Platform seven (salience 3)" in llm.calls[0][1].content
 
 
 # ---------------------------------------------------------------------------
@@ -512,6 +513,147 @@ class TestPolicy:
         assert await run_world.versions(track_id) == []
 
 
+class TestARefusalNamesItsMemories:
+    """R5 (P2b-10): the model names the memories that caused a content-policy refusal by key."""
+
+    async def _refused(
+        self,
+        run_world: RunWorld,
+        reason: DraftRefusal,
+        keys: list[str],
+        *,
+        memories: int = 2,
+    ) -> tuple[Actor, StudioRun, list[UUID]]:
+        """A run with ``memories`` pinned memories (so ``m1`` is the first) whose model refuses."""
+        actor, track_id = await _world(run_world)
+        pins = [await run_world.add_memory(actor, title=f"Entry {n}") for n in range(memories)]
+        run_id = await _submit(run_world, actor, track_id, memory_ids=tuple(pins))
+        await run_world.drive(FakeLlm(refusal_draft(reason, keys)))
+        return actor, await run_world.run(run_id), pins
+
+    async def test_a_refusal_names_the_memories_that_caused_it(self, run_world: RunWorld) -> None:
+        actor, run, pins = await self._refused(run_world, DraftRefusal.CONTENT_POLICY, ["m2"])
+
+        assert (run.status, run.error_code) == ("failed", "content_policy_refused")
+        assert run.error_detail == {"memory_ids": [str(pins[1])]}  # the 2nd memory, by id
+        assert run_out(run).error_detail == {"memory_ids": [str(pins[1])]}
+        assert _used(run) == pins  # the keys count up through what the model was given
+        assert await run_world.refunds_and_debits(actor) == (1, 1)  # and the run is refunded
+
+    async def test_the_ids_are_listed_in_prompt_order(self, run_world: RunWorld) -> None:
+        _, run, pins = await self._refused(
+            run_world, DraftRefusal.CONTENT_POLICY, ["m3", "m1"], memories=3
+        )
+
+        assert run.error_detail == {"memory_ids": [str(pins[0]), str(pins[2])]}
+
+    async def test_unknown_or_repeated_memory_keys_are_dropped(self, run_world: RunWorld) -> None:
+        _, run, pins = await self._refused(
+            run_world, DraftRefusal.CONTENT_POLICY, ["m9", "x", "m1", "m1"]
+        )
+
+        assert run.error_detail == {"memory_ids": [str(pins[0])]}
+
+    async def test_a_refusal_without_memory_keys_has_no_detail(self, run_world: RunWorld) -> None:
+        _, run, _ = await self._refused(run_world, DraftRefusal.CONTENT_POLICY, [])
+
+        assert (run.status, run.error_code) == ("failed", "content_policy_refused")
+        assert run.error_detail is None
+        assert run_out(run).error_detail is None
+
+    async def test_keys_that_name_nothing_the_model_was_shown_leave_no_detail(
+        self, run_world: RunWorld
+    ) -> None:
+        _, run, _ = await self._refused(run_world, DraftRefusal.CONTENT_POLICY, ["m7", "zz"])
+
+        assert run.error_detail is None
+
+    async def test_brief_unusable_ignores_any_keys(self, run_world: RunWorld) -> None:
+        _, run, _ = await self._refused(run_world, DraftRefusal.BRIEF_UNUSABLE, ["m1", "m2"])
+
+        assert (run.status, run.error_code) == ("failed", "brief_unusable")
+        assert run.error_detail is None
+
+    async def test_a_memory_deleted_after_the_refusal_is_still_named_by_id(
+        self, run_world: RunWorld
+    ) -> None:
+        """Best-effort: the id outlives the memory (the UI finds it gone with a 404)."""
+        actor, run, pins = await self._refused(run_world, DraftRefusal.CONTENT_POLICY, ["m1"])
+
+        await run_world.delete_memory(actor, pins[0])
+
+        refetched = await run_world.run(run.id)
+        assert refetched.error_detail == {"memory_ids": [str(pins[0])]}
+
+    async def test_the_model_is_shown_every_memory_under_its_key(self, run_world: RunWorld) -> None:
+        actor, track_id = await _world(run_world)
+        pins = [await run_world.add_memory(actor, title=f"Entry {n}") for n in range(2)]
+        await _submit(run_world, actor, track_id, memory_ids=tuple(pins))
+        llm = FakeLlm(make_draft())
+
+        await run_world.drive(llm)
+
+        system, user = llm.calls[0]
+        assert "- m1: Entry 0 (salience 3)" in user.content
+        assert "- m2: Entry 1 (salience 3)" in user.content
+        assert 'list that memory\'s key in "refusal_memories"' in system.content
+
+    async def test_a_run_without_memories_is_not_asked_for_keys(self, run_world: RunWorld) -> None:
+        actor, track_id = await _world(run_world)
+        await run_world.add_memory(actor)
+        await _submit(run_world, actor, track_id, auto_fill=False)
+        llm = FakeLlm(make_draft())
+
+        await run_world.drive(llm)
+
+        system, user = llm.calls[0]
+        assert "refusal_memories" not in system.content
+        assert "m1" not in user.content
+
+
+class TestTheSizeAtSubmitIsTheSizeAtClaim:
+    async def test_pins_that_exactly_fill_the_budget_are_accepted_and_all_selected(
+        self, run_world: RunWorld
+    ) -> None:
+        """The key is part of what the budget counts, at submit and at claim alike."""
+        actor, track_id = await _world(run_world)
+        sizes = [1900] * 6
+        # tune the last body so the block is exactly MEMORY_CONTEXT_BUDGET characters
+        last = 1
+        while True:
+            candidates = [
+                make_memory(n + 1, title=f"T{n}", body="b" * size)
+                for n, size in enumerate([*sizes, last])
+            ]
+            total = rendered_size(candidates)
+            if total >= MEMORY_CONTEXT_BUDGET or last >= 2000:
+                break
+            last += 1
+        assert total == MEMORY_CONTEXT_BUDGET, total  # the search can land on it exactly
+        pins = [
+            await run_world.add_memory(actor, title=f"T{n}", body="b" * size)
+            for n, size in enumerate([*sizes, last])
+        ]
+        run_id = await _submit(run_world, actor, track_id, memory_ids=tuple(pins), auto_fill=False)
+
+        await run_world.drive(FakeLlm(make_draft()))
+
+        run = await run_world.run(run_id)
+        assert run.status == "succeeded"
+        assert _used(run) == pins  # none was skipped at claim
+        assert rendered_size(_snapshot_memories(run)) == MEMORY_CONTEXT_BUDGET
+        assert run_out(run).warnings == []  # no pinned_memory_unavailable
+
+    async def test_one_character_more_is_refused_at_submit(self, run_world: RunWorld) -> None:
+        actor, track_id = await _world(run_world)
+        pins = [await run_world.add_memory(actor, body="b" * 1900) for _ in range(6)]
+        pins.append(await run_world.add_memory(actor, body="b" * 2000))
+        issues = await _issues(
+            run_world, actor, track_id, PlanRunRequest(brief="x", memory_ids=tuple(pins))
+        )
+        assert issues == [("memory_ids", "memories_over_budget")]
+
+
 # ---------------------------------------------------------------------------
 # Privacy (P2-M9; invariant 8)
 # ---------------------------------------------------------------------------
@@ -590,3 +732,28 @@ class TestPrivacy:
         (entry,) = [e for e in logs if e["event"] == "studio.memory_updated"]
         assert entry["fields"] == ["title", "salience"]
         assert set(entry) <= {"event", "log_level", "memory_id", "artist_id", "user_id", "fields"}
+
+    async def test_a_refusal_that_names_memories_carries_and_logs_ids_only(
+        self, run_world: RunWorld, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        actor, track_id = await _world(run_world)
+        with capture_logs() as logs:
+            memory = await run_world.add_memory(
+                actor,
+                title=f"{MARK}-title",
+                body=f"{MARK}-body",
+                themes=[f"{MARK}-theme"],
+                imagery=[f"{MARK}-image"],
+            )
+            run_id = await _submit(run_world, actor, track_id, memory_ids=(memory,))
+            await run_world.drive(FakeLlm(refusal_draft(DraftRefusal.CONTENT_POLICY, ["m1"])))
+
+        run = await run_world.run(run_id)
+        assert run.error_detail == {"memory_ids": [str(memory)]}  # the id, and nothing else
+        shown = msgspec.json.encode(run_out(run)).decode()
+        assert str(memory) in shown
+        assert MARK not in shown
+        assert MARK not in json.dumps(run.error_detail)
+        for entry in logs:
+            assert MARK.lower() not in repr(entry).lower(), entry
+        assert MARK not in "\n".join(record.getMessage() for record in caplog.records)

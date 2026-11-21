@@ -1,8 +1,9 @@
 """Artist memories CRUD (``/v1/studio/artists/{id}/memories``, ``/v1/studio/memories/{id}``).
 
-A memory belongs to an artist and inherits its owner and product (P2-M1), so every operation
-resolves the artist through the caller's scope first and an unknown, foreign or cross-product id is
-the same 404.
+A memory belongs to an artist and carries the artist's ``user_id`` / ``product_id`` on its own row
+(a composite FK makes any other pair unrepresentable), so every query is scoped to the caller twice:
+the artist is resolved through the caller's scope first, and each memory read filters the memory's
+own scope. An unknown, foreign or cross-product id is the same 404.
 
 **Lock order is artist, then memory - never the reverse.** A create and an un-archive take the
 artist row (``FOR UPDATE``) and count the active memories under that lock, so the 200-active cap is
@@ -21,7 +22,7 @@ from typing import TYPE_CHECKING
 import msgspec
 import structlog
 
-from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.api.schemas.pagination import CursorPage, decode_memory_cursor, encode_memory_cursor
 from src.core.enums import StudioMemoryOrigin, StudioMemoryStatus
 from src.db.repositories.studio import StudioArtistMemoryRepository, StudioArtistRepository
 from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST, collect_length_issues
@@ -85,30 +86,46 @@ class MemoryService:
         limit: int,
         cursor: str | None,
     ) -> CursorPage[MemoryOut]:
-        """The artist's memories of ``status``, newest first (``created_at DESC, id DESC``).
+        """The artist's memories of ``status`` in diary order.
+
+        Diary order is ``occurred_on DESC NULLS LAST, created_at DESC, id DESC``: the episode date
+        (undated last), then the newest written. Changing a memory's ``occurred_on`` while a client
+        pages can move that one row across a page boundary; no other row is duplicated or skipped.
 
         Raises:
             InvalidCursor: ``cursor`` is not one this endpoint issued.
             ArtistNotFound: The artist is not the caller's.
         """
-        try:
-            cursor_ts, cursor_id = decode_cursor(cursor) if cursor is not None else (None, None)
-        except ValueError as exc:
-            raise InvalidCursor from exc
+        cursor_on, cursor_ts, cursor_id = None, None, None
+        if cursor is not None:
+            try:
+                cursor_on, cursor_ts, cursor_id = decode_memory_cursor(cursor)
+            except ValueError as exc:
+                raise InvalidCursor from exc
         if await self._artists.get(artist_id, user_id=user_id, product_id=product_id) is None:
             raise ArtistNotFound
         rows = await self._memories.list_page(
-            artist_id, status=status, limit=limit, cursor_ts=cursor_ts, cursor_id=cursor_id
+            artist_id,
+            user_id=user_id,
+            product_id=product_id,
+            status=status,
+            limit=limit,
+            cursor_occurred_on=cursor_on,
+            cursor_ts=cursor_ts,
+            cursor_id=cursor_id,
         )
         has_more = len(rows) > limit
         page = list(rows[:limit])
+        last = page[-1] if has_more and page else None
         return CursorPage(
             items=[memory_out(m) for m in page],
             limit=limit,
             has_more=has_more,
-            next_cursor=encode_cursor(page[-1].created_at, page[-1].id)
-            if has_more and page
-            else None,
+            next_cursor=(
+                encode_memory_cursor(last.occurred_on, last.created_at, last.id)
+                if last is not None
+                else None
+            ),
         )
 
     async def create(
@@ -125,7 +142,8 @@ class MemoryService:
                 image, a value NFC pushed past its limit).
             MemoryLimitReached: The artist already has 200 active memories.
         """
-        if await self._artists.lock(artist_id, user_id=user_id, product_id=product_id) is None:
+        artist = await self._artists.lock(artist_id, user_id=user_id, product_id=product_id)
+        if artist is None:
             raise ArtistNotFound
         issues: list[DocumentIssue] = []
         title = _title(data.title, issues)
@@ -141,9 +159,17 @@ class MemoryService:
         )
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
-        if await self._memories.count_active(artist_id) >= MAX_ACTIVE_MEMORIES_PER_ARTIST:
+        if (
+            await self._memories.count_active(
+                artist_id, user_id=artist.user_id, product_id=artist.product_id
+            )
+            >= MAX_ACTIVE_MEMORIES_PER_ARTIST
+        ):
             raise MemoryLimitReached
+        # The locked artist row's owner, not the caller's: what the composite FK checks against.
         memory = await self._memories.insert(
+            user_id=artist.user_id,
+            product_id=artist.product_id,
             artist_id=artist_id,
             title=title,
             body=body,
@@ -228,11 +254,18 @@ class MemoryService:
         if (
             data.status is StudioMemoryStatus.ACTIVE
             and was_archived
-            and await self._memories.count_active(artist_id) >= MAX_ACTIVE_MEMORIES_PER_ARTIST
+            and await self._memories.count_active(artist_id, user_id=user_id, product_id=product_id)
+            >= MAX_ACTIVE_MEMORIES_PER_ARTIST
         ):
             raise MemoryLimitReached
 
-        updated = await self._memories.update(memory_id, artist_id=artist_id, changes=changes)
+        updated = await self._memories.update(
+            memory_id,
+            artist_id=artist_id,
+            user_id=user_id,
+            product_id=product_id,
+            changes=changes,
+        )
         if updated is None:  # pragma: no cover - the row lock above rules out a concurrent delete
             raise MemoryNotFound
         fields = [f for f in data.__struct_fields__ if getattr(data, f) is not msgspec.UNSET]
@@ -258,14 +291,12 @@ class MemoryService:
         Raises:
             MemoryNotFound: No such memory for the caller.
         """
-        memory = await self._memories.get(memory_id, user_id=user_id, product_id=product_id)
-        if memory is None:
-            raise MemoryNotFound
-        if not await self._memories.delete(memory_id, user_id=user_id, product_id=product_id):
+        artist_id = await self._memories.delete(memory_id, user_id=user_id, product_id=product_id)
+        if artist_id is None:
             raise MemoryNotFound
         logger.info(
             "studio.memory_deleted",
             memory_id=str(memory_id),
-            artist_id=str(memory.artist_id),
+            artist_id=str(artist_id),
             user_id=str(user_id),
         )

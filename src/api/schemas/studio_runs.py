@@ -63,7 +63,9 @@ class RunOut(msgspec.Struct, kw_only=True):
     run starts (the selection is made when a worker claims it) and for a run without memories."""
     error_code: str | None
     error_detail: dict[str, Any] | None
-    """Issue paths and codes only (``{"issues": [{"path", "code"}]}``) - never model or user text."""
+    """Issue paths and codes (``{"issues": [{"path", "code"}]}``), or, for ``content_policy_refused``,
+    the memories the model named as the cause (``{"memory_ids": [...]}``, best-effort and in prompt
+    order) - ids only, never model or user text."""
     llm_calls: int
     created_at: datetime
     started_at: datetime | None

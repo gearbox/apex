@@ -49,6 +49,8 @@ class World:
         rows = [
             {
                 "id": uuid4(),
+                "user_id": self.user_id,
+                "product_id": PRODUCT,
                 "artist_id": self.artist_id,
                 "title": f"m{n}",
                 "body": "b",

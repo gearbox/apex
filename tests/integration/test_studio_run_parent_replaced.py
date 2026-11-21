@@ -46,6 +46,7 @@ def _same_as_the_draft() -> PlanDocument:
 def _empty_draft() -> PlanDraft:
     return PlanDraft(
         refusal=None,
+        refusal_memories=[],
         title="Neon Rain",
         tempo_bpm=120,
         instrumental=False,

@@ -7,6 +7,8 @@ The overlapping-request tests (the 200 cap, RD8) are in ``test_studio_memory_con
 
 from __future__ import annotations
 
+import base64
+import json
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import uuid4
@@ -281,7 +283,7 @@ class TestCrud:
 
 
 class TestList:
-    async def test_pages_newest_first_and_defaults_to_active(
+    async def test_pages_in_diary_order_and_defaults_to_active(
         self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
     ) -> None:
         artist_id = await _artist(client, owner)
@@ -293,7 +295,7 @@ class TestList:
         url = f"{S}/artists/{artist_id}/memories"
 
         first = (await client.get(url, headers=owner.headers, params={"limit": 2})).json()
-        assert [m["title"] for m in first["items"]] == ["m3", "m2"]  # newest first
+        assert [m["title"] for m in first["items"]] == ["m3", "m2"]  # undated: newest written first
         assert first["has_more"] is True
         rest = (
             await client.get(
@@ -338,6 +340,77 @@ class TestList:
             f"{S}/artists/{artist_id}/memories", headers=owner.headers, params={"cursor": "nope"}
         )
         assert response.json()["error"] == "invalid_cursor"
+
+    async def test_the_list_is_the_diary_dated_episodes_first_then_the_undated(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        artist_id = await _artist(client, owner)
+        written = [
+            ("undated-first-written", None),
+            ("2019", "2019-06-04"),
+            ("undated-last-written", None),
+            ("2021", "2021-05-01"),
+        ]
+        for title, occurred_on in written:
+            await _create(client, owner, artist_id, title=title, occurred_on=occurred_on)
+        url = f"{S}/artists/{artist_id}/memories"
+
+        everything = (await client.get(url, headers=owner.headers)).json()
+        assert [m["title"] for m in everything["items"]] == [
+            "2021",
+            "2019",
+            "undated-last-written",
+            "undated-first-written",
+        ]
+
+        # a page boundary in the middle of the dated rows, and one inside the undated ones
+        seen: list[str] = []
+        cursor: str | None = None
+        while True:
+            params: dict[str, Any] = {"limit": 3}
+            if cursor is not None:
+                params["cursor"] = cursor
+            page = (await client.get(url, headers=owner.headers, params=params)).json()
+            seen += [m["title"] for m in page["items"]]
+            cursor = page["next_cursor"]
+            if not page["has_more"]:
+                break
+        assert seen == [m["title"] for m in everything["items"]]
+
+    async def test_a_cursor_from_another_endpoint_is_invalid(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        """The artist list's cursor has no ``occurred_on``: the memory list must not take it."""
+        await _artist(client, owner, "First")
+        await _artist(client, owner, "Second")
+        artists = (
+            await client.get(f"{S}/artists", headers=owner.headers, params={"limit": 1})
+        ).json()
+        assert artists["next_cursor"] is not None
+        artist_id = artists["items"][0]["id"]
+
+        response = await client.get(
+            f"{S}/artists/{artist_id}/memories",
+            headers=owner.headers,
+            params={"cursor": artists["next_cursor"]},
+        )
+
+        assert (response.status_code, response.json()["error"]) == (400, "invalid_cursor")
+
+    async def test_a_cursor_with_a_bad_date_is_invalid(
+        self, client: AsyncTestClient[Litestar], owner: SimpleNamespace
+    ) -> None:
+        artist_id = await _artist(client, owner)
+        payload = {"occurred_on": "2019-13-45", "created_at": "2026-01-01T00:00:00+00:00"}
+        cursor = base64.urlsafe_b64encode(json.dumps({**payload, "id": str(uuid4())}).encode())
+
+        response = await client.get(
+            f"{S}/artists/{artist_id}/memories",
+            headers=owner.headers,
+            params={"cursor": cursor.decode()},
+        )
+
+        assert (response.status_code, response.json()["error"]) == (400, "invalid_cursor")
 
 
 # ---------------------------------------------------------------------------

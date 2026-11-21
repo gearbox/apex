@@ -71,10 +71,12 @@ def make_draft(
     tags: Sequence[str] = ("synthwave",),
     avoid: Sequence[str] = ("autotune",),
     refusal: DraftRefusal | None = None,
+    refusal_memories: Sequence[str] = (),
 ) -> PlanDraft:
     """A valid draft (two sections unless given some)."""
     return PlanDraft(
         refusal=refusal,
+        refusal_memories=list(refusal_memories),
         title=title,
         tempo_bpm=tempo_bpm,
         instrumental=instrumental,
@@ -87,10 +89,11 @@ def make_draft(
     )
 
 
-def refusal_draft(reason: DraftRefusal) -> PlanDraft:
-    """What a model returns to decline: the reason and empty values."""
+def refusal_draft(reason: DraftRefusal, memories: Sequence[str] = ()) -> PlanDraft:
+    """What a model returns to decline: the reason, the memory keys it names, empty values."""
     return PlanDraft(
         refusal=reason,
+        refusal_memories=list(memories),
         title="",
         tempo_bpm=None,
         instrumental=False,
@@ -119,12 +122,12 @@ def make_lyrics_draft(
     *sections: LyricsSectionDraft, refusal: DraftRefusal | None = None
 ) -> LyricsDraft:
     """A lyrics reply made of the given sections."""
-    return LyricsDraft(refusal=refusal, sections=list(sections))
+    return LyricsDraft(refusal=refusal, refusal_memories=[], sections=list(sections))
 
 
-def refusal_lyrics_draft(reason: DraftRefusal) -> LyricsDraft:
-    """What a model returns to decline writing lyrics."""
-    return LyricsDraft(refusal=reason, sections=[])
+def refusal_lyrics_draft(reason: DraftRefusal, memories: Sequence[str] = ()) -> LyricsDraft:
+    """What a model returns to decline writing lyrics (naming the memory keys it blames)."""
+    return LyricsDraft(refusal=reason, refusal_memories=list(memories), sections=[])
 
 
 def make_line_patch(key: str, line: int, text: str, delivery: Sequence[str] = ()) -> LinePatchDraft:
@@ -134,11 +137,11 @@ def make_line_patch(key: str, line: int, text: str, delivery: Sequence[str] = ()
 
 def make_lyrics_patch(*lines: LinePatchDraft) -> LyricsPatchDraft:
     """A reply to a patch request."""
-    return LyricsPatchDraft(refusal=None, lines=list(lines))
+    return LyricsPatchDraft(refusal=None, refusal_memories=[], lines=list(lines))
 
 
-def refusal_lyrics_patch(reason: DraftRefusal) -> LyricsPatchDraft:
-    return LyricsPatchDraft(refusal=reason, lines=[])
+def refusal_lyrics_patch(reason: DraftRefusal, memories: Sequence[str] = ()) -> LyricsPatchDraft:
+    return LyricsPatchDraft(refusal=reason, refusal_memories=list(memories), lines=[])
 
 
 def make_lyrics_revision(
@@ -147,8 +150,14 @@ def make_lyrics_revision(
     lines: Sequence[LinePatchDraft] = (),
 ) -> LyricsRevisionDraft:
     """The first reply of a revision: new sections and/or replaced lines."""
-    return LyricsRevisionDraft(refusal=None, sections=list(sections), lines=list(lines))
+    return LyricsRevisionDraft(
+        refusal=None, refusal_memories=[], sections=list(sections), lines=list(lines)
+    )
 
 
-def refusal_lyrics_revision(reason: DraftRefusal) -> LyricsRevisionDraft:
-    return LyricsRevisionDraft(refusal=reason, sections=[], lines=[])
+def refusal_lyrics_revision(
+    reason: DraftRefusal, memories: Sequence[str] = ()
+) -> LyricsRevisionDraft:
+    return LyricsRevisionDraft(
+        refusal=reason, refusal_memories=list(memories), sections=[], lines=[]
+    )

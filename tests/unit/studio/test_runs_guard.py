@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
-from uuid import uuid4
+from uuid import UUID
 
 import pytest
 from litestar import Litestar
@@ -20,12 +20,18 @@ if TYPE_CHECKING:
 
 pytestmark = pytest.mark.unit
 
-RUN_REQUESTS = [
-    ("POST", f"/v1/studio/tracks/{uuid4()}/runs"),
-    ("GET", f"/v1/studio/runs/{uuid4()}"),
-    ("GET", f"/v1/studio/tracks/{uuid4()}/runs"),
-    ("POST", f"/v1/studio/runs/{uuid4()}/cancel"),
+RUN_ROUTES = [
+    ("POST", "/v1/studio/tracks/{id}/runs"),
+    ("GET", "/v1/studio/runs/{id}"),
+    ("GET", "/v1/studio/tracks/{id}/runs"),
+    ("POST", "/v1/studio/runs/{id}/cancel"),
 ]
+# A fixed id and ids built from the path *template*: ``pytest -n auto`` makes every worker collect
+# the tests itself and aborts ("Different tests were collected") when their node ids differ, which
+# random ids per process would make them.
+_ID = UUID(int=1)
+RUN_REQUESTS = [(method, path.format(id=_ID)) for method, path in RUN_ROUTES]
+RUN_IDS = [f"{method}-{path}" for method, path in RUN_ROUTES]
 
 
 def _settings(*, studio: bool, runs: bool) -> Any:
@@ -71,7 +77,7 @@ def _app() -> Litestar:
     return Litestar(route_handlers=[StudioRunController], middleware=[middleware_factory])
 
 
-@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS)
+@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS, ids=RUN_IDS)
 async def test_every_run_route_is_404_with_runs_off_even_unauthenticated(
     method: str, path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -81,7 +87,7 @@ async def test_every_run_route_is_404_with_runs_off_even_unauthenticated(
     assert response.status_code == 404
 
 
-@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS)
+@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS, ids=RUN_IDS)
 async def test_with_runs_on_authentication_is_what_answers_next(
     method: str, path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -91,7 +97,7 @@ async def test_with_runs_on_authentication_is_what_answers_next(
     assert response.status_code != 404
 
 
-@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS)
+@pytest.mark.parametrize(("method", "path"), RUN_REQUESTS, ids=RUN_IDS)
 async def test_the_studio_switch_off_hides_the_run_routes_too(
     method: str, path: str, monkeypatch: pytest.MonkeyPatch
 ) -> None:

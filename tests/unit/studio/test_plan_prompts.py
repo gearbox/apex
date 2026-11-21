@@ -184,7 +184,9 @@ class TestRevision:
         ]
         messages = build_plan_revision_messages(draft, issues)
         assert [m.role for m in messages] == ["assistant", "user"]
-        assert messages[0].content.startswith('{"refusal":null,"title":"Neon Rain"')
+        assert messages[0].content.startswith(
+            '{"refusal":null,"refusal_memories":[],"title":"Neon Rain"'
+        )
         assert messages[1].content == (
             "The plan was rejected. Fix exactly these problems and return the full corrected "
             "JSON object:\n"

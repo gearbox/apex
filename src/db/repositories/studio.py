@@ -22,6 +22,7 @@ import msgspec
 from sqlalchemy import (
     Boolean,
     Integer,
+    and_,
     delete,
     func,
     literal,
@@ -60,7 +61,7 @@ if TYPE_CHECKING:
     from datetime import date, datetime
     from uuid import UUID
 
-    from sqlalchemy import ScalarSelect, Select
+    from sqlalchemy import ColumnElement, ScalarSelect, Select
     from sqlalchemy.ext.asyncio import AsyncSession
     from sqlalchemy.orm import InstrumentedAttribute
 
@@ -261,10 +262,10 @@ class StudioArtistRepository:
 class StudioArtistMemoryRepository:
     """Data access for ``studio_artist_memories``.
 
-    A memory has no ``user_id`` / ``product_id`` of its own (P2-M1): the by-id reads (``get`` /
-    ``lock`` / ``delete``) join the owning artist and filter *its* owner and product, so another
-    user's, another product's or an unknown id all read as ``None``. The by-artist reads take an
-    ``artist_id`` the caller has already resolved to one of its own artists.
+    A memory carries its own ``user_id`` / ``product_id`` (the database ties them to its artist's
+    with a composite FK), and **every** method filters them on the memory row itself - by-id reads
+    and by-artist reads alike. A caller that passes an artist id it did not resolve through its own
+    scope gets nothing back (``None`` / empty / ``0``) instead of another tenant's rows.
 
     Lock order: **artist, then memory** (never the reverse). ``lock`` takes the memory row only
     (``FOR UPDATE OF`` the memory table): the artist lock is the caller's, taken first.
@@ -274,19 +275,18 @@ class StudioArtistMemoryRepository:
         self._session = session
 
     @staticmethod
-    def _owned_by(memory_id: UUID, user_id: UUID, product_id: str) -> tuple[Any, ...]:
-        """Where-clauses: this memory, whose artist belongs to ``user_id`` in ``product_id``."""
-        owned_artists = select(StudioArtist.id).where(
-            StudioArtist.user_id == user_id, StudioArtist.product_id == product_id
-        )
+    def _scope(user_id: UUID, product_id: str) -> tuple[Any, ...]:
+        """Where-clauses: the memory belongs to ``user_id`` in ``product_id``."""
         return (
-            StudioArtistMemory.id == memory_id,
-            StudioArtistMemory.artist_id.in_(owned_artists),
+            StudioArtistMemory.user_id == user_id,
+            StudioArtistMemory.product_id == product_id,
         )
 
     async def insert(
         self,
         *,
+        user_id: UUID,
+        product_id: str,
         artist_id: UUID,
         title: str,
         body: str,
@@ -296,11 +296,17 @@ class StudioArtistMemoryRepository:
         salience: int,
         origin: StudioMemoryOrigin,
     ) -> StudioArtistMemory:
-        """Insert an ``active`` memory. The caller holds the artist lock and has counted."""
+        """Insert an ``active`` memory. The caller holds the artist lock and has counted.
+
+        ``user_id`` / ``product_id`` are the **locked artist row's** values; the composite FK
+        refuses a pair that is not the artist's.
+        """
         result = await self._session.execute(
             pg_insert(StudioArtistMemory)
             .values(
                 id=new_id(),
+                user_id=user_id,
+                product_id=product_id,
                 artist_id=artist_id,
                 title=title,
                 body=body,
@@ -318,10 +324,10 @@ class StudioArtistMemoryRepository:
     async def get(
         self, memory_id: UUID, *, user_id: UUID, product_id: str
     ) -> StudioArtistMemory | None:
-        """The memory, if its artist is the caller's (``None`` otherwise: no probing)."""
+        """The memory, if it is the caller's (``None`` otherwise: no probing)."""
         result = await self._session.execute(
             select(StudioArtistMemory)
-            .where(*self._owned_by(memory_id, user_id, product_id))
+            .where(StudioArtistMemory.id == memory_id, *self._scope(user_id, product_id))
             .execution_options(**_FRESH)
         )
         return result.scalar_one_or_none()
@@ -332,7 +338,7 @@ class StudioArtistMemoryRepository:
         """``SELECT … FOR UPDATE`` the memory row (not the artist's): the caller locked the artist."""
         result = await self._session.execute(
             select(StudioArtistMemory)
-            .where(*self._owned_by(memory_id, user_id, product_id))
+            .where(StudioArtistMemory.id == memory_id, *self._scope(user_id, product_id))
             .with_for_update(of=StudioArtistMemory)
             .execution_options(**_FRESH)
         )
@@ -342,29 +348,38 @@ class StudioArtistMemoryRepository:
         self,
         artist_id: UUID,
         *,
+        user_id: UUID,
+        product_id: str,
         status: StudioMemoryStatus,
         limit: int,
+        cursor_occurred_on: date | None = None,
         cursor_ts: datetime | None = None,
         cursor_id: UUID | None = None,
     ) -> Sequence[StudioArtistMemory]:
-        """``limit + 1`` memories of ``status``, newest first (``created_at DESC, id DESC``)."""
+        """``limit + 1`` memories of ``status`` in **diary order**, after the cursor.
+
+        Order: ``occurred_on DESC NULLS LAST, created_at DESC, id DESC`` (the episode date, undated
+        last, then the newest written). The cursor is ``(cursor_occurred_on, cursor_ts,
+        cursor_id)`` of the last row of the previous page; there is one only when ``cursor_ts`` and
+        ``cursor_id`` are both given (``cursor_occurred_on`` is ``None`` for an undated row).
+        """
         query = select(StudioArtistMemory).where(
             StudioArtistMemory.artist_id == artist_id,
             StudioArtistMemory.status == status.value,
+            *self._scope(user_id, product_id),
         )
+        if cursor_ts is not None and cursor_id is not None:
+            query = query.where(_after_in_diary_order(cursor_occurred_on, cursor_ts, cursor_id))
         result = await self._session.execute(
-            _keyset(
-                query,
-                StudioArtistMemory.created_at,
-                StudioArtistMemory.id,
-                cursor_ts,
-                cursor_id,
-                limit,
-            )
+            query.order_by(
+                StudioArtistMemory.occurred_on.desc().nulls_last(),
+                StudioArtistMemory.created_at.desc(),
+                StudioArtistMemory.id.desc(),
+            ).limit(limit + 1)
         )
         return result.scalars().all()
 
-    async def count_active(self, artist_id: UUID) -> int:
+    async def count_active(self, artist_id: UUID, *, user_id: UUID, product_id: str) -> int:
         """Active memories of the artist. Callers that enforce the cap hold the artist lock."""
         result = await self._session.execute(
             select(func.count())
@@ -372,43 +387,63 @@ class StudioArtistMemoryRepository:
             .where(
                 StudioArtistMemory.artist_id == artist_id,
                 StudioArtistMemory.status == StudioMemoryStatus.ACTIVE.value,
+                *self._scope(user_id, product_id),
             )
         )
         return result.scalar_one()
 
     async def update(
-        self, memory_id: UUID, *, artist_id: UUID, changes: Mapping[str, object]
+        self,
+        memory_id: UUID,
+        *,
+        artist_id: UUID,
+        user_id: UUID,
+        product_id: str,
+        changes: Mapping[str, object],
     ) -> StudioArtistMemory | None:
-        """Apply ``changes`` (column name → value) to a memory of ``artist_id``."""
+        """Apply ``changes`` (column name → value) to a memory of ``artist_id``.
+
+        An empty mapping just re-reads the row. A scope that is not the row's changes nothing.
+        """
+        where = (
+            StudioArtistMemory.id == memory_id,
+            StudioArtistMemory.artist_id == artist_id,
+            *self._scope(user_id, product_id),
+        )
         if not changes:
             result = await self._session.execute(
-                select(StudioArtistMemory)
-                .where(
-                    StudioArtistMemory.id == memory_id, StudioArtistMemory.artist_id == artist_id
-                )
-                .execution_options(**_FRESH)
+                select(StudioArtistMemory).where(*where).execution_options(**_FRESH)
             )
             return result.scalar_one_or_none()
         result = await self._session.execute(
             update(StudioArtistMemory)
-            .where(StudioArtistMemory.id == memory_id, StudioArtistMemory.artist_id == artist_id)
+            .where(*where)
             .values(**changes)
             .returning(StudioArtistMemory)
             .execution_options(**_FRESH, synchronize_session=False)
         )
         return result.scalar_one_or_none()
 
-    async def delete(self, memory_id: UUID, *, user_id: UUID, product_id: str) -> bool:
-        """Delete a memory of the caller's. Always allowed: runs hold their own copy (P2-M5)."""
+    async def delete(self, memory_id: UUID, *, user_id: UUID, product_id: str) -> UUID | None:
+        """Delete a memory of the caller's; its ``artist_id``, or ``None`` if there was none.
+
+        Always allowed: runs hold their own copy (P2-M5). The artist id is returned so the caller
+        needs no prior read just to log it.
+        """
         result = await self._session.execute(
             delete(StudioArtistMemory)
-            .where(*self._owned_by(memory_id, user_id, product_id))
-            .returning(StudioArtistMemory.id)
+            .where(StudioArtistMemory.id == memory_id, *self._scope(user_id, product_id))
+            .returning(StudioArtistMemory.artist_id)
         )
-        return result.scalar_one_or_none() is not None
+        return result.scalar_one_or_none()
 
     async def get_many_owned(
-        self, memory_ids: Collection[UUID], *, artist_id: UUID
+        self,
+        memory_ids: Collection[UUID],
+        *,
+        artist_id: UUID,
+        user_id: UUID,
+        product_id: str,
     ) -> Sequence[StudioArtistMemory]:
         """The memories among ``memory_ids`` that belong to ``artist_id`` (any status).
 
@@ -422,18 +457,26 @@ class StudioArtistMemoryRepository:
             .where(
                 StudioArtistMemory.artist_id == artist_id,
                 StudioArtistMemory.id.in_(list(memory_ids)),
+                *self._scope(user_id, product_id),
             )
             .execution_options(**_FRESH)
         )
         return result.scalars().all()
 
     async def active_in_selection_order(
-        self, artist_id: UUID, *, exclude: Collection[UUID], limit: int
+        self,
+        artist_id: UUID,
+        *,
+        user_id: UUID,
+        product_id: str,
+        exclude: Collection[UUID],
+        limit: int,
     ) -> Sequence[StudioArtistMemory]:
         """Active memories in the P2-M2 order: ``salience DESC, occurred_on DESC NULLS LAST, id``."""
         query = select(StudioArtistMemory).where(
             StudioArtistMemory.artist_id == artist_id,
             StudioArtistMemory.status == StudioMemoryStatus.ACTIVE.value,
+            *self._scope(user_id, product_id),
         )
         if exclude:
             query = query.where(StudioArtistMemory.id.not_in(list(exclude)))
@@ -447,6 +490,24 @@ class StudioArtistMemoryRepository:
             .execution_options(**_FRESH)
         )
         return result.scalars().all()
+
+
+def _after_in_diary_order(
+    occurred_on: date | None, created_at: datetime, id_: UUID
+) -> ColumnElement[bool]:
+    """The rows strictly after ``(occurred_on, created_at, id)`` in diary order.
+
+    The order is ``occurred_on DESC NULLS LAST, created_at DESC, id DESC``, so with a dated cursor
+    the later rows are: an earlier date; the same date and an earlier ``(created_at, id)``; and
+    every undated row. With an undated cursor only undated rows follow, by ``(created_at, id)``.
+    """
+    column = StudioArtistMemory.occurred_on
+    older_in_day = tuple_(StudioArtistMemory.created_at, StudioArtistMemory.id) < tuple_(
+        literal(created_at), literal(id_)
+    )
+    if occurred_on is None:
+        return and_(column.is_(None), older_in_day)
+    return or_(column < occurred_on, and_(column == occurred_on, older_in_day), column.is_(None))
 
 
 @dataclass(frozen=True, slots=True)

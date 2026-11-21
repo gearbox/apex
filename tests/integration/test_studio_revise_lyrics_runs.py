@@ -406,11 +406,7 @@ class TestRunning:
             ),
         )
         await run_world.drive(
-            FakeLlm(
-                make_lyrics_revision(
-                    lines=[make_line_patch("s2", 1, f"{FOUR} la")]
-                )
-            )
+            FakeLlm(make_lyrics_revision(lines=[make_line_patch("s2", 1, f"{FOUR} la")]))
         )
         run = await run_world.run(write.run.id)
         # the user's own ten-syllable line (s1 line 2) is not the model's to judge

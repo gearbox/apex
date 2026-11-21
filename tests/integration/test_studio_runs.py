@@ -907,6 +907,7 @@ def _empty_sections_draft():  # type: ignore[no-untyped-def]
 
     return PlanDraft(
         refusal=None,
+        refusal_memories=[],
         title="Neon Rain",
         tempo_bpm=120,
         instrumental=False,
@@ -946,7 +947,7 @@ class TestTerminalOnce:
         run_id, user_id = await self._terminal_run(run_world, status)
         before = await run_world.run(run_id)
 
-        async with (run_world.factory() as session, session.begin()):
+        async with run_world.factory() as session, session.begin():
             runs = StudioRunRepository(session)
             assert await runs.set_stage(run_id, StudioRunStage.DRAFTING) is None
             assert await runs.cancel_queued(run_id, user_id=user_id, product_id=PRODUCT) is None

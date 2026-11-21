@@ -20,7 +20,7 @@ from __future__ import annotations
 
 import base64
 import json
-from datetime import datetime
+from datetime import date, datetime
 from typing import Generic, TypeVar
 from uuid import UUID
 
@@ -168,3 +168,58 @@ def decode_library_cursor(
         )
 
     return created_at, source, id_
+
+
+# ---------------------------------------------------------------------------
+# Artist-memory cursor encode / decode helpers
+# ---------------------------------------------------------------------------
+#
+# The memory list is in diary order (``occurred_on DESC NULLS LAST, created_at DESC, id DESC``),
+# so its keyset has a third component, the episode date, which may be null. The ``occurred_on``
+# key is always present (``null`` for an undated memory): that is what makes a cursor issued by
+# another endpoint - which has no such key - invalid here.
+
+
+def encode_memory_cursor(occurred_on: date | None, created_at: datetime, id: UUID) -> str:
+    """Encode the diary-order position of the last memory on a page.
+
+    Args:
+        occurred_on: The memory's fictional date, or ``None`` when it is undated.
+        created_at: When the memory was written.
+        id: The memory's primary key.
+
+    Returns:
+        URL-safe base64-encoded JSON token.
+    """
+    payload = {
+        "occurred_on": occurred_on.isoformat() if occurred_on is not None else None,
+        "created_at": created_at.isoformat(),
+        "id": str(id),
+    }
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def decode_memory_cursor(cursor: str) -> tuple[date | None, datetime, UUID]:
+    """Decode a memory-list cursor into ``(occurred_on, created_at, id)``.
+
+    Args:
+        cursor: Token returned by a previous memory-list ``CursorPage.next_cursor``.
+
+    Returns:
+        The keyset position; ``occurred_on`` is ``None`` for an undated memory.
+
+    Raises:
+        ValueError: The cursor is malformed, a key is missing (a cursor issued by another
+            endpoint has no ``occurred_on``), the date is bad, or ``created_at`` has no time zone.
+    """
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        raw_date = data["occurred_on"]
+        occurred_on = None if raw_date is None else date.fromisoformat(raw_date)
+        created_at = datetime.fromisoformat(data["created_at"])
+        id_ = UUID(data["id"])
+    except Exception as exc:
+        raise ValueError(f"Invalid pagination cursor: {exc}") from exc
+    if created_at.tzinfo is None:
+        raise ValueError("Invalid pagination cursor: created_at has no time zone")
+    return occurred_on, created_at, id_

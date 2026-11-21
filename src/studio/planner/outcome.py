@@ -13,13 +13,17 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from src.studio.planner.drafts import DraftRefusal
+from src.studio.planner.memories import memory_ids_for_keys
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
     from src.core.enums import StudioRunKind
     from src.studio.documents import LyricsDocument, PlanDocument
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.drafts import DraftRefusal
+    from src.studio.planner.context import MemorySnapshot
 
 __all__ = [
     "MAX_WARNINGS",
@@ -39,6 +43,7 @@ __all__ = [
     "cap_warnings",
     "kept_after_failed_round",
     "lead_with",
+    "refused",
 ]
 
 MAX_WARNINGS: Final = 100
@@ -117,9 +122,35 @@ class LyricsReady:
 
 @dataclass(frozen=True, slots=True)
 class RunRefused:
-    """The model declined, with its own reason."""
+    """The model declined, with its own reason.
+
+    ``memory_ids`` are the artist memories the model named as the cause of a ``content_policy``
+    refusal, in prompt order: best-effort (it may be empty, and an id may be gone by the time the
+    run is read). Built only for ``content_policy``; ``()`` for every other reason.
+    """
 
     reason: DraftRefusal
+    memory_ids: tuple[UUID, ...] = ()
+
+
+def refused(
+    reason: DraftRefusal, keys: Sequence[str], memories: Sequence[MemorySnapshot]
+) -> RunRefused:
+    """The refusal a draft stands for.
+
+    Args:
+        reason: The draft's ``refusal``.
+        keys: The draft's ``refusal_memories``: the ``m<n>`` keys the model named.
+        memories: The memories the run was shown, in prompt order (``context.memories``).
+
+    Returns:
+        A :class:`RunRefused`; for ``content_policy`` it carries the ids of the named memories
+        (unknown or malformed keys and repeats dropped), for any other reason it carries none, so
+        keys a model offers next to ``brief_unusable`` are ignored.
+    """
+    if reason is DraftRefusal.CONTENT_POLICY:
+        return RunRefused(reason, memory_ids_for_keys(keys, memories))
+    return RunRefused(reason)
 
 
 @dataclass(frozen=True, slots=True)

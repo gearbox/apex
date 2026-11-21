@@ -1,9 +1,11 @@
 """Migration 059: the ``studio_artist_memories`` table (invariant 18).
 
-The upgrade creates it with its CHECKs, its cascading FK and its two indexes; the downgrade drops
-exactly that; ``alembic check`` (no drift between the model and the migrations) is run on a fresh
-database in CI and by hand in the PR checklist. The migration never imports application code, so a
-later change to the model cannot rewrite what it did.
+The upgrade creates ``uq_studio_artists_id_owner`` and then the table with its own ``user_id`` /
+``product_id``, its CHECKs, its composite owner FK and its indexes; the downgrade drops the table
+**and then** the unique constraint. After ``downgrade 058 && upgrade head`` the models and the
+migrations do not drift (the ``alembic check`` of the PR checklist, run here through the same
+comparison). The migration never imports application code, so a later change to the model cannot
+rewrite what it did.
 """
 
 from __future__ import annotations
@@ -14,10 +16,13 @@ from typing import TYPE_CHECKING
 from uuid import uuid4
 
 import pytest
+from alembic.autogenerate import compare_metadata
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
+
+from src.db.models.base import Base
 
 if TYPE_CHECKING:
     from types import ModuleType
@@ -34,7 +39,14 @@ _CHECKS = {
     "ck_studio_artist_memories_status",
     "ck_studio_artist_memories_origin",
 }
-_INDEXES = {"ix_studio_artist_memories_list", "ix_studio_artist_memories_selection"}
+_INDEXES = {
+    "ix_studio_artist_memories_list",
+    "ix_studio_artist_memories_selection",
+    "ix_studio_artist_memories_product_id",
+    "ix_studio_artist_memories_user_id",
+}
+_OWNER_FK = "fk_studio_artist_memories_artist_owner"
+_OWNER_UNIQUE = "uq_studio_artists_id_owner"
 
 
 def _load() -> ModuleType:
@@ -78,38 +90,69 @@ async def _indexes(connection: AsyncConnection) -> set[str]:
     }
 
 
+async def _constraint_exists(connection: AsyncConnection, name: str) -> bool:
+    return (
+        await connection.execute(
+            text("SELECT EXISTS (SELECT 1 FROM pg_constraint WHERE conname = :name)"),
+            {"name": name},
+        )
+    ).scalar_one()
+
+
+async def _index_definition(connection: AsyncConnection, name: str) -> str:
+    return (
+        await connection.execute(
+            text("SELECT indexdef FROM pg_indexes WHERE indexname = :name"), {"name": name}
+        )
+    ).scalar_one()
+
+
 def test_revision_chain() -> None:
     migration = _load()
     assert migration.revision == "059"
     assert migration.down_revision == "058"
 
 
-async def test_the_table_has_the_checks_the_indexes_and_a_cascading_foreign_key(
+async def test_the_table_has_the_checks_the_indexes_and_the_cascading_foreign_keys(
     db_engine: AsyncEngine,
 ) -> None:
     async with db_engine.connect() as connection:
         assert await _exists(connection)
         assert await _checks(connection) == _CHECKS
         assert await _indexes(connection) == _INDEXES
-        on_delete = (
-            await connection.execute(
+        foreign_keys = {
+            row[0]: (row[1], row[2])
+            for row in await connection.execute(
                 text(
-                    "SELECT confdeltype::text FROM pg_constraint "
-                    "WHERE conrelid = to_regclass(:table) AND contype = 'f'"
+                    "SELECT conname, confdeltype::text, pg_get_constraintdef(oid) "
+                    "FROM pg_constraint WHERE conrelid = to_regclass(:table) AND contype = 'f'"
                 ),
                 {"table": _TABLE},
             )
-        ).scalar_one()
-        assert on_delete == "c"  # ON DELETE CASCADE: ownership is inherited through the artist
+        }
+        # two FKs, both ON DELETE CASCADE: the user, and the artist *with* the owner pair
+        assert {on_delete for on_delete, _ in foreign_keys.values()} == {"c"}
+        assert _OWNER_FK in foreign_keys
+        definition = foreign_keys[_OWNER_FK][1]
+        assert "FOREIGN KEY (artist_id, user_id, product_id)" in definition
+        assert "REFERENCES studio_artists(id, user_id, product_id)" in definition
+        assert await _constraint_exists(connection, _OWNER_UNIQUE)
         columns = await _scalars(
             connection,
             "SELECT column_name FROM information_schema.columns WHERE table_name = :table",
         )
-        # scoping is inherited through the artist (P2-M1): no user / product column of its own
         assert columns == {
-            "id", "artist_id", "title", "body", "occurred_on", "themes", "imagery",
-            "salience", "status", "origin", "created_at", "updated_at",
+            "id", "product_id", "user_id", "artist_id", "title", "body", "occurred_on", "themes",
+            "imagery", "salience", "status", "origin", "created_at", "updated_at",
         }  # fmt: skip
+
+
+async def test_the_list_index_is_in_diary_order(db_engine: AsyncEngine) -> None:
+    async with db_engine.connect() as connection:
+        definition = await _index_definition(connection, "ix_studio_artist_memories_list")
+    assert definition.endswith(
+        "(artist_id, status, occurred_on DESC NULLS LAST, created_at DESC, id DESC)"
+    )
 
 
 async def test_the_selection_index_is_partial_and_in_the_selection_order(
@@ -129,7 +172,7 @@ async def test_the_selection_index_is_partial_and_in_the_selection_order(
     assert "WHERE ((status)::text = 'active'::text)" in definition
 
 
-async def test_downgrade_drops_exactly_the_table_and_upgrade_restores_it(
+async def test_downgrade_drops_the_table_and_the_unique_constraint_and_upgrade_restores_them(
     db_engine: AsyncEngine,
 ) -> None:
     async with db_engine.connect() as connection:
@@ -137,11 +180,31 @@ async def test_downgrade_drops_exactly_the_table_and_upgrade_restores_it(
 
         await connection.run_sync(_run, "downgrade")
         assert not await _exists(connection)
+        assert not await _constraint_exists(connection, _OWNER_UNIQUE)
 
         await connection.run_sync(_run, "upgrade")
         assert await _exists(connection)
+        assert await _constraint_exists(connection, _OWNER_UNIQUE)
         assert await _checks(connection) == _CHECKS
         assert await _indexes(connection) == _INDEXES
+        await transaction.rollback()
+
+
+def _drift(connection: Connection) -> list[str]:
+    """What ``alembic check`` would report for the two tables this migration touches."""
+    diffs = compare_metadata(MigrationContext.configure(connection), Base.metadata)
+    flat = [str(item) for diff in diffs for item in (diff if isinstance(diff, list) else [diff])]
+    return [item for item in flat if "studio_artist" in item]
+
+
+async def test_after_downgrade_and_upgrade_the_models_and_the_migration_do_not_drift(
+    db_engine: AsyncEngine,
+) -> None:
+    async with db_engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(_run, "downgrade")
+        await connection.run_sync(_run, "upgrade")
+        assert await connection.run_sync(_drift) == []
         await transaction.rollback()
 
 
@@ -174,9 +237,10 @@ async def test_the_checks_hold_in_the_database(
         with pytest.raises(IntegrityError):
             await connection.execute(
                 text(
-                    "INSERT INTO studio_artist_memories (id, artist_id, title, body, salience, "
-                    "status, origin) VALUES (:id, :artist, 't', 'b', :salience, :status, :origin)"
+                    "INSERT INTO studio_artist_memories (id, user_id, product_id, artist_id, title, "
+                    "body, salience, status, origin) VALUES "
+                    "(:id, :user, 'vex', :artist, 't', 'b', :salience, :status, :origin)"
                 ),
-                {"id": uuid4(), "artist": artist_id, **values},
+                {"id": uuid4(), "user": user_id, "artist": artist_id, **values},
             )
         await transaction.rollback()

@@ -103,6 +103,7 @@ def test_issues_never_contain_plan_text() -> None:
 def test_an_empty_plan_is_valid() -> None:
     draft = PlanDraft(
         refusal=None,
+        refusal_memories=[],
         title="Only a title",
         tempo_bpm=None,
         instrumental=True,

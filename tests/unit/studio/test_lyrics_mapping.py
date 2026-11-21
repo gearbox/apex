@@ -468,7 +468,7 @@ def test_only_a_path_that_names_a_line_is_a_line_issue() -> None:
 
 def test_the_empty_draft_builds_an_empty_document_and_names_every_vocal_section() -> None:
     document, issues = lyrics_from_draft(
-        LyricsDraft(refusal=None, sections=[]), PLAN, language="en"
+        LyricsDraft(refusal=None, refusal_memories=[], sections=[]), PLAN, language="en"
     )
     assert document.sections == ()
     assert [i.path for i in issues] == ["sections[0]", "sections[1]", "sections[3]"]

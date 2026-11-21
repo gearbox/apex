@@ -65,7 +65,9 @@ def build_system_prompt(rating: ContentRating, memories: Sequence[MemorySnapshot
     """The system message for a product with ``rating``; the memory rule only when ``memories``."""
     kinds = ", ".join(kind.value for kind in StudioSectionKind)
     return _SYSTEM_TEMPLATE.format(
-        kinds=kinds, policy=policy_block(rating), memory_rule=memory_rule(memories)
+        kinds=kinds,
+        policy=policy_block(rating),
+        memory_rule=memory_rule(memories, request_block="brief"),
     )
 
 

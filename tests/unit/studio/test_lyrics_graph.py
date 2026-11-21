@@ -668,6 +668,7 @@ class _ChaosLlm:
             keys = ["s1", "s2", "s3", "s4", "s9"]
             return LyricsPatchDraft(
                 refusal=refusal,
+                refusal_memories=[],
                 lines=[
                     make_line_patch(
                         self._random.choice(keys), self._random.randint(0, 4), "la la la la"
@@ -681,7 +682,7 @@ class _ChaosLlm:
                 ["s1", "s2", "s3", "s4", "s9"], self._random.randint(0, 5)
             )
         ]
-        return LyricsDraft(refusal=refusal, sections=sections)
+        return LyricsDraft(refusal=refusal, refusal_memories=[], sections=sections)
 
 
 @settings(

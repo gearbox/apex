@@ -3,7 +3,7 @@
 The planner only knows the ``ArtistContextProvider`` port; this module is its adapter (the
 project's artist and concept, and the artist memories the run uses) and assembles the
 :class:`RunContextSnapshot` stored on a run when it starts. Everything read here is the owner's own
-data, scoped by user and product; a memory is scoped through its artist (P2-M1).
+data, scoped by user and product; a memory carries that scope on its own row.
 
 Which memories a run gets is decided here, at claim, from the rows as they are *now* (P2b-2): a pin
 that was archived or deleted since the run was accepted is skipped and reported, never an error.
@@ -100,7 +100,12 @@ class MemoryArtistContextProvider:
         repo = StudioArtistMemoryRepository(session)
         active = {
             memory.id: memory
-            for memory in await repo.get_many_owned(request.memory_ids, artist_id=artist_id)
+            for memory in await repo.get_many_owned(
+                request.memory_ids,
+                artist_id=artist_id,
+                user_id=request.user_id,
+                product_id=request.product_id,
+            )
             if memory.status == StudioMemoryStatus.ACTIVE.value
         }
         pinned = tuple(memory_snapshot(active[i]) for i in request.memory_ids if i in active)
@@ -110,6 +115,8 @@ class MemoryArtistContextProvider:
                 memory_snapshot(memory)
                 for memory in await repo.active_in_selection_order(
                     artist_id,
+                    user_id=request.user_id,
+                    product_id=request.product_id,
                     exclude=request.memory_ids,
                     limit=MAX_ACTIVE_MEMORIES_PER_ARTIST,
                 )

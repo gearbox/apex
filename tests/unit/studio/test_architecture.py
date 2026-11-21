@@ -733,5 +733,6 @@ def test_the_memory_lock_order_is_documented_where_the_locks_are_taken() -> None
     section = repo[
         repo.index("class StudioArtistMemoryRepository") : repo.index("class ProjectListRow")
     ]
-    assert "StudioArtist.id" in section  # the ownership join only
+    assert "StudioArtist." not in section  # no artist join: the memory row carries its scope
+    assert "_owned_by" not in section
     assert "with_for_update(of=StudioArtistMemory)" in section

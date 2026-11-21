@@ -73,7 +73,9 @@ If the instruction asks for something these rules forbid, set "refusal" to "cont
 
 def build_system_prompt(rating: ContentRating, memories: Sequence[MemorySnapshot] = ()) -> str:
     """The system message for a product with ``rating``; the memory rule only when ``memories``."""
-    return _SYSTEM_TEMPLATE.format(policy=policy_block(rating), memory_rule=memory_rule(memories))
+    return _SYSTEM_TEMPLATE.format(
+        policy=policy_block(rating), memory_rule=memory_rule(memories, request_block="instruction")
+    )
 
 
 def build_revise_messages(

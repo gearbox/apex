@@ -1,7 +1,8 @@
 """Why a run failed: the one place errors and outcomes become a run's ``error_code``.
 
-Pure. A failure carries a stable code and, at most, structured detail made of **paths, codes and
-numbers** - never model output or user text (the contract promises it, ``RunOut`` serves it).
+Pure. A failure carries a stable code and, at most, structured detail made of **paths, codes,
+numbers and ids** - never model output or user text (the contract promises it, ``RunOut`` serves
+it). The ids are the artist memories a ``content_policy`` refusal named.
 """
 
 from __future__ import annotations
@@ -107,7 +108,11 @@ def failure_of_outcome(outcome: RunOutcome) -> RunFailure | None:
             return None
         case RunRefused(reason=DraftRefusal.BRIEF_UNUSABLE):
             return RunFailure(ERR_BRIEF_UNUSABLE)
-        case RunRefused():
-            return RunFailure(ERR_CONTENT_POLICY)
+        case RunRefused(memory_ids=ids):
+            # Ids only, never text: the memories the model named, in prompt order (best-effort).
+            detail: dict[str, object] | None = (
+                {"memory_ids": [str(i) for i in ids]} if ids else None
+            )
+            return RunFailure(ERR_CONTENT_POLICY, detail)
         case RunRejected(issues=issues, kind=kind):
             return RunFailure(_INVALID_CODE[kind], _issues_detail(issues))

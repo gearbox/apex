@@ -1,7 +1,7 @@
 """Studio artist memories - episodes of an artist's fictional life (``/v1/studio``).
 
 Endpoints:
-  GET    /v1/studio/artists/{artist_id}/memories   - paginated list (newest first; ``?status=``)
+  GET    /v1/studio/artists/{artist_id}/memories   - paginated list (diary order; ``?status=``)
   POST   /v1/studio/artists/{artist_id}/memories   - create (201)
   GET    /v1/studio/memories/{memory_id}           - detail
   PATCH  /v1/studio/memories/{memory_id}           - tri-state update (also archive / un-archive)
@@ -69,7 +69,10 @@ class StudioMemoryController(Controller):
         limit: Annotated[int, Parameter(ge=1, le=50)] = 30,
         cursor: str | None = None,
     ) -> CursorPage[MemoryOut]:
-        """Paginated memories of one artist, newest first; ``status`` defaults to ``active``."""
+        """Paginated memories of one artist in diary order; ``status`` defaults to ``active``.
+
+        Diary order: by ``occurred_on`` (undated last), then newest written first.
+        """
         return await studio_memory_service.list_page(
             artist_id, current_user_id, product_id, status=status, limit=limit, cursor=cursor
         )

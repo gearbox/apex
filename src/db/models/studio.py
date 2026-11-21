@@ -2,7 +2,7 @@
 
 Graph::
 
-    users ─┬─< studio_artists ─< studio_artist_memories   (CASCADE; scoped through the artist)
+    users ─┬─< studio_artists ─< studio_artist_memories   (CASCADE; composite FK keeps owner = artist's owner)
            ├─< library_projects ─1:1─ studio_project_profiles >── artist (NO ACTION)
            │                                   │ NO ACTION
            │                                   └─< studio_tracks ─< studio_document_versions
@@ -150,6 +150,10 @@ class StudioArtist(Base):
             unique=True,
         ),
         Index("ix_studio_artists_owner_created", "user_id", "product_id", "created_at", "id"),
+        # The target of ``fk_studio_artist_memories_artist_owner`` (and of any later per-artist
+        # table that must carry the artist's owner): ``id`` alone is already unique, the
+        # constraint exists because a composite FK needs a unique key over exactly its columns.
+        UniqueConstraint("id", "user_id", "product_id", name="uq_studio_artists_id_owner"),
     )
 
     def __repr__(self) -> str:
@@ -159,26 +163,35 @@ class StudioArtist(Base):
 class StudioArtistMemory(Base):
     """One episode of an artist's (fictional) life, used by planner runs as inspiration (P2b).
 
-    Mutable, like the artist it belongs to. It carries **no** ``user_id`` / ``product_id`` of its
-    own: ownership and product scoping are inherited through ``artist_id`` (P2-M1), so every
-    repository read joins the artist, and ``users → studio_artists → memories`` cascades on a user
-    hard-delete. Planner runs copy the text they use into their snapshot (P2-M4), so editing or
-    deleting a memory never changes a run that has started. Lock order: artist, then memory.
+    Mutable, like the artist it belongs to. It carries its own ``user_id`` / ``product_id`` like
+    every other studio table, so every repository query scopes the row itself (a caller that passes
+    an unchecked ``artist_id`` reads nothing of another tenant's). The composite FK
+    ``(artist_id, user_id, product_id) -> studio_artists (id, user_id, product_id)`` makes a memory
+    whose owner differs from its artist's owner unrepresentable. A user hard-delete reaches a
+    memory by two cascade paths (``users -> memories`` and ``users -> artists -> memories``);
+    both delete the same row. Planner runs copy the text they use into their snapshot (P2-M4), so
+    editing or deleting a memory never changes a run that has started. Lock order: artist, then
+    memory.
     """
 
     __tablename__ = "studio_artist_memories"
 
     id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
-    artist_id: Mapped[UUID] = mapped_column(
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
+    user_id: Mapped[UUID] = mapped_column(
         PG_UUID(as_uuid=True),
-        ForeignKey("studio_artists.id", ondelete="CASCADE"),
+        ForeignKey("users.id", ondelete="CASCADE"),
         nullable=False,
+        index=True,
     )
+    artist_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    """The FK is composite (see ``__table_args__``): it also pins ``user_id`` / ``product_id``."""
     title: Mapped[str] = mapped_column(String(MEMORY_TITLE_MAX), nullable=False)
     body: Mapped[str] = mapped_column(Text, nullable=False)
     """At most ``MEMORY_BODY_MAX`` characters, enforced by the service (the column is ``text``)."""
     occurred_on: Mapped[date | None] = mapped_column(Date, nullable=True)
-    """A fictional date. Used for ordering and display only."""
+    """A fictional date. The diary order (``GET .../memories``) and the selection order use it."""
     themes: Mapped[list[str]] = mapped_column(
         ARRAY(String(MEMORY_THEME_MAX)), nullable=False, server_default=text("'{}'")
     )
@@ -197,6 +210,13 @@ class StudioArtistMemory(Base):
     updated_at: Mapped[datetime] = _updated_at()
 
     __table_args__ = (
+        # The memory's owner and product ARE its artist's: a mismatch is unrepresentable.
+        ForeignKeyConstraint(
+            ["artist_id", "user_id", "product_id"],
+            ["studio_artists.id", "studio_artists.user_id", "studio_artists.product_id"],
+            name="fk_studio_artist_memories_artist_owner",
+            ondelete="CASCADE",
+        ),
         CheckConstraint("salience BETWEEN 1 AND 5", name="ck_studio_artist_memories_salience"),
         CheckConstraint(
             _in_list("status", StudioMemoryStatus), name="ck_studio_artist_memories_status"
@@ -204,10 +224,12 @@ class StudioArtistMemory(Base):
         CheckConstraint(
             _in_list("origin", StudioMemoryOrigin), name="ck_studio_artist_memories_origin"
         ),
-        # The list: newest first, per artist.
+        # The list, in diary order (D18): the episode date (undated last), then newest written.
         Index(
             "ix_studio_artist_memories_list",
             "artist_id",
+            "status",
+            text("occurred_on DESC NULLS LAST"),
             text("created_at DESC"),
             text("id DESC"),
         ),

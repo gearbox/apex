@@ -292,7 +292,10 @@ async def check_memory_pins(
     owned = {
         memory.id: memory
         for memory in await StudioArtistMemoryRepository(context.session).get_many_owned(
-            memory_ids, artist_id=profile.artist_id
+            memory_ids,
+            artist_id=profile.artist_id,
+            user_id=context.user_id,
+            product_id=context.product_id,
         )
     }
     issues: list[DocumentIssue] = []
