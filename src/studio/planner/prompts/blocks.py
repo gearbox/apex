@@ -11,9 +11,9 @@ from __future__ import annotations
 from typing import TYPE_CHECKING, Final
 
 if TYPE_CHECKING:
-    from src.studio.planner.context import ArtistSnapshot
+    from src.studio.planner.context import ArtistSnapshot, PlanSummary
 
-__all__ = ["REASK_MESSAGE", "artist_lines", "block", "clean"]
+__all__ = ["REASK_MESSAGE", "artist_lines", "block", "clean", "plan_lines"]
 
 REASK_MESSAGE: Final = (
     "Your reply was not valid for the schema. "
@@ -47,4 +47,22 @@ def artist_lines(artist: ArtistSnapshot) -> str:
         lines.append(
             "aesthetic references: " + ", ".join(clean(ref) for ref in artist.aesthetic_references)
         )
+    return "\n".join(lines)
+
+
+def plan_lines(plan: PlanSummary) -> str:
+    """The track's current plan, compactly: enough to plan around, not to copy."""
+    lines = [f"title: {clean(plan.title)}"]
+    if plan.tempo_bpm is not None:
+        lines.append(f"tempo: {plan.tempo_bpm}")
+    if plan.instrumental:
+        lines.append("instrumental: yes")
+    if plan.tags:
+        lines.append("tags: " + ", ".join(clean(tag) for tag in plan.tags))
+    if plan.avoid:
+        lines.append("avoid: " + ", ".join(clean(tag) for tag in plan.avoid))
+    for index, section in enumerate(plan.sections, start=1):
+        label = f" ({clean(section.label)})" if section.label else ""
+        flag = " [instrumental]" if section.instrumental else ""
+        lines.append(f"section {index}: {section.kind.value}{label}{flag}")
     return "\n".join(lines)

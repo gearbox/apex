@@ -26,6 +26,14 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "MAX_ACTIVE_MEMORIES_PER_ARTIST",
+    "MEMORY_BODY_MAX",
+    "MEMORY_CONTEXT_BUDGET",
+    "MEMORY_IMAGERY_MAX",
+    "MEMORY_IMAGE_MAX",
+    "MEMORY_THEMES_MAX",
+    "MEMORY_THEME_MAX",
+    "MEMORY_TITLE_MAX",
     "OUT_OF_RANGE",
     "TOO_LONG",
     "TOO_MANY",
@@ -42,6 +50,23 @@ TOO_MANY: Final = "too_many_items"
 
 OUT_OF_RANGE: Final = "out_of_range"
 """Issue code: an integer is outside its declared ``ge`` / ``le`` / ``gt`` / ``lt`` bounds."""
+
+MEMORY_TITLE_MAX: Final = 120
+"""Characters in an artist memory's title (a single line)."""
+MEMORY_BODY_MAX: Final = 2_000
+"""Characters in an artist memory's body."""
+MEMORY_THEMES_MAX: Final = 12
+"""Themes per memory."""
+MEMORY_THEME_MAX: Final = 60
+"""Characters in one theme."""
+MEMORY_IMAGERY_MAX: Final = 20
+"""Imagery items per memory."""
+MEMORY_IMAGE_MAX: Final = 120
+"""Characters in one imagery item."""
+MAX_ACTIVE_MEMORIES_PER_ARTIST: Final = 200
+"""Active memories one artist can hold (``409 memory_limit_reached``)."""
+MEMORY_CONTEXT_BUDGET: Final = 12_000
+"""Characters of artist memories one run may send to the model, as rendered into the prompt."""
 
 type _Check = Literal["length", "count", "range"]
 

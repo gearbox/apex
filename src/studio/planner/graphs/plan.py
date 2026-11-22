@@ -33,8 +33,9 @@ from src.studio.planner.outcome import (
     PlanRun,
     RunRefused,
     RunRejected,
+    refused,
 )
-from src.studio.planner.prompts.plan_v1 import (
+from src.studio.planner.prompts.plan_v2 import (
     build_plan_messages,
     build_plan_revision_messages,
 )
@@ -156,7 +157,8 @@ async def _validate(state: PlanState, runtime: Runtime[PlanDeps]) -> dict[str, A
     if draft is None:
         raise PlannerStateError("validate ran before draft")
     if draft.refusal is not None:
-        return {"issues": (), "outcome": RunRefused(draft.refusal)}
+        refusal = refused(draft.refusal, draft.refusal_memories, state["context"].memories)
+        return {"issues": (), "outcome": refusal}
     plan, plan_issues = validate_plan(plan_from_draft(draft, brief=state["request"].brief))
     issues = (*draft_key_issues(draft), *plan_issues)
     if plan is not None and not issues:

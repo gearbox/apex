@@ -128,6 +128,7 @@ from src.llm.registry import LlmModelRegistry
 from src.studio.services.artist import ArtistService
 from src.studio.services.export import ExportService
 from src.studio.services.importer import SunoImportService
+from src.studio.services.memory import MemoryService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
 from src.studio.services.run import StudioRunService
@@ -786,6 +787,11 @@ def get_studio_artist_service(session: AsyncSession) -> ArtistService:
     return ArtistService(session)
 
 
+def get_studio_memory_service(session: AsyncSession) -> MemoryService:
+    """Provide the studio MemoryService per-request."""
+    return MemoryService(session)
+
+
 def get_studio_project_service(session: AsyncSession) -> StudioProjectService:
     """Provide the StudioProjectService per-request."""
     return StudioProjectService(session)
@@ -999,7 +1005,7 @@ async def _start_studio_run_worker(
     """
     from src.core.redis import get_operational_redis_client
     from src.llm.factory import LlmClientFactory
-    from src.studio.services.run_context import ProfileArtistContextProvider
+    from src.studio.services.run_context import MemoryArtistContextProvider
     from src.studio.services.run_executor import StudioRunExecutor
     from src.studio.services.run_kinds.registry import default_handlers
 
@@ -1010,7 +1016,7 @@ async def _start_studio_run_worker(
         billing=get_billing_service(),
         registry=registry,
         llm_factory=LlmClientFactory(registry, http_client),
-        context_provider=ProfileArtistContextProvider(),
+        context_provider=MemoryArtistContextProvider(),
         events=StudioRunEvents(_services.event_bus),
         settings=settings,
         handlers=default_handlers(),
@@ -2179,6 +2185,7 @@ dependencies = {
     "library_tag_service": Provide(get_library_tag_service, sync_to_thread=False),
     # Media Project Studio (request-scoped; gated by studio_feature_guard on the controllers)
     "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
+    "studio_memory_service": Provide(get_studio_memory_service, sync_to_thread=False),
     "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
     "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
     "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),

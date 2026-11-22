@@ -1001,6 +1001,20 @@ class StudioExportTarget(StrEnum):
     SUNO = "suno"
 
 
+class StudioMemoryStatus(StrEnum):
+    """Whether an artist memory is offered to planner runs (``archived`` is kept but never used)."""
+
+    ACTIVE = "active"
+    ARCHIVED = "archived"
+
+
+class StudioMemoryOrigin(StrEnum):
+    """Who wrote an artist memory. ``chat`` is declared now so the CHECK needs no later migration."""
+
+    USER = "user"
+    CHAT = "chat"  # written through the artist chat (P2c); the memory API only ever writes ``user``
+
+
 class StudioRunKind(StrEnum):
     """What a planner run produces. Declared in full so the CHECK needs no later migration."""
 

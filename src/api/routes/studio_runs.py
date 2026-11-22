@@ -57,8 +57,9 @@ _ERRORS = {
         data_container=ErrorEnvelope,
         description=(
             "document_invalid (the body, or an input that cannot be used: no vocal section, no "
-            "language, lyrics that are not valid today, a target that does not fit) or "
-            "memories_not_available."
+            "language, lyrics that are not valid today, a target that does not fit, or a pinned "
+            "memory in memory_ids that is unknown, archived, repeated, over the budget, or the "
+            "project has no artist)."
         ),
     ),
     429: ResponseSpec(data_container=ErrorEnvelope, description="run_rate_limited."),

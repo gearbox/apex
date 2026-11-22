@@ -13,16 +13,21 @@ from __future__ import annotations
 from dataclasses import dataclass
 from typing import TYPE_CHECKING, Final
 
+from src.studio.planner.drafts import DraftRefusal
+from src.studio.planner.memories import memory_ids_for_keys
+
 if TYPE_CHECKING:
     from collections.abc import Sequence
+    from uuid import UUID
 
     from src.core.enums import StudioRunKind
     from src.studio.documents import LyricsDocument, PlanDocument
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.drafts import DraftRefusal
+    from src.studio.planner.context import MemorySnapshot
 
 __all__ = [
     "MAX_WARNINGS",
+    "PINNED_MEMORY_UNAVAILABLE",
     "REVISION_INCOMPLETE",
     "WARNINGS_TRUNCATED",
     "LyricsOutcome",
@@ -37,6 +42,8 @@ __all__ = [
     "RunWarning",
     "cap_warnings",
     "kept_after_failed_round",
+    "lead_with",
+    "refused",
 ]
 
 MAX_WARNINGS: Final = 100
@@ -45,6 +52,9 @@ WARNINGS_TRUNCATED: Final = "warnings_truncated"
 """Last warning of a list that had to be cut at :data:`MAX_WARNINGS`."""
 REVISION_INCOMPLETE: Final = "revision_incomplete"
 """Run warning: a later fix round failed, so the run kept its best valid result."""
+PINNED_MEMORY_UNAVAILABLE: Final = "pinned_memory_unavailable"
+"""Run warning: pinned artist memories were archived, deleted or too large by the time the run
+started, so they were left out (``count`` = how many)."""
 
 
 @dataclass(frozen=True, slots=True)
@@ -76,6 +86,21 @@ def cap_warnings(warnings: Sequence[RunWarning], *, limit: int = MAX_WARNINGS) -
     return [*warnings[: limit - 1], RunWarning(WARNINGS_TRUNCATED)]
 
 
+def lead_with(warning: RunWarning, warnings: Sequence[RunWarning]) -> list[RunWarning]:
+    """``warning`` first, then ``warnings``, still within :data:`MAX_WARNINGS`.
+
+    A list that is already full gives up an entry to make room - never ``warning`` (it is first),
+    and never the marker a full list ends with (``warnings_truncated`` / ``revision_incomplete``:
+    the closing entry stays last). Where nothing marks the cut, ``warnings_truncated`` does.
+    """
+    if len(warnings) < MAX_WARNINGS:
+        return [warning, *warnings]
+    *body, last = warnings
+    if last.code in (WARNINGS_TRUNCATED, REVISION_INCOMPLETE):
+        return [warning, *body[:-1], last]
+    return cap_warnings([warning, *warnings])
+
+
 @dataclass(frozen=True, slots=True)
 class PlanReady:
     """The model's draft became a valid plan."""
@@ -97,9 +122,35 @@ class LyricsReady:
 
 @dataclass(frozen=True, slots=True)
 class RunRefused:
-    """The model declined, with its own reason."""
+    """The model declined, with its own reason.
+
+    ``memory_ids`` are the artist memories the model named as the cause of a ``content_policy``
+    refusal, in prompt order: best-effort (it may be empty, and an id may be gone by the time the
+    run is read). Built only for ``content_policy``; ``()`` for every other reason.
+    """
 
     reason: DraftRefusal
+    memory_ids: tuple[UUID, ...] = ()
+
+
+def refused(
+    reason: DraftRefusal, keys: Sequence[str], memories: Sequence[MemorySnapshot]
+) -> RunRefused:
+    """The refusal a draft stands for.
+
+    Args:
+        reason: The draft's ``refusal``.
+        keys: The draft's ``refusal_memories``: the ``m<n>`` keys the model named.
+        memories: The memories the run was shown, in prompt order (``context.memories``).
+
+    Returns:
+        A :class:`RunRefused`; for ``content_policy`` it carries the ids of the named memories
+        (unknown or malformed keys and repeats dropped), for any other reason it carries none, so
+        keys a model offers next to ``brief_unusable`` are ignored.
+    """
+    if reason is DraftRefusal.CONTENT_POLICY:
+        return RunRefused(reason, memory_ids_for_keys(keys, memories))
+    return RunRefused(reason)
 
 
 @dataclass(frozen=True, slots=True)

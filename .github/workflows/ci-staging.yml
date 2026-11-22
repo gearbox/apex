@@ -66,10 +66,10 @@ jobs:
         run: uv sync --frozen --extra dev  # Include dev extras (ruff, mypy, pytest-cov)
 
       - name: Run ruff linter
-        run: uv run ruff check src/
+        run: uv run ruff check .
 
       - name: Run ruff formatter check
-        run: uv run ruff format --check src/
+        run: uv run ruff format --check .
 
       - name: Run mypy type checker
         run: uv run mypy src/ --ignore-missing-imports --strict

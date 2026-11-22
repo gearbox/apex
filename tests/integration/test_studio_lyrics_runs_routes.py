@@ -217,10 +217,10 @@ class TestLyrics:
             ),
             (instrumental, {"kind": "lyrics", "language": "en"}, 422, "document_invalid"),
             (
-                empty,
-                {"kind": "lyrics", "memory_ids": [str(uuid4())]},
+                track_id,
+                {"kind": "lyrics", "language": "en", "memory_ids": [str(uuid4())]},
                 422,
-                "memories_not_available",
+                "document_invalid",  # memory_ids / no_artist: the project has no artist
             ),
         ]
         for index, (target, body, status, error) in enumerate(cases):
@@ -366,7 +366,7 @@ class TestRevise:
                 track_id,
                 {**_revise(sections=[str(S2)]), "memory_ids": [str(uuid4())]},
                 422,
-                "memories_not_available",
+                "document_invalid",  # memory_ids / no_artist: the project has no artist
             ),
         ]
         for index, (target, body, status, error) in enumerate(cases):

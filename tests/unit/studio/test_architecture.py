@@ -100,7 +100,7 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 4
+    assert len(controllers) == 5
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth
@@ -448,6 +448,7 @@ NO_ASSERT_GLOBS = (
     "llm/**/*.py",
     "studio/planner/**/*.py",
     "studio/services/run*.py",
+    "studio/services/memory*.py",
     "studio/services/run_kinds/*.py",
     "studio/run_*.py",
     "workers/studio_run.py",
@@ -615,8 +616,8 @@ def test_the_migration_is_058_after_057() -> None:
     assert re.search(r'down_revision: str \| Sequence\[str\] \| None = "057"', text)
 
 
-def test_the_snapshot_is_version_2() -> None:
-    assert re.search(r"snapshot_version: Literal\[2\]", (PLANNER / "context.py").read_text())
+def test_the_snapshot_is_version_3() -> None:
+    assert re.search(r"snapshot_version: Literal\[3\]", (PLANNER / "context.py").read_text())
 
 
 def test_the_syllable_counters_have_one_home() -> None:
@@ -642,3 +643,96 @@ def test_the_version_in_use_guard_is_in_the_errors_the_service_and_the_contract(
     assert "version_in_use_by_run" in (SRC / "studio/errors.py").read_text()
     assert "VersionInUseByRun" in (SRC / "studio/services/version.py").read_text()
     assert "version_in_use_by_run" in (ROOT / "docs/contracts/studio-contract.md").read_text()
+
+
+# -- S1-P2b: artist memories ----------------------------------------------------------------------
+
+
+def test_the_memories_module_is_pure_and_the_selection_has_one_home() -> None:
+    """Rendering and selecting import no database, API or LLM-adapter module (invariant: pure)."""
+    for module in _imported_modules(PLANNER / "memories.py"):
+        assert module.split(".")[0] not in {"langgraph", "sqlalchemy", "httpx"}, module
+        assert not module.startswith(("src.api", "src.db", "src.llm")), module
+    text = (PLANNER / "memories.py").read_text()
+    for name in ("select_memories", "render_memory", "rendered_size"):
+        assert len(re.findall(rf"^def {name}\b", text, flags=re.MULTILINE)) == 1, name
+    others = [
+        str(path.relative_to(SRC))
+        for path in SRC.rglob("*.py")
+        if path.name != "memories.py"
+        and re.search(r"def (select_memories|render_memory)\b", path.read_text())
+    ]
+    assert others == []
+
+
+def test_nothing_under_the_renderers_knows_a_memory() -> None:
+    """Memories are planner-only (P2-M6): no renderer imports or names a memory type."""
+    for path in (SRC / "studio/renderers").rglob("*.py"):
+        text = path.read_text()
+        assert not re.search(r"(?i)memor", text), path
+        assert not {m for m in _imported_modules(path) if m.startswith("src.studio.planner")}, path
+
+
+def test_the_memory_limits_are_defined_once_in_constraints() -> None:
+    constants = (
+        "MEMORY_TITLE_MAX",
+        "MEMORY_BODY_MAX",
+        "MEMORY_THEMES_MAX",
+        "MEMORY_THEME_MAX",
+        "MEMORY_IMAGERY_MAX",
+        "MEMORY_IMAGE_MAX",
+        "MAX_ACTIVE_MEMORIES_PER_ARTIST",
+        "MEMORY_CONTEXT_BUDGET",
+    )
+    for name in constants:
+        definers = [
+            str(path.relative_to(SRC))
+            for path in SRC.rglob("*.py")
+            if re.search(rf"^{name}\b\s*[:=]", path.read_text(), flags=re.MULTILINE)
+        ]
+        assert definers == ["studio/constraints.py"], (name, definers)
+    assert "MEMORY_CONTEXT_BUDGET" in (SRC / "studio/services/run_kinds/intake.py").read_text()
+    assert "MEMORY_CONTEXT_BUDGET" in (PLANNER / "memories.py").read_text()
+
+
+def test_memories_not_available_is_gone() -> None:
+    for path in [*SRC.rglob("*.py"), ROOT / "docs/contracts/studio-contract.md"]:
+        assert not re.search(r"MemoriesNotAvailable|memories_not_available", path.read_text()), path
+
+
+def test_the_migration_is_059_after_058() -> None:
+    text = (ROOT / "alembic/versions/059_studio_artist_memories.py").read_text()
+    assert 'revision: str = "059"' in text
+    assert re.search(r'down_revision: str \| Sequence\[str\] \| None = "058"', text)
+    assert not re.search(r"^\s*(from|import)\s+src\b", text, flags=re.MULTILINE)
+
+
+def test_the_prompt_versions_are_v2() -> None:
+    expected = {
+        "plan_v2.py": "plan-v2",
+        "lyrics_v2.py": "lyrics-v2",
+        "revise_lyrics_v2.py": "revise-lyrics-v2",
+    }
+    for name, version in expected.items():
+        text = (PLANNER / "prompts" / name).read_text()
+        assert f'PROMPT_VERSION: Final = "{version}"' in text, name
+    for path in (SRC / "studio/services/run_kinds").glob("*.py"):
+        assert not re.search(r"prompts\.\w+_v1\b", path.read_text()), path
+    for path in (PLANNER / "graphs").glob("*.py"):
+        assert not re.search(r"prompts\.\w+_v1\b", path.read_text()), path
+
+
+def test_the_memory_lock_order_is_documented_where_the_locks_are_taken() -> None:
+    service = (SRC / "studio/services/memory.py").read_text()
+    assert "artist, then memory" in service
+    # the PATCH locks the artist before the memory, in that order in the source as well
+    patch = service[service.index("async def patch") :]
+    assert patch.index("self._artists.lock") < patch.index("self._memories.lock")
+    # the memory repository never locks an artist (that would invert the order)
+    repo = (SRC / "db/repositories/studio.py").read_text()
+    section = repo[
+        repo.index("class StudioArtistMemoryRepository") : repo.index("class ProjectListRow")
+    ]
+    assert "StudioArtist." not in section  # no artist join: the memory row carries its scope
+    assert "_owned_by" not in section
+    assert "with_for_update(of=StudioArtistMemory)" in section

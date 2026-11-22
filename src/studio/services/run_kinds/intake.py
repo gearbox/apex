@@ -15,13 +15,15 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Protocol
 from uuid import UUID  # noqa: TC003 - runtime: dataclass annotations
 
-from src.core.enums import StudioDocumentKind, StudioRunKind
+from src.core.enums import StudioDocumentKind, StudioMemoryStatus, StudioRunKind
 from src.db.repositories.studio import (
+    StudioArtistMemoryRepository,
     StudioArtistRepository,
     StudioDocumentVersionRepository,
     StudioProjectRepository,
     StudioTrackRepository,
 )
+from src.studio.constraints import MEMORY_CONTEXT_BUDGET
 from src.studio.errors import (
     DocumentIssue,
     LyricsRequired,
@@ -31,6 +33,7 @@ from src.studio.errors import (
     StudioDocumentInvalid,
     StudioNotFound,
 )
+from src.studio.planner.memories import rendered_size
 from src.studio.run_requests import (
     LyricsRunRequest,
     PlanRunRequest,
@@ -39,16 +42,19 @@ from src.studio.run_requests import (
     RunRequest,
     normalize_run_request,
 )
-from src.studio.services.mappers import decode_lyrics, decode_plan
+from src.studio.services.mappers import decode_lyrics, decode_plan, memory_snapshot
 from src.studio.validation import is_instrumental, normalize_lyrics
 
 if TYPE_CHECKING:
+    from collections.abc import Sequence
+
     from sqlalchemy.ext.asyncio import AsyncSession
 
     from src.db.models.studio import StudioDocumentVersion, StudioTrack
     from src.studio.documents import LyricsDocument, PlanDocument
+    from src.studio.planner.context import MemorySnapshot
 
-__all__ = ["IntakeContext", "RunIntake", "intake_for"]
+__all__ = ["IntakeContext", "RunIntake", "check_memory_pins", "intake_for"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -191,9 +197,11 @@ def _target_issues(
             issues.append(DocumentIssue(path, "unknown_section"))
         elif plan.instrumental or is_instrumental(section):
             issues.append(DocumentIssue(path, "instrumental_section"))
-    for index, target in enumerate(request.targets.lines):
-        if target.line >= sizes.get(target.section_id, 0):
-            issues.append(DocumentIssue(f"targets.lines[{index}]", "line_out_of_range"))
+    issues.extend(
+        DocumentIssue(f"targets.lines[{index}]", "line_out_of_range")
+        for index, target in enumerate(request.targets.lines)
+        if target.line >= sizes.get(target.section_id, 0)
+    )
     return issues
 
 
@@ -233,8 +241,7 @@ class ReviseLyricsIntake:
             normalize_lyrics(lyrics, plan)
         except StudioDocumentInvalid as exc:
             raise StudioDocumentInvalid(_prefixed(exc.issues, "lyrics")) from None
-        issues = _target_issues(request, plan, lyrics)
-        if issues:
+        if issues := _target_issues(request, plan, lyrics):
             raise StudioDocumentInvalid(tuple(issues))
         return RunInputs(
             plan_version_id=plan_row.id,
@@ -253,3 +260,60 @@ _INTAKES: dict[type, RunIntake] = {
 def intake_for(request: RunRequest) -> RunIntake:
     """The intake of ``request``'s kind."""
     return _INTAKES[type(request)]
+
+
+async def check_memory_pins(
+    context: IntakeContext, library_project_id: UUID, memory_ids: Sequence[UUID]
+) -> None:
+    """Refuse a run whose pinned memories cannot ground it (P2b-1). Every kind; reads only.
+
+    Each pin must be an **active** memory of the track's project artist, named once, and the pins
+    together must fit the memory budget as the prompt will render them - nothing is truncated. An
+    unknown id and another artist's (or user's, or product's) memory give the **same**
+    ``memory_not_found``, so ownership is not probed. Every problem is reported at once.
+
+    Args:
+        context: Whose track the run is for, and the request transaction.
+        library_project_id: The track's project: its artist owns the memories.
+        memory_ids: The request's ``memory_ids``, in request order.
+
+    Raises:
+        StudioDocumentInvalid: ``memory_ids`` / ``no_artist`` (the project has no artist), or
+            ``memory_ids[i]`` / ``memory_not_found`` | ``memory_archived`` | ``duplicate_memory``,
+            or ``memory_ids`` / ``memories_over_budget``.
+    """
+    if not memory_ids:
+        return
+    profile = await StudioProjectRepository(context.session).get(
+        library_project_id, user_id=context.user_id, product_id=context.product_id
+    )
+    if profile is None or profile.artist_id is None:
+        raise StudioDocumentInvalid((DocumentIssue("memory_ids", "no_artist"),))
+    owned = {
+        memory.id: memory
+        for memory in await StudioArtistMemoryRepository(context.session).get_many_owned(
+            memory_ids,
+            artist_id=profile.artist_id,
+            user_id=context.user_id,
+            product_id=context.product_id,
+        )
+    }
+    issues: list[DocumentIssue] = []
+    seen: set[UUID] = set()
+    pinned: list[MemorySnapshot] = []
+    for index, memory_id in enumerate(memory_ids):
+        path = f"memory_ids[{index}]"
+        memory = owned.get(memory_id)
+        if memory is None:
+            issues.append(DocumentIssue(path, "memory_not_found"))
+        elif memory_id in seen:
+            issues.append(DocumentIssue(path, "duplicate_memory"))
+        elif memory.status != StudioMemoryStatus.ACTIVE.value:
+            issues.append(DocumentIssue(path, "memory_archived"))
+        else:
+            pinned.append(memory_snapshot(memory))
+        seen.add(memory_id)
+    if rendered_size(pinned) > MEMORY_CONTEXT_BUDGET:
+        issues.append(DocumentIssue("memory_ids", "memories_over_budget"))
+    if issues:
+        raise StudioDocumentInvalid(tuple(issues))

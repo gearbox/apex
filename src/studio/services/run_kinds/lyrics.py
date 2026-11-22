@@ -22,7 +22,7 @@ from src.studio.planner.graphs.lyrics import (
     run_lyrics_graph,
 )
 from src.studio.planner.outcome import LyricsReady, cap_warnings
-from src.studio.planner.prompts.lyrics_v1 import PROMPT_VERSION
+from src.studio.planner.prompts.lyrics_v2 import PROMPT_VERSION
 from src.studio.run_requests import LyricsRunRequest, RunRequest
 from src.studio.services.mappers import decode_plan
 from src.studio.services.run_kinds.base import (

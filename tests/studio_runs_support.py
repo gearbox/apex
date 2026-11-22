@@ -34,7 +34,7 @@ from src.llm.registry import LlmModelRegistry
 from src.studio.run_requests import PlanRunRequest
 from src.studio.services.project import StudioProjectService
 from src.studio.services.run import RunWrite, StudioRunService
-from src.studio.services.run_context import ProfileArtistContextProvider
+from src.studio.services.run_context import MemoryArtistContextProvider
 from src.studio.services.run_events import StudioRunEvents
 from src.studio.services.run_executor import ClaimedRun, StudioRunExecutor
 from src.studio.services.run_kinds.registry import default_handlers
@@ -131,6 +131,8 @@ class Actor:
     account_id: UUID
     project_id: UUID
     tracks: list[UUID] = field(default_factory=list)
+    artist_id: UUID | None = None
+    """The project's artist (``add_actor(artist=True)``), else ``None``."""
 
     @property
     def headers(self) -> dict[str, str]:
@@ -215,7 +217,9 @@ class RunWorld:
                     concept="SECRET-CONCEPT night drive" if artist else None,
                 ),
             )
-        actor = Actor(user_id=user.id, account_id=account.id, project_id=project.id)
+        actor = Actor(
+            user_id=user.id, account_id=account.id, project_id=project.id, artist_id=artist_id
+        )
         self.actors.append(actor)
         return actor
 
@@ -259,13 +263,58 @@ class RunWorld:
             billing=BillingService(),
             registry=self.registry,
             llm_factory=lambda _key: llm,
-            context_provider=provider or ProfileArtistContextProvider(),
+            context_provider=provider or MemoryArtistContextProvider(),
             events=StudioRunEvents(self.bus),  # type: ignore[arg-type]
             settings=settings or self.settings,
             handlers=default_handlers(),
         )
 
     # -- data --------------------------------------------------------------------------------
+
+    async def add_memory(
+        self, actor: Actor, *, artist_id: UUID | None = None, **fields: Any
+    ) -> UUID:
+        """A committed memory of the actor's artist (or of ``artist_id``); returns its id.
+
+        ``fields`` are ``MemoryCreate`` fields; the title defaults to a unique one.
+        """
+        from src.api.schemas.studio import MemoryCreate
+        from src.studio.services.memory import MemoryService
+
+        target = artist_id or actor.artist_id
+        if target is None:
+            raise ValueError("the actor has no artist")
+        fields.setdefault("title", f"Memory {uuid4().hex[:6]}")
+        fields.setdefault("body", "a quiet evening")
+        async with self.factory() as session, session.begin():
+            created = await MemoryService(session).create(
+                target, actor.user_id, PRODUCT, MemoryCreate(**fields)
+            )
+        return created.id
+
+    async def set_memory(self, actor: Actor, memory_id: UUID, **fields: Any) -> None:
+        """Edit, archive or restore a memory (``MemoryPatch`` fields), committed.
+
+        ``status`` may be given as its wire string (``"archived"``): the route decodes it to the
+        enum, so this does the same.
+        """
+        from src.api.schemas.studio import MemoryPatch
+        from src.core.enums import StudioMemoryStatus
+        from src.studio.services.memory import MemoryService
+
+        if isinstance(fields.get("status"), str):
+            fields["status"] = StudioMemoryStatus(fields["status"])
+
+        async with self.factory() as session, session.begin():
+            await MemoryService(session).patch(
+                memory_id, actor.user_id, PRODUCT, MemoryPatch(**fields)
+            )
+
+    async def delete_memory(self, actor: Actor, memory_id: UUID) -> None:
+        from src.studio.services.memory import MemoryService
+
+        async with self.factory() as session, session.begin():
+            await MemoryService(session).delete(memory_id, actor.user_id, PRODUCT)
 
     async def new_track(
         self, actor: Actor, title: str = "Track", plan: PlanDocument | None = None

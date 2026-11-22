@@ -333,12 +333,12 @@ class TestRunning:
         run = await run_world.run(write.run.id)
         snapshot = run.context_snapshot
         assert snapshot is not None
-        assert (snapshot["snapshot_version"], snapshot["language"]) == (2, "en")
+        assert (snapshot["snapshot_version"], snapshot["language"]) == (3, "en")
         assert snapshot["input_plan_version_id"] == str(plan_id)
         assert snapshot["input_plan_content_hash"] is not None
         assert snapshot["input_lyrics_version_id"] is None
         assert snapshot["plan_version_id"] == str(other)  # the current pair at claim
-        assert run.prompt_version == "lyrics-v1"
+        assert run.prompt_version == "lyrics-v2"
         assert run.model_id == "model-a"
         text = str(snapshot)
         assert "BRIEF-WORDS" not in text  # the brief lives on the request only

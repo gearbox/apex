@@ -92,7 +92,7 @@ async def test_one_tick_serves_a_lyrics_run_and_a_revision_side_by_side(
         "succeeded",
         "revise_lyrics",
     )
-    assert (first.prompt_version, second.prompt_version) == ("lyrics-v1", "revise-lyrics-v1")
+    assert (first.prompt_version, second.prompt_version) == ("lyrics-v2", "revise-lyrics-v2")
     assert routing.calls == 2
     assert first.result_lyrics_version_id is not None
     assert second.result_lyrics_version_id is not None

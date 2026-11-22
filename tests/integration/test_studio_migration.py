@@ -23,12 +23,16 @@ _MIGRATION_PATH = (
 _MIGRATION_057_PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "057_studio_runs.py"
 )
+_MIGRATION_059_PATH = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "059_studio_artist_memories.py"
+)
 _TABLES = (
     "studio_artists",
     "studio_project_profiles",
     "studio_tracks",
     "studio_document_versions",
     "studio_runs",  # added by 057; it references the tracks, so 055 cannot be undone without it
+    "studio_artist_memories",  # added by 059; it references the artists, same reason
 )
 
 
@@ -42,11 +46,11 @@ def _load_migration(path: Path = _MIGRATION_PATH, name: str = "revision_055") ->
 
 
 def _run(connection: Connection, action: str, *, revision: str = "055") -> None:
-    migration = (
-        _load_migration()
-        if revision == "055"
-        else _load_migration(_MIGRATION_057_PATH, "revision_057")
-    )
+    migration = {
+        "055": _load_migration,
+        "057": lambda: _load_migration(_MIGRATION_057_PATH, "revision_057"),
+        "059": lambda: _load_migration(_MIGRATION_059_PATH, "revision_059"),
+    }[revision]()
     with Operations.context(MigrationContext.configure(connection)):
         getattr(migration, action)()
 
@@ -80,13 +84,15 @@ async def test_upgrade_downgrade_upgrade_round_trip(db_engine: AsyncEngine) -> N
         transaction = await connection.begin()
         assert await _tables(connection) == set(_TABLES)
 
-        # newest first: 057's table references 055's tracks
+        # newest first: 059's table references 055's artists, 057's references 055's tracks
+        await connection.run_sync(_run, "downgrade", revision="059")
         await connection.run_sync(_run, "downgrade", revision="057")
         await connection.run_sync(_run, "downgrade")
         assert await _tables(connection) == set()
 
         await connection.run_sync(_run, "upgrade")
         await connection.run_sync(_run, "upgrade", revision="057")
+        await connection.run_sync(_run, "upgrade", revision="059")
         assert await _tables(connection) == set(_TABLES)
         await transaction.rollback()
 

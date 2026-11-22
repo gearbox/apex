@@ -180,6 +180,7 @@ def draft_of(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDraft:
     positions = plan_positions(plan)
     return LyricsDraft(
         refusal=None,
+        refusal_memories=[],
         sections=[
             LyricsSectionDraft(
                 key=key_of(positions[section.section_id]),
@@ -225,7 +226,7 @@ def revision_draft_of(
         for target in targets.lines
         if target.section_id in by_id and target.line < len(by_id[target.section_id].lines)
     ]
-    return LyricsRevisionDraft(refusal=None, sections=sections, lines=lines)
+    return LyricsRevisionDraft(refusal=None, refusal_memories=[], sections=sections, lines=lines)
 
 
 def _unique(issues: Iterable[DocumentIssue]) -> tuple[DocumentIssue, ...]:

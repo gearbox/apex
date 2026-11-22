@@ -406,7 +406,7 @@ class TestRunning:
             ),
         )
         await run_world.drive(
-            FakeLlm(make_lyrics_revision(lines=[make_line_patch("s2", 1, FOUR + " la")]))
+            FakeLlm(make_lyrics_revision(lines=[make_line_patch("s2", 1, f"{FOUR} la")]))
         )
         run = await run_world.run(write.run.id)
         # the user's own ten-syllable line (s1 line 2) is not the model's to judge
@@ -445,14 +445,14 @@ class TestRunning:
         run = await run_world.run(write.run.id)
         snapshot = run.context_snapshot
         assert snapshot is not None
-        assert snapshot["snapshot_version"] == 2
+        assert snapshot["snapshot_version"] == 3
         assert (snapshot["input_plan_version_id"], snapshot["input_lyrics_version_id"]) == (
             str(plan_id),
             str(lyrics_id),
         )
         assert snapshot["input_lyrics_content_hash"] is not None
         assert snapshot["language"] == "en"
-        assert run.prompt_version == "revise-lyrics-v1"
+        assert run.prompt_version == "revise-lyrics-v2"
         assert "warmer" not in str(snapshot)  # the instruction lives on the request only
         assert "la la la" not in str(snapshot)  # no lyric line in the snapshot
 

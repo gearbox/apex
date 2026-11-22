@@ -82,6 +82,7 @@ class TestPlanDraft:
     def test_a_sample_reply_decodes(self) -> None:
         reply = {
             "refusal": None,
+            "refusal_memories": [],
             "title": "T",
             "tempo_bpm": None,
             "instrumental": False,

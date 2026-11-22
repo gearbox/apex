@@ -13,8 +13,8 @@ target missing), one more full revision. After the budget a hard issue fails the
 
 A fix round that fails at the port never discards a validated revision: when only soft problems
 were left, the run ends with that revision and the warning ``revision_incomplete``; with a hard
-problem there is nothing usable and the error propagates (R1). A run that the 180 s deadline cancels
-mid-round still ends ``run_timeout``.
+problem there is nothing usable and the error propagates (P2a-B). A run that the 180 s deadline
+cancels mid-round still ends ``run_timeout``.
 """
 
 from __future__ import annotations
@@ -35,7 +35,7 @@ from src.studio.documents import (  # noqa: TC001 - runtime: LangGraph reads the
 )
 from src.studio.errors import DocumentIssue  # noqa: TC001
 from src.studio.planner.context import RunContextSnapshot  # noqa: TC001
-from src.studio.planner.drafts import DraftRefusal, LyricsPatchDraft, LyricsRevisionDraft
+from src.studio.planner.drafts import LyricsPatchDraft, LyricsRevisionDraft
 from src.studio.planner.errors import PlannerStateError
 from src.studio.planner.graphs.ask import ask_structured
 from src.studio.planner.lyric_checks import LineRef, warnings_of
@@ -50,12 +50,12 @@ from src.studio.planner.outcome import (
     LyricsOutcome,
     LyricsReady,
     LyricsRun,
-    RunRefused,
     RunRejected,
     cap_warnings,
     kept_after_failed_round,
+    refused,
 )
-from src.studio.planner.prompts.revise_lyrics_v1 import (
+from src.studio.planner.prompts.revise_lyrics_v2 import (
     build_revise_fix_messages,
     build_revise_messages,
     build_revise_redraft_messages,
@@ -215,7 +215,8 @@ async def _check(state: ReviseState, runtime: Runtime[ReviseDeps]) -> dict[str, 
     if echo is None or document is None:
         raise PlannerStateError("check ran before the revision")
     if echo.refusal is not None:
-        return {"findings": None, "outcome": RunRefused(echo.refusal)}
+        refusal = refused(echo.refusal, echo.refusal_memories, state["context"].memories)
+        return {"findings": None, "outcome": refusal}
     findings = review(
         document,
         state["plan"],
@@ -305,9 +306,9 @@ async def _patch(state: ReviseState, deps: ReviseDeps, findings: Findings) -> di
     requested = {LineRef(section_at[p.plan_index], p.line) for p in findings.problems}
     problems = tuple(sorted(findings.problems, key=lambda p: (p.plan_index, p.line)))
 
-    def accept(patch: LyricsPatchDraft) -> tuple[DraftRefusal | None, LyricsDocument | None]:
+    def accept(patch: LyricsPatchDraft) -> tuple[LyricsPatchDraft | None, LyricsDocument | None]:
         if patch.refusal is not None:
-            return patch.refusal, None
+            return patch, None  # the declining patch itself: its reason and its memory keys
         return None, apply_patch(document, patch, requested, plan)
 
     asked = await ask_structured(
@@ -324,15 +325,21 @@ async def _patch(state: ReviseState, deps: ReviseDeps, findings: Findings) -> di
         completion_tokens=state["completion_tokens"],
         accept=accept,
     )
-    refusal, patched = asked.value
+    declined, patched = asked.value
     spent = {
         "llm_calls": asked.llm_calls,
         "prompt_tokens": asked.prompt_tokens,
         "completion_tokens": asked.completion_tokens,
     }
-    if refusal is not None:
+    if declined is not None:
         # Declining mid-run ends the run like declining at the start: the check reads it off the echo.
-        return {"echo": LyricsRevisionDraft(refusal=refusal, sections=[], lines=[]), **spent}
+        declining = LyricsRevisionDraft(
+            refusal=declined.refusal,
+            refusal_memories=declined.refusal_memories,
+            sections=[],
+            lines=[],
+        )
+        return {"echo": declining, **spent}
     if patched is None:
         raise PlannerStateError("a patch was accepted without a document")
     return {
@@ -348,7 +355,7 @@ def _route(state: ReviseState) -> Literal["fix", "done"]:
 
 
 def _after_fix(state: ReviseState) -> Literal["check", "done"]:
-    """A round that failed at the port has already set the outcome (R1); otherwise check again."""
+    """A round that failed at the port has already set the outcome; otherwise check again."""
     return "done" if state["outcome"] is not None else "check"
 
 

@@ -1,8 +1,8 @@
 """Opt-in smoke tests of the lyrics prompts: ``pytest -m live_llm tests/live``.
 
 CI never calls a model (the default run excludes ``live_llm``). For **every** ``LLM_MODELS`` entry
-whose API-key environment variable is set, this sends the real ``lyrics-v1`` and
-``revise-lyrics-v1`` prompts with a fixed plan over the real adapter and asserts that the reply
+whose API-key environment variable is set, this sends the real ``lyrics-v2`` and
+``revise-lyrics-v2`` prompts with a fixed plan over the real adapter and asserts that the reply
 decodes into the draft Struct - which is what proves a model honours the entry's
 ``structured_output`` mode for these schemas. It also prints how many lines missed the syllable
 range in ``ru`` and ``en``, and how many lines the model changed outside the targets (none must).
@@ -33,8 +33,8 @@ from src.studio.planner.graphs.lyrics import LYRICS_SCHEMA_NAME
 from src.studio.planner.graphs.revise_lyrics import REVISION_SCHEMA_NAME
 from src.studio.planner.lyric_checks import check_lines
 from src.studio.planner.lyrics_mapping import apply_revision, lyrics_from_draft
-from src.studio.planner.prompts.lyrics_v1 import build_lyrics_messages
-from src.studio.planner.prompts.revise_lyrics_v1 import build_revise_messages
+from src.studio.planner.prompts.lyrics_v2 import build_lyrics_messages
+from src.studio.planner.prompts.revise_lyrics_v2 import build_revise_messages
 from src.studio.planner.syllables import counter_for
 from src.studio.run_requests import (
     LineTarget,

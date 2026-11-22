@@ -15,16 +15,17 @@ from typing import TYPE_CHECKING, Final
 
 from src.llm.port import LlmMessage
 from src.studio.planner.lyric_checks import AVOID_WORD_USED, SYLLABLE_RANGE_MISSED
-from src.studio.planner.lyrics_mapping import key_of, line_number
+from src.studio.planner.lyrics_mapping import key_of, line_number, plan_positions
 from src.studio.planner.prompts.blocks import block, clean
 from src.studio.validation import is_instrumental
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
-    from src.studio.documents import PlanDocument, SyllableRange
+    from src.studio.documents import LyricsDocument, PlanDocument, SyllableRange
     from src.studio.errors import DocumentIssue
     from src.studio.planner.lyric_checks import LineProblem
+    from src.studio.run_requests import ReviseTargets
 
 __all__ = [
     "AVOID_BLOCK",
@@ -33,8 +34,10 @@ __all__ = [
     "avoid_block",
     "build_patch_request",
     "build_rejection_request",
+    "lyrics_block",
     "plan_block",
     "syllable_block",
+    "targets_block",
 ]
 
 _EN_DASH: Final = "\N{EN DASH}"
@@ -89,7 +92,7 @@ def plan_block(plan: PlanDocument) -> str:
     if plan.tempo_bpm is not None:
         lines.append(f"tempo: {plan.tempo_bpm}")
     if plan.global_style.tags:
-        lines.append("tags: " + ", ".join(clean(tag) for tag in plan.global_style.tags))
+        lines.append(f"tags: {', '.join(clean(tag) for tag in plan.global_style.tags)}")
     for index, section in enumerate(plan.sections):
         parts = [f"{key_of(index)}: {section.kind.value}"]
         if section.label:
@@ -97,15 +100,39 @@ def plan_block(plan: PlanDocument) -> str:
         if is_instrumental(section):
             parts[0] += " [instrumental]"
         if section.delivery:
-            parts.append("delivery: " + ", ".join(clean(item) for item in section.delivery))
+            parts.append(f"delivery: {', '.join(clean(item) for item in section.delivery)}")
         if section.style.tags:
-            parts.append("tags: " + ", ".join(clean(tag) for tag in section.style.tags))
+            parts.append(f"tags: {', '.join(clean(tag) for tag in section.style.tags)}")
         if section.duration_seconds is not None:
             parts.append(f"duration: {section.duration_seconds} s")
         if section.notes:
-            parts.append("notes: " + _one_line(section.notes))
+            parts.append(f"notes: {_one_line(section.notes)}")
         lines.append("; ".join(parts))
     return block("plan", "\n".join(lines))
+
+
+def lyrics_block(lyrics: LyricsDocument, plan: PlanDocument) -> str:
+    """Every section under its key, lines numbered from 1, delivery in brackets after the number."""
+    positions = plan_positions(plan)
+    lines: list[str] = []
+    for section in lyrics.sections:
+        lines.append(key_of(positions[section.section_id]))
+        for index, line in enumerate(section.lines):
+            number = str(line_number(index))
+            if line.delivery:
+                number += " [" + ", ".join(clean(cue) for cue in line.delivery) + "]"
+            lines.append(f"{number}: {clean(line.text)}")
+    return block("lyrics", "\n".join(lines))
+
+
+def targets_block(targets: ReviseTargets, plan: PlanDocument) -> str:
+    positions = plan_positions(plan)
+    lines = [f"section {key_of(positions[section_id])}" for section_id in targets.sections]
+    lines.extend(
+        f"{key_of(positions[target.section_id])} line {line_number(target.line)}"
+        for target in targets.lines
+    )
+    return block("targets", "\n".join(lines))
 
 
 def syllable_block(line_syllables: SyllableRange | None) -> str | None:

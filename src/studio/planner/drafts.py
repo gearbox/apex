@@ -1,7 +1,9 @@
 """What the model is asked to return: draft Structs, and nothing else.
 
 A draft is **not** a document. It is shaped for a model (short section keys, no ids), carries a
-required ``refusal`` so the model can decline in-band, and is mapped and validated by the server
+required ``refusal`` so the model can decline in-band (and a required list of the keys of the artist
+memories that made it decline: empty unless the run had memories and the reason is
+``content_policy``), and is mapped and validated by the server
 (``mapping.py``, ``validate.py``) before anything is stored. Draft Structs declare **no defaults**:
 a defaulted field would be optional in the strict JSON schema (see ``to_strict_schema``).
 """
@@ -52,6 +54,8 @@ class PlanDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True):
     """The model's plan."""
 
     refusal: DraftRefusal | None
+    refusal_memories: list[str]
+    """The ``m<n>`` keys of the memories that caused a ``content_policy`` refusal; otherwise empty."""
     title: str
     tempo_bpm: int | None
     instrumental: bool
@@ -80,6 +84,8 @@ class LyricsDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True)
     """The model's lyrics for a whole plan."""
 
     refusal: DraftRefusal | None
+    refusal_memories: list[str]
+    """The ``m<n>`` keys of the memories that caused a ``content_policy`` refusal; otherwise empty."""
     sections: list[LyricsSectionDraft]
 
 
@@ -97,6 +103,8 @@ class LyricsPatchDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fields=
     """The in-run fix of rejected lines: replacements for exactly the lines that were asked for."""
 
     refusal: DraftRefusal | None
+    refusal_memories: list[str]
+    """The ``m<n>`` keys of the memories that caused a ``content_policy`` refusal; otherwise empty."""
     lines: list[LinePatchDraft]
 
 
@@ -104,6 +112,8 @@ class LyricsRevisionDraft(Struct, frozen=True, kw_only=True, forbid_unknown_fiel
     """The first reply of a ``revise_lyrics`` run."""
 
     refusal: DraftRefusal | None
+    refusal_memories: list[str]
+    """The ``m<n>`` keys of the memories that caused a ``content_policy`` refusal; otherwise empty."""
     sections: list[LyricsSectionDraft]
     """New lines for each whole-section target."""
     lines: list[LinePatchDraft]

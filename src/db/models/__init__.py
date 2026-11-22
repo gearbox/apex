@@ -37,6 +37,7 @@ from .storage import (
 )
 from .studio import (
     StudioArtist,
+    StudioArtistMemory,
     StudioDocumentVersion,
     StudioProjectProfile,
     StudioRun,
@@ -82,6 +83,7 @@ __all__ = [
     "RefreshToken",
     "StorageCleanupRecord",
     "StudioArtist",
+    "StudioArtistMemory",
     "StudioDocumentVersion",
     "StudioProjectProfile",
     "StudioRun",

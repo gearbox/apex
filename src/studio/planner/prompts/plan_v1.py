@@ -18,13 +18,19 @@ from src.core.enums import StudioSectionKind
 from src.core.product import ContentRating
 from src.llm.port import LlmMessage
 from src.studio.planner.policy import policy_block
-from src.studio.planner.prompts.blocks import REASK_MESSAGE, artist_lines, block, clean
+from src.studio.planner.prompts.blocks import (
+    REASK_MESSAGE,
+    artist_lines,
+    block,
+    clean,
+    plan_lines,
+)
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
 
     from src.studio.errors import DocumentIssue
-    from src.studio.planner.context import PlanSummary, RunContextSnapshot
+    from src.studio.planner.context import RunContextSnapshot
     from src.studio.planner.drafts import PlanDraft
     from src.studio.run_requests import PlanRunRequest
 
@@ -85,23 +91,6 @@ def build_system_prompt(rating: ContentRating) -> str:
     return _SYSTEM_TEMPLATE.format(kinds=kinds, policy=policy_block(rating))
 
 
-def _plan_lines(plan: PlanSummary) -> str:
-    lines = [f"title: {clean(plan.title)}"]
-    if plan.tempo_bpm is not None:
-        lines.append(f"tempo: {plan.tempo_bpm}")
-    if plan.instrumental:
-        lines.append("instrumental: yes")
-    if plan.tags:
-        lines.append("tags: " + ", ".join(clean(tag) for tag in plan.tags))
-    if plan.avoid:
-        lines.append("avoid: " + ", ".join(clean(tag) for tag in plan.avoid))
-    for index, section in enumerate(plan.sections, start=1):
-        label = f" ({clean(section.label)})" if section.label else ""
-        flag = " [instrumental]" if section.instrumental else ""
-        lines.append(f"section {index}: {section.kind.value}{label}{flag}")
-    return "\n".join(lines)
-
-
 def build_plan_messages(context: RunContextSnapshot, request: PlanRunRequest) -> list[LlmMessage]:
     """The opening messages of a plan run: the system prompt and the user's labelled blocks.
 
@@ -118,7 +107,7 @@ def build_plan_messages(context: RunContextSnapshot, request: PlanRunRequest) ->
     if context.concept:
         blocks.append(block("project_concept", clean(context.concept)))
     if context.current_plan is not None:
-        blocks.append(block("current_plan", _plan_lines(context.current_plan)))
+        blocks.append(block("current_plan", plan_lines(context.current_plan)))
     blocks.append(block("brief", clean(request.brief)))
     return [
         LlmMessage("system", build_system_prompt(ContentRating(context.content_rating))),
@@ -143,7 +132,7 @@ def draft_path(path: str) -> str:
         return "(the whole plan)"
     for document_prefix, draft_prefix in _DRAFT_PATHS:
         if path == document_prefix or path.startswith(
-            (document_prefix + "[", document_prefix + ".")
+            (f"{document_prefix}[", f"{document_prefix}.")
         ):
             return draft_prefix + path[len(document_prefix) :]
     return path.replace(".style.tags", ".tags").replace(".style.avoid", ".avoid")

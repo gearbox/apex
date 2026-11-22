@@ -19,7 +19,7 @@ from src.studio.planner.graphs.plan import (
     initial_state,
     run_plan_graph,
 )
-from src.studio.planner.prompts.plan_v1 import PROMPT_VERSION
+from src.studio.planner.prompts.plan_v2 import PROMPT_VERSION
 from src.studio.run_requests import PlanRunRequest, RunRequest
 from src.studio.services.run_kinds.base import (
     LoadedRun,

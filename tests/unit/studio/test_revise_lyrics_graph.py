@@ -533,7 +533,7 @@ class _ChaosLlm:
             for _ in range(self._random.randint(0, 3))
         ]
         if schema is LyricsPatchDraft:
-            return LyricsPatchDraft(refusal=refusal, lines=patches)
+            return LyricsPatchDraft(refusal=refusal, refusal_memories=[], lines=patches)
         sections = [
             section_lines(
                 self._random.choice(keys),
@@ -544,7 +544,9 @@ class _ChaosLlm:
             )
             for _ in range(self._random.randint(0, 2))
         ]
-        return LyricsRevisionDraft(refusal=refusal, sections=sections, lines=patches)
+        return LyricsRevisionDraft(
+            refusal=refusal, refusal_memories=[], sections=sections, lines=patches
+        )
 
 
 @settings(

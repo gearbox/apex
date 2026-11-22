@@ -15,15 +15,16 @@ import msgspec
 
 from src.core.product import ContentRating
 from src.llm.port import LlmMessage
-from src.studio.planner.lyrics_mapping import key_of, line_number, plan_positions
 from src.studio.planner.policy import policy_block
 from src.studio.planner.prompts.blocks import REASK_MESSAGE, artist_lines, block, clean
 from src.studio.planner.prompts.lyric_blocks import (
     avoid_block,
     build_patch_request,
     build_rejection_request,
+    lyrics_block,
     plan_block,
     syllable_block,
+    targets_block,
 )
 
 if TYPE_CHECKING:
@@ -34,7 +35,7 @@ if TYPE_CHECKING:
     from src.studio.planner.context import RunContextSnapshot
     from src.studio.planner.drafts import LyricsRevisionDraft
     from src.studio.planner.lyric_checks import LineProblem
-    from src.studio.run_requests import ReviseLyricsRunRequest, ReviseTargets
+    from src.studio.run_requests import ReviseLyricsRunRequest
 
 __all__ = [
     "PROMPT_VERSION",
@@ -77,30 +78,6 @@ def build_system_prompt(rating: ContentRating) -> str:
     return _SYSTEM_TEMPLATE.format(policy=policy_block(rating))
 
 
-def _lyrics_block(lyrics: LyricsDocument, plan: PlanDocument) -> str:
-    """Every section under its key, lines numbered from 1, delivery in brackets after the number."""
-    positions = plan_positions(plan)
-    lines: list[str] = []
-    for section in lyrics.sections:
-        lines.append(key_of(positions[section.section_id]))
-        for index, line in enumerate(section.lines):
-            number = str(line_number(index))
-            if line.delivery:
-                number += " [" + ", ".join(clean(cue) for cue in line.delivery) + "]"
-            lines.append(f"{number}: {clean(line.text)}")
-    return block("lyrics", "\n".join(lines))
-
-
-def _targets_block(targets: ReviseTargets, plan: PlanDocument) -> str:
-    positions = plan_positions(plan)
-    lines = [f"section {key_of(positions[section_id])}" for section_id in targets.sections]
-    lines.extend(
-        f"{key_of(positions[target.section_id])} line {line_number(target.line)}"
-        for target in targets.lines
-    )
-    return block("targets", "\n".join(lines))
-
-
 def build_revise_messages(
     context: RunContextSnapshot,
     request: ReviseLyricsRunRequest,
@@ -117,11 +94,16 @@ def build_revise_messages(
     if context.artist is not None:
         blocks.append(block("artist", artist_lines(context.artist)))
     blocks.extend(
-        (plan_block(plan), _lyrics_block(lyrics, plan), _targets_block(request.targets, plan))
+        (plan_block(plan), lyrics_block(lyrics, plan), targets_block(request.targets, plan))
     )
-    for optional in (syllable_block(line_syllables), avoid_block(request.avoid_words)):
-        if optional is not None:
-            blocks.append(optional)
+    blocks.extend(
+        optional
+        for optional in (
+            syllable_block(line_syllables),
+            avoid_block(request.avoid_words),
+        )
+        if optional is not None
+    )
     blocks.append(block("instruction", clean(request.instruction)))
     return [
         LlmMessage("system", build_system_prompt(ContentRating(context.content_rating))),

@@ -31,6 +31,7 @@ from src.core.enums import StudioRunKind, StudioRunStage
 from src.db.repositories.studio import StudioRunRepository
 from src.llm.port import LlmReplyError
 from src.studio.errors import StudioError
+from src.studio.planner.outcome import PINNED_MEMORY_UNAVAILABLE, RunWarning, lead_with
 from src.studio.run_failures import (
     ERR_INTERNAL,
     ERR_TIMEOUT,
@@ -295,11 +296,20 @@ class StudioRunExecutor:
         """
         async with self._db.session() as session:
             saved = await handler.save(session, claimed, outcome)
+            warnings = list(saved.warnings)
+            if claimed.context.unavailable_memory_ids:
+                # Generic, for every kind: pins that were gone by the time the run started.
+                warnings = lead_with(
+                    RunWarning(
+                        PINNED_MEMORY_UNAVAILABLE, count=len(claimed.context.unavailable_memory_ids)
+                    ),
+                    warnings,
+                )
             run = await StudioRunRepository(session).finish_succeeded(
                 claimed.run_id,
                 result_plan_version_id=saved.result_plan_version_id,
                 result_lyrics_version_id=saved.result_lyrics_version_id,
-                warnings=[warning.to_json() for warning in saved.warnings],
+                warnings=[warning.to_json() for warning in warnings],
                 llm_calls=meter.calls,
                 prompt_tokens=meter.prompt_tokens,
                 completion_tokens=meter.completion_tokens,
