@@ -14,3 +14,14 @@ privacy = [
 sensitive_data_consent = [
   { version = 2026-09-25, requires_reacceptance = true, sha256 = "7524f644ef3dab7dac2e7e39389d0c3f875e335ea1f38ff65809824d97861011" },
 ]
+
+[synthara]
+terms = [
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "5a09f3d03f30819f1e58f7a01b486be563827ae740a652b124bb52243d3981a4" },
+]
+privacy = [
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "c1ab0f26cbb9a0543b516cde33456047115d583057a1a9d4daee1fe8dd6f2064" },
+]
+sensitive_data_consent = [
+  { version = 2026-09-25, requires_reacceptance = true, sha256 = "30f1d9e06c70891fdf5b57bff274116f1e7b57ee785830971f41d5bfdd48c864" },
+]
