@@ -53,6 +53,16 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.RunNotCancellable, 409, "run_not_cancellable"),
     (e.IdempotencyConflict, 409, "idempotency_conflict"),
     (e.RunRateLimited, 429, "run_rate_limited"),
+    (e.ChatNotFound, 404, "chat_not_found"),
+    (e.MessageNotFound, 404, "message_not_found"),
+    (e.MemoryDraftNotFound, 404, "memory_draft_not_found"),
+    (e.ChatLimitReached, 409, "chat_limit_reached"),
+    (e.ChatFull, 409, "chat_full"),
+    (e.ChatReplyInProgress, 409, "chat_reply_in_progress"),
+    (e.ChatBusy, 409, "chat_busy"),
+    (e.MemoryDraftInProgress, 409, "memory_draft_in_progress"),
+    (e.MessageNotComplete, 422, "message_not_complete"),
+    (e.ChatRateLimited, 429, "chat_rate_limited"),
 ]
 
 

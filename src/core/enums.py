@@ -1051,3 +1051,27 @@ class StudioRunStage(StrEnum):
     VALIDATING = "validating"
     REVISING = "revising"
     SAVING = "saving"
+
+
+class StudioChatRole(StrEnum):
+    """Who wrote a chat message (artist chat, S1-P2c)."""
+
+    USER = "user"
+    ARTIST = "artist"
+
+
+class StudioChatMessageStatus(StrEnum):
+    """A chat message is written once: a user message is born ``complete``; an artist message is
+    ``pending`` while its reply streams and ends ``complete`` or ``failed`` (terminal once)."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class StudioMemoryDraftStatus(StrEnum):
+    """Lifecycle of a memory draft (an LLM job over a chat message): terminal once."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    FAILED = "failed"

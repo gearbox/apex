@@ -43,6 +43,7 @@ from .studio import (
     StudioRun,
     StudioTrack,
 )
+from .studio_chat import StudioArtistChat, StudioArtistChatMessage, StudioMemoryDraft
 from .user import RefreshToken, User
 from .user_identity import UserIdentity
 
@@ -83,8 +84,11 @@ __all__ = [
     "RefreshToken",
     "StorageCleanupRecord",
     "StudioArtist",
+    "StudioArtistChat",
+    "StudioArtistChatMessage",
     "StudioArtistMemory",
     "StudioDocumentVersion",
+    "StudioMemoryDraft",
     "StudioProjectProfile",
     "StudioRun",
     "StudioTrack",

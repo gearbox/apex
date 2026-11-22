@@ -62,6 +62,7 @@ from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
 from src.api.routes.studio_artists import StudioArtistController
+from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.routes.studio_projects import StudioProjectController
 from src.api.routes.studio_runs import StudioRunController
@@ -611,6 +612,7 @@ def create_app() -> Litestar:
             LibraryTagController,
             # Media Project Studio (404 unless STUDIO_ENABLED and the product has "studio")
             StudioArtistController,
+            StudioChatController,
             StudioMemoryController,
             StudioProjectController,
             StudioRunController,

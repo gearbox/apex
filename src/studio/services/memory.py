@@ -23,8 +23,9 @@ import msgspec
 import structlog
 
 from src.api.schemas.pagination import CursorPage, decode_memory_cursor, encode_memory_cursor
-from src.core.enums import StudioMemoryOrigin, StudioMemoryStatus
+from src.core.enums import StudioMemoryDraftStatus, StudioMemoryOrigin, StudioMemoryStatus
 from src.db.repositories.studio import StudioArtistMemoryRepository, StudioArtistRepository
+from src.db.repositories.studio_chat import StudioChatRepository, StudioMemoryDraftRepository
 from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST, collect_length_issues
 from src.studio.errors import (
     ArtistNotFound,
@@ -75,6 +76,8 @@ class MemoryService:
         self._session = session
         self._memories = StudioArtistMemoryRepository(session)
         self._artists = StudioArtistRepository(session)
+        self._drafts = StudioMemoryDraftRepository(session)
+        self._chats = StudioChatRepository(session)
 
     async def list_page(
         self,
@@ -131,21 +134,33 @@ class MemoryService:
     async def create(
         self, artist_id: UUID, user_id: UUID, product_id: str, data: MemoryCreate
     ) -> MemoryOut:
-        """Create an ``active`` memory (``origin = user``).
+        """Create an ``active`` memory: ``origin = user``, or ``chat`` with a valid ``from_draft_id``.
 
         The artist is locked first and the active memories are counted under that lock, so the
-        cap holds under concurrent creates.
+        cap holds under concurrent creates. ``from_draft_id`` is checked after that lock (P2c-29):
+        it only says *where the text came from* - the memory's fields are always the ones the
+        client sent (it has edited them), normalized and limited like any memory's.
 
         Raises:
             ArtistNotFound: The artist is not the caller's.
             StudioDocumentInvalid: With every issue found (an empty title or body, a bad theme or
-                image, a value NFC pushed past its limit).
+                image, a value NFC pushed past its limit; a ``from_draft_id`` that is unknown,
+                not ``complete`` or from another artist's chat).
             MemoryLimitReached: The artist already has 200 active memories.
         """
         artist = await self._artists.lock(artist_id, user_id=user_id, product_id=product_id)
         if artist is None:
             raise ArtistNotFound
         issues: list[DocumentIssue] = []
+        origin = StudioMemoryOrigin.USER
+        if data.from_draft_id is not None:
+            draft_issue = await self._check_draft(
+                data.from_draft_id, artist_id, user_id, product_id
+            )
+            if draft_issue is not None:
+                issues.append(draft_issue)  # reported together with every other issue
+            else:
+                origin = StudioMemoryOrigin.CHAT
         title = _title(data.title, issues)
         body = _body(data.body, issues)
         themes = normalize_tokens(data.themes, "themes", issues, check_reserved=True)
@@ -177,15 +192,34 @@ class MemoryService:
             themes=themes,
             imagery=imagery,
             salience=data.salience,
-            origin=StudioMemoryOrigin.USER,
+            origin=origin,
         )
         logger.info(
             "studio.memory_created",
             memory_id=str(memory.id),
             artist_id=str(artist_id),
             user_id=str(user_id),
+            origin=origin.value,
         )
         return memory_out(memory)
+
+    async def _check_draft(
+        self, draft_id: UUID, artist_id: UUID, user_id: UUID, product_id: str
+    ) -> DocumentIssue | None:
+        """Why a draft cannot back a memory of ``artist_id``, or ``None`` when it can.
+
+        A draft that is not the caller's is the same ``draft_not_found`` as an unknown one (no
+        probing). Read-only: neither the draft nor its chat is locked or changed.
+        """
+        draft = await self._drafts.get(draft_id, user_id=user_id, product_id=product_id)
+        if draft is None:
+            return DocumentIssue("from_draft_id", "draft_not_found")
+        if draft.status != StudioMemoryDraftStatus.COMPLETE.value:
+            return DocumentIssue("from_draft_id", "draft_not_complete")
+        chat = await self._chats.get(draft.chat_id, user_id=user_id, product_id=product_id)
+        if chat is None or chat.artist_id != artist_id:
+            return DocumentIssue("from_draft_id", "draft_other_artist")
+        return None
 
     async def get(self, memory_id: UUID, user_id: UUID, product_id: str) -> MemoryOut:
         """One memory.

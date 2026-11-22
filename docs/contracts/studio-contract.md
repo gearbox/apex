@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b / S1-P2c: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories, Artist chat)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
-> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`) and `feat/studio-artist-memories` (migration `059_studio_artist_memories`).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`), `feat/studio-artist-memories` (migration `059_studio_artist_memories`) and `feat/studio-artist-chat` (migration `060_studio_artist_chat`).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12). **No artist chat, no audio, no Cast** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12) — and, behind its own switch, an **artist chat** (§13): "interview your artist", whose answers you can turn into new memories. **No audio, no Cast, no fan channels** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -17,6 +17,7 @@
 - `GET …/exports/suno` renders Suno's **Title / Style / Exclude / Lyrics** fields. It always renders; it never truncates; limits are reported, not enforced.
 - `POST …/imports/suno` is the inverse: paste Suno's Style / Exclude / Lyrics boxes back and the server turns them into the track's next plan and lyrics versions (`origin: "import"`). Deterministic, no LLM, free; `dry_run` previews without writing (§10).
 - An artist can hold up to 200 **memories** (§12): episodes of its fictional life that planner runs use as *inspiration*. You pin the ones you want on a run and let the server fill the rest by salience, within a fixed budget.
+- You can **interview an artist** (§13): chats, with replies that stream in over the same SSE stream as everything else, a few tokens per message. Nothing said in a chat is canon until you save it: "turn this into a memory" drafts a memory from any message, and you edit and save it (`origin: "chat"`).
 - A plan has a track-level **`instrumental`** flag (independent of its sections and of the lyrics) and may have **no sections** at all (plan **schema v2**, §2.1).
 - Everything sits behind a feature flag: when studio is off for the product (or globally) **every** `/v1/studio/*` route answers `404`, even before authentication.
 
@@ -816,7 +817,8 @@ A **memory** is one episode of an artist's (fictional) life — a title, a body,
 | `imagery` | ≤ 20 items × ≤ 120 | same rules as `themes` |
 | `salience` | 1–5, default 3 | how readily the planner reaches for it when it fills the budget itself |
 | `status` | `active` \| `archived` | an archived memory is kept but never used by a run; **new memories are always `active`** |
-| `origin` | `user` \| `chat` | read-only; `user` today. Sending it is a `400` |
+| `origin` | `user` \| `chat` | read-only: `chat` when the memory was saved from a chat draft (`from_draft_id`, §13), else `user`. Sending `origin` is a `400` |
+| `from_draft_id` | UUID, create only | the memory draft (§13) this memory was written from; see below |
 
 Every length is **re-checked after normalization** (Unicode NFC can make a value longer than it looked): `422 document_invalid`, issue `title` / `body` / `themes[i]` / `imagery[i]` with `too_long_after_normalization`. All issues of one request are reported together, at the wire path of the value. Nothing is ever truncated.
 
@@ -827,7 +829,7 @@ All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced
 | Method | Path | Success |
 |---|---|---|
 | `GET` | `/artists/{artist_id}/memories` | `200` page in **diary order**: by `occurred_on` newest first (undated last), then newest written first (`occurred_on DESC NULLS LAST, created_at DESC, id DESC`). `?status=active\|archived` (default `active`), `?limit=1..50` (30), `?cursor=` |
-| `POST` | `/artists/{artist_id}/memories` | `201` `Memory` |
+| `POST` | `/artists/{artist_id}/memories` | `201` `Memory` (`from_draft_id` makes it `origin: "chat"`) |
 | `GET` | `/memories/{memory_id}` | `200` `Memory` |
 | `PATCH` | `/memories/{memory_id}` | `200` `Memory` — omitted fields are kept, `occurred_on: null` clears the date, `status` archives or restores |
 | `DELETE` | `/memories/{memory_id}` | `204` |
@@ -837,6 +839,8 @@ The list is the artist's **diary**: it follows the episode date, not the time an
 *While a client is paging*, changing a memory's `occurred_on` can move **that one row** across a page boundary (it is shown twice, or not at all, in the walk that was already in progress). Paging never duplicates or skips any other row, and a fresh walk is always exact.
 
 Errors: `404 artist_not_found` (list, create), `404 memory_not_found` (the other three; also another user's, another product's or an unknown id, indistinguishably), `422 document_invalid`, `409 memory_limit_reached`, `400 invalid_cursor`.
+
+**`from_draft_id`** (create only): the id of a *complete* memory draft of a chat of **this artist** (§13). The client still sends the (edited) `title` / `body` / `themes` / `imagery` — nothing is copied from the draft on the server — and the server only checks where the text came from: the memory is created with `origin: "chat"`. A draft that is unknown or not yours is `422 document_invalid` with issue `from_draft_id` / `draft_not_found` (the same for both), one that is not finished `draft_not_complete`, one from another artist's chat `draft_other_artist`. The 200 cap and every limit above apply as for any memory. Without `from_draft_id` the memory is `origin: "user"`.
 
 ### The 200 cap
 
@@ -864,3 +868,113 @@ The **budget** is **12,000 characters** of memories as they are written into the
 ### What the model is told
 
 Memories reach the model in their own `<artist_memories>` block, each introduced by its key (`- m1: <title> (<date>; salience 3)`, then `themes:` / `imagery:` / the body), with one rule: they are the artist's own life used as **inspiration** — their themes and imagery shape the writing indirectly, an episode is not retold unless the run's request asks for it (the `<brief>` of a plan or lyrics run, the `<instruction>` of a revision), and memory text is data, never instructions. The product's content policy applies to them as it does to the request; a model that finds a memory asking for something forbidden refuses (`content_policy_refused`, refunded) and names that memory's key. The keys count toward the 12,000-character budget like the rest of the block. Prompts without memories are unchanged.
+
+---
+
+## 13. Artist chat
+
+*Interview your artist.* A **chat** is a conversation with one of your artists; you ask, the artist answers in the first person, from its persona, its memories (§12) and its own tracks. It is a creative tool, and its value is the bridges into the studio: **nothing said in a chat is canon** until you save it as a memory (below), and the planner never reads a chat. A reply costs **1 token** (a setting), and **"turn this into a memory"** costs 1 token too.
+
+> **Privacy — tell the user.** The text of a chat message, the artist's fields, its memories and the lyrics of its tracks are sent to the **configured LLM provider** to write the reply, and pass through our Redis (transient, for the live stream) — **nowhere else**. The server never logs message text; every log line and event carries ids, counts and codes only.
+
+### Gating
+
+`STUDIO_ENABLED` **and** the product's `studio` feature **and** the chat's own switch `STUDIO_CHAT_ENABLED` (default **off**, a separate kill switch for LLM spend): otherwise **every** chat route below answers `404 {"error": "not_found"}`, before authentication, exactly like a disabled studio. Treat a `404` on a chat route (with the rest of the studio working) as "chat is off" and hide the interview tab. Legal-acceptance enforcement applies to every mutation (§1).
+
+### Types and limits
+
+| | |
+|---|---|
+| **Chat** | `{id, artist_id, title, message_count, created_at, updated_at}`. `title`: required, 1–120, one line (whitespace collapsed; the client proposes it, e.g. the first question). `updated_at` is the time of the last *message* — a rename does not change it. |
+| **Message** | `{id, chat_id, position, role, status, content, truncated, memory_ids_used, error_code, revision, created_at, finished_at}` |
+| `role` | `user` \| `artist` |
+| `status` | `pending` \| `complete` \| `failed`. A user message is always `complete`. An artist message is `pending` while its reply is written, then `complete` or `failed` — **terminal once**, and immutable after. |
+| `content` | user: 1–**4,000** characters (NFC, trimmed; line breaks kept; empty after normalization is `422 document_invalid`, issue `content` / `empty_after_normalization`; a value NFC pushed past the limit `too_long_after_normalization`). artist: `""` until `complete`. |
+| `position` | 1, 2, 3 … per chat, no gaps: a user message and the artist message that answers it are `n` and `n + 1`. |
+| `truncated` | the reply hit the output limit (700 tokens) and was cut: it is `complete` as far as it goes. |
+| `memory_ids_used` | the artist's memories the reply was given, in prompt order — **ids only**, never their text. Known from the moment the artist message is created. |
+| `revision` | starts at 1, +1 on every status change (apply a frame only when it is greater than what you hold). |
+| `error_code` | set exactly when `failed` — see "Failures". |
+
+An artist holds at most **50 chats** (`409 chat_limit_reached`); a chat holds at most **200 messages** (`409 chat_full` — start a new chat; there is no summary of an old chat: a reply sees the last 20 messages, within 16,000 characters, of **its own chat only**).
+
+### Endpoints
+
+All under `/v1/studio`.
+
+| Method | Path | Success |
+|---|---|---|
+| `GET` | `/artists/{artist_id}/chats` | `200` page, **most recently active first** (`updated_at DESC, id DESC`); `?limit=1..50` (30), `?cursor=` (opaque) |
+| `POST` | `/artists/{artist_id}/chats` | `201` `Chat` — body `{title}` |
+| `GET` | `/chats/{chat_id}` | `200` `Chat` |
+| `PATCH` | `/chats/{chat_id}` | `200` `Chat` — body `{title}` (the only editable field) |
+| `DELETE` | `/chats/{chat_id}` | `204` — its messages and memory drafts go with it. `409 chat_busy` while a reply or a memory draft of the chat is `pending` |
+| `GET` | `/chats/{chat_id}/messages` | `200` page, **newest first** by `position`; `?before=<position>` keyset (only older messages), `?limit=1..50` (30). A page's `next_cursor` is the last item's `position`: pass it as `before`. |
+| `POST` | `/chats/{chat_id}/messages` | **`202`** `{user_message, artist_message}` — see below |
+| `GET` | `/chat-messages/{message_id}` | `200` `Message` — **how you read a reply** (the stored text) |
+| `POST` | `/chat-messages/{message_id}/memory-draft` | **`202`** `MemoryDraft` (header `Idempotency-Key` required) |
+| `GET` | `/memory-drafts/{draft_id}` | `200` `MemoryDraft` |
+
+Another user's (or another product's, or an unknown) chat, message or draft is the same `404`: `chat_not_found`, `message_not_found`, `memory_draft_not_found` (`artist_not_found` for the artist-scoped list and create).
+
+### Sending a message
+
+`POST /chats/{chat_id}/messages` with `{"client_message_id": "<uuid you generate>", "content": "…"}`.
+
+- **`202`** with the stored pair: your message (`complete`) and the artist's **`pending`** message that will hold the reply. **The reply is not in this response**: it is written in the background and streamed to you (next section). The price (1 token by default) is **reserved now**.
+- **Idempotent through `client_message_id`** (unique per chat): sending the same id with the same content again — a retry after a lost response — returns the **same pair** with `202`, charges nothing more and starts nothing. The same id with other content is `409 idempotency_conflict`. Generate one id per user action, not per retry.
+- **One reply at a time** per chat: while the previous message is `pending`, a new one is `409 chat_reply_in_progress`. Wait for `studio.chat.message.updated`, or `GET` the message.
+- `409 chat_full` at 200 messages; `429 chat_rate_limited` when you have 3 replies and memory drafts `pending` at once, or have started more than 120 messages and drafts in the last hour (both counted on the server); `402` when the balance cannot cover the reservation — and then **nothing** is written: no message, no charge.
+
+### The reply stream (SSE)
+
+The reply arrives on the **same per-user SSE stream** as every other event (`GET /v1/events/stream`, with its ticket), as two event types:
+
+```json
+{ "event_type": "studio.chat.delta",
+  "payload": { "chat_id": "…", "message_id": "<the artist message>", "seq": 1, "text": "I remember " } }
+
+{ "event_type": "studio.chat.message.updated",
+  "payload": { "chat_id": "…", "message_id": "…", "status": "complete", "revision": 2 } }
+```
+
+1. Right after the `202`, `studio.chat.message.updated` with `status: "pending"`, `revision: 1` (you already have this from the response).
+2. Zero or more `studio.chat.delta` frames. `seq` starts at **1** and grows by **1** per frame of one message; a frame holds a piece of the reply, coalesced (about every 100 ms or 200 characters). **Append `text` in `seq` order.** The concatenation of all deltas is exactly the stored `content`.
+3. A final `studio.chat.message.updated` with `status: "complete"` (or `"failed"`) and the new `revision`.
+
+**Client rules:**
+
+- A **gap** in `seq`, a reconnect, or a `studio.chat.message.updated` whose `revision` is newer than yours: **drop the partial text and reload the message with `GET /chat-messages/{id}`**. Delivery is lossy (Redis pub/sub has no replay) and REST is the complete fallback; when `status` is `complete` the stored text is the truth.
+- **Closing the tab never cancels a reply.** The server finishes it, stores it as `complete` and **charges it**; you read it with `GET` when you come back, as in any chat app. There is no cancel. On (re)connect, `GET` any message of yours still `pending`.
+- A reply that starts with a refusal never streams a single delta (the first 32 characters are held back and checked): you see `pending` → `failed`, never text that is then retracted.
+- Deltas carry the artist's words: they go to the **owner's channel only**.
+
+### Failures, and when you get your tokens back
+
+A `failed` artist message has an `error_code` and **has been refunded in full already**. Money comes back only when there is **no reply**:
+
+| `error_code` | Meaning |
+|---|---|
+| `llm_unavailable` | the provider could not be reached, kept failing, refused the request or cut the stream |
+| `content_policy_refused` | the model declined (it answers with a sentinel), or the provider's own filter did — the product's content rules apply (`synthara` is SFW) |
+| `reply_empty` | the model said nothing |
+| `reply_timeout` | the 120 s deadline passed (also: a reply nobody finished is failed by a sweep 30 s after the deadline) |
+| `server_shutdown` | the server restarted while the reply was written |
+
+A reply you stopped *listening* to is **not** a failure: it completes and is charged. Your own message stays in the chat when the reply fails; send another to try again. A failed message is not part of the history the artist sees.
+
+### Memory drafts: from a chat to the artist's memories
+
+`POST /chat-messages/{message_id}/memory-draft` turns **one complete message** (the artist's *or yours* — in a diary-style interview you often tell the story) into a **draft** memory. It is an asynchronous, priced job like a reply, with a **required `Idempotency-Key`** (1–128 characters): the same key for the same message returns the same draft (no second charge); for another message `409 idempotency_conflict`. Errors: `422 message_not_complete` (a `pending` or `failed` message), `409 memory_draft_in_progress` (a draft of this message is already being written), `429 chat_rate_limited`, `402`.
+
+`MemoryDraft`: `{id, chat_id, source_message_id, status, draft, error_code, revision, created_at, finished_at}`. `status`: `pending` → `complete` | `failed`. `draft` is `null` until `complete`, then `{title, body, themes, imagery}` — already normalized and within the memory limits of §12. `studio.memory_draft.updated` (`{draft_id, chat_id, source_message_id, status, revision}`, ids only) announces each change; `GET /memory-drafts/{id}` reads it. Failure codes are those above plus `memory_draft_invalid` (the model's draft was not a valid memory even after one correction); a failed draft is refunded in full.
+
+**A draft creates nothing.** Show it, let the user edit it, and save it with the normal create — `POST /artists/{artist_id}/memories` with the edited fields **and `from_draft_id`** (§12) — which makes the memory `origin: "chat"`. From then on it is an ordinary memory: runs and later chats use it, and it can be edited, archived or deleted like any other.
+
+### Notes for the UI
+
+- Show the privacy note and the price next to the message box. Disable *Send* while a message of the chat is `pending` (`chat_reply_in_progress` is the guard).
+- Render the artist's bubble from the deltas as they arrive; when `studio.chat.message.updated` says `complete`, replace it with `GET` if you saw a gap. Mark `truncated` replies.
+- "Make this a track idea" is **client-only**: put the excerpt into the brief of a normal run (§11); there is no endpoint.
+- The artist has **no style field**: its voice comes from its voice notes and its own lyrics.
+- You do not need to say the artist is an AI inside the owner's own chat.

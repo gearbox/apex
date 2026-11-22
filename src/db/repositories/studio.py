@@ -739,6 +739,40 @@ class StudioTrackRepository:
         row = result.one_or_none()
         return None if row is None else (row[0], row[1], row[2])
 
+    async def list_recent_for_artist_with_current_versions(
+        self, artist_id: UUID, *, user_id: UUID, product_id: str, limit: int
+    ) -> Sequence[tuple[StudioTrack, StudioDocumentVersion | None, StudioDocumentVersion | None]]:
+        """The artist's tracks (across every project that names it), most recently touched first,
+        each with the rows its current pointers name - read in ONE statement (one snapshot, so a
+        pointer and its row always agree; no lock). The artist chat's discography.
+
+        Returns:
+            ``(track, current plan row, current lyrics row)``; a row is ``None`` exactly when its
+            pointer is. At most ``limit`` tracks.
+        """
+        plan = aliased(StudioDocumentVersion)
+        lyrics = aliased(StudioDocumentVersion)
+        result = await self._session.execute(
+            select(StudioTrack, plan, lyrics)
+            .join(
+                StudioProjectProfile,
+                StudioProjectProfile.library_project_id == StudioTrack.library_project_id,
+            )
+            .outerjoin(plan, plan.id == StudioTrack.current_plan_version_id)
+            .outerjoin(lyrics, lyrics.id == StudioTrack.current_lyrics_version_id)
+            .where(
+                StudioProjectProfile.artist_id == artist_id,
+                StudioProjectProfile.user_id == user_id,
+                StudioProjectProfile.product_id == product_id,
+                StudioTrack.user_id == user_id,
+                StudioTrack.product_id == product_id,
+            )
+            .order_by(StudioTrack.updated_at.desc(), StudioTrack.id.desc())
+            .limit(limit)
+            .execution_options(**_FRESH)
+        )
+        return [(row[0], row[1], row[2]) for row in result.all()]
+
     async def lock(self, track_id: UUID, *, user_id: UUID, product_id: str) -> StudioTrack | None:
         """``SELECT … FOR UPDATE`` the track: serializes version numbers and pointer changes."""
         result = await self._session.execute(

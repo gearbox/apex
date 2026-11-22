@@ -22,9 +22,11 @@ from src.core.constants import (
 from src.core.enums import GitHubAuthMode, StudioRunKind, WorkerMode
 from src.core.llm_models import (
     LlmModelEntry,
+    LlmRegistryError,
     parse_model_entries,
     validate_model_entries,
     validate_model_keys,
+    validate_streaming_keys,
 )
 from src.core.llm_tracing import TracingEnabledError, force_tracing_off
 from src.core.product_registry import PRODUCT_REGISTRY
@@ -1045,6 +1047,87 @@ class Settings(BaseSettings):
             "Start the studio run worker in-process. Set false only when another process runs it; "
             "without any worker, runs stay queued (and can be cancelled)."
         ),
+    )
+
+    # Studio artist chat (S1-P2c): "interview your artist" - streamed replies, memory drafts.
+    studio_chat_enabled: bool = Field(
+        default=False,
+        description=(
+            "Separate kill switch for the studio artist chat (env STUDIO_CHAT_ENABLED). When "
+            "false every chat and memory-draft route answers 404 and the chat sweep worker is not "
+            "started. Only has effect together with STUDIO_ENABLED. When true, startup fails "
+            "unless the chat model (see STUDIO_CHAT_MODEL) is a streaming registry entry."
+        ),
+    )
+    studio_chat_model: str | None = Field(
+        default=None,
+        description=(
+            "LLM_MODELS key that answers chat messages (env STUDIO_CHAT_MODEL); unset = "
+            "LLM_DEFAULT_MODEL. The entry must have supports_streaming."
+        ),
+    )
+    studio_chat_model_by_product: dict[str, str] = Field(
+        default_factory=dict,
+        description=(
+            "Optional product slug -> LLM_MODELS key (env STUDIO_CHAT_MODEL_BY_PRODUCT), e.g. "
+            '{"synthara": "qwen"}; overrides STUDIO_CHAT_MODEL for that product. Same rule.'
+        ),
+    )
+    studio_memory_draft_model: str | None = Field(
+        default=None,
+        description=(
+            "LLM_MODELS key that writes memory drafts from a chat message (env "
+            "STUDIO_MEMORY_DRAFT_MODEL); unset = LLM_DEFAULT_MODEL."
+        ),
+    )
+    studio_chat_message_price: int = Field(
+        default=1,
+        ge=0,
+        description=(
+            "Tokens per user message, reserved when the message is sent and refunded in full when "
+            "there is no reply (env STUDIO_CHAT_MESSAGE_PRICE). 0 writes no ledger rows."
+        ),
+    )
+    studio_memory_draft_price: int = Field(
+        default=1,
+        ge=0,
+        description="Tokens per memory draft (env STUDIO_MEMORY_DRAFT_PRICE); refunded on failure.",
+    )
+    studio_chat_max_output_tokens: int = Field(
+        default=700,
+        ge=64,
+        le=4_000,
+        description="Output-token limit of one chat reply; a longer reply is kept, truncated.",
+    )
+    studio_chat_reply_deadline_seconds: int = Field(
+        default=120,
+        ge=10,
+        le=600,
+        description="Wall-clock budget of one chat reply or memory draft once it starts.",
+    )
+    studio_chat_max_pending_per_user: int = Field(
+        default=3,
+        ge=1,
+        le=50,
+        description="Pending chat replies + memory drafts one user may have (429 chat_rate_limited).",
+    )
+    studio_chat_jobs_per_user_per_hour: int = Field(
+        default=120,
+        ge=1,
+        le=100_000,
+        description=(
+            "User messages + memory drafts one user may create per rolling hour, counted in the "
+            "database (429 chat_rate_limited)."
+        ),
+    )
+    studio_chat_sweep_interval_seconds: int = Field(
+        default=30, ge=5, le=600, description="Seconds between sweeps of orphaned pending replies."
+    )
+    studio_chat_shutdown_grace_seconds: int = Field(
+        default=10,
+        ge=1,
+        le=120,
+        description="How long shutdown waits for in-flight replies to be failed and refunded.",
     )
 
     # -------------------------------------------------------------------------
@@ -2220,8 +2303,7 @@ class Settings(BaseSettings):
         the day a feature is enabled. API keys are *not* looked up here (see ``llm_required``), and
         messages name the setting and never an environment value.
         """
-        entries = self.llm_model_entries()
-        if entries:
+        if entries := self.llm_model_entries():
             validate_model_entries(entries)
         return self
 
@@ -2235,8 +2317,7 @@ class Settings(BaseSettings):
         never an environment value (the API key itself is looked up when the registry is built,
         see ``src/llm/registry.py``).
         """
-        missing_prices = set(StudioRunKind) - self.studio_run_prices.keys()
-        if missing_prices:
+        if missing_prices := set(StudioRunKind) - self.studio_run_prices.keys():
             raise ValueError(
                 "studio_run_prices must price every run kind (missing: "
                 + ", ".join(sorted(kind.value for kind in missing_prices))
@@ -2253,6 +2334,37 @@ class Settings(BaseSettings):
                 validate_model_keys(f"studio_llm_model_by_kind[{kind.value}]", [key], entries)
             force_tracing_off()
         except TracingEnabledError as exc:
+            raise ValueError(str(exc)) from None
+        return self
+
+    @model_validator(mode="after")
+    def validate_studio_chat(self) -> "Settings":
+        """Fail loud on an unusable artist-chat configuration - before the first message.
+
+        Checked only when ``STUDIO_CHAT_ENABLED`` is on, so a disabled feature never blocks boot.
+        The chat model (and every per-product override) must be a registry key whose entry has
+        ``supports_streaming``; the memory-draft model must be a registry key. A startup error
+        naming the setting, never the first message's failure. Messages never carry a value.
+        """
+        if not self.studio_chat_enabled:
+            return self
+        entries = self.llm_model_entries()
+        if not entries:
+            raise ValueError("llm_models must not be empty when studio_chat_enabled is on")
+        known_slugs = {product.value for product in PRODUCT_REGISTRY}
+        try:
+            validate_model_entries(entries, default_key=self.llm_default_model)
+            validate_streaming_keys(
+                "studio_chat_model", [self.studio_chat_model_key_default], entries
+            )
+            for slug, key in self.studio_chat_model_by_product.items():
+                if slug not in known_slugs:
+                    raise ValueError("studio_chat_model_by_product names an unknown product")
+                validate_streaming_keys(f"studio_chat_model_by_product[{slug}]", [key], entries)
+            validate_model_keys(
+                "studio_memory_draft_model", [self.studio_memory_draft_model_key], entries
+            )
+        except LlmRegistryError as exc:
             raise ValueError(str(exc)) from None
         return self
 
@@ -2353,14 +2465,37 @@ class Settings(BaseSettings):
         return self.studio_enabled and self.studio_runs_enabled
 
     @property
+    def studio_chat_active(self) -> bool:
+        """Whether the artist chat is served at all: the studio **and** the chat switch are on.
+
+        Gates the chat routes, the chat task supervisor and the sweep worker.
+        """
+        return self.studio_enabled and self.studio_chat_enabled
+
+    @property
+    def studio_chat_model_key_default(self) -> str:
+        """The registry key that answers chat messages unless a product overrides it."""
+        return self.studio_chat_model or self.llm_default_model
+
+    @property
+    def studio_memory_draft_model_key(self) -> str:
+        """The registry key that writes memory drafts."""
+        return self.studio_memory_draft_model or self.llm_default_model
+
+    def studio_chat_model_key(self, product_id: str) -> str:
+        """The registry key that answers a chat message of ``product_id``: its override, else the
+        chat model, else the default model. Pure; startup has already checked every value."""
+        return self.studio_chat_model_by_product.get(product_id, self.studio_chat_model_key_default)
+
+    @property
     def llm_required(self) -> bool:
         """Whether any enabled feature calls a chat model - the registry and HTTP client are needed.
 
         Gates everything that needs an API key: reading keys from the environment, building the
-        registry and the shared HTTP client. Today only the studio planner runs; a feature that
-        joins (prompt extension, ...) adds its own switch here.
+        registry and the shared HTTP client. Today the studio planner runs and the studio artist
+        chat; a feature that joins (prompt extension, ...) adds its own switch here.
         """
-        return self.studio_runs_active
+        return self.studio_runs_active or self.studio_chat_active
 
     def llm_model_entries(self) -> dict[str, LlmModelEntry]:
         """The decoded ``LLM_MODELS`` registry entries.

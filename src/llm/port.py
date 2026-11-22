@@ -13,11 +13,13 @@ from dataclasses import dataclass
 from typing import TYPE_CHECKING, Literal, Protocol
 
 if TYPE_CHECKING:
-    from collections.abc import Sequence
+    from collections.abc import AsyncIterator, Sequence
 
     import msgspec
 
 __all__ = [
+    "ChatChunk",
+    "ChatLlmPort",
     "LlmError",
     "LlmMessage",
     "LlmOutputInvalid",
@@ -27,7 +29,9 @@ __all__ = [
     "LlmResult",
     "LlmUnavailable",
     "LlmUsage",
+    "StreamEnd",
     "StructuredLlmPort",
+    "TextDelta",
 ]
 
 
@@ -111,5 +115,53 @@ class StructuredLlmPort(Protocol):
             LlmRejected: The provider refused the request.
             LlmOutputTruncated: The reply was cut off (``usage`` holds its tokens when known).
             LlmOutputInvalid: The reply is not a valid ``schema`` object (``usage`` as above).
+        """
+        ...
+
+
+@dataclass(frozen=True, slots=True)
+class TextDelta:
+    """A piece of a reply that is being written. User-visible content: never logged."""
+
+    text: str
+
+
+@dataclass(frozen=True, slots=True)
+class StreamEnd:
+    """The last chunk of a stream: why it stopped, what it cost and who answered."""
+
+    finish_reason: str | None
+    """``"stop"`` | ``"length"`` | ``"content_filter"`` | another provider value; ``None`` when the
+    stream ended without saying."""
+    usage: LlmUsage
+    """Zeros when the provider reports none."""
+    model_id: str | None
+
+
+type ChatChunk = TextDelta | StreamEnd
+
+
+class ChatLlmPort(Protocol):
+    """A streamed chat completion: text as it is written, then how it ended.
+
+    Separate from :class:`StructuredLlmPort` on purpose: a stream cannot be retried once the first
+    text has been delivered, and its failure modes (a reply cut off mid-way) are not those of a
+    structured call.
+    """
+
+    def stream(
+        self, messages: Sequence[LlmMessage], *, max_output_tokens: int
+    ) -> AsyncIterator[ChatChunk]:
+        """Text deltas, then exactly one :class:`StreamEnd`.
+
+        Args:
+            messages: The conversation so far (a leading system message, then the history).
+            max_output_tokens: The output-token limit of this reply.
+
+        Raises:
+            LlmUnavailable: The provider could not be reached or kept failing before any text was
+                delivered, or the connection broke mid-stream (the reply cannot be spliced).
+            LlmRejected: The provider refused the request.
+            LlmOutputInvalid: The stream is not a well-formed completion stream.
         """
         ...

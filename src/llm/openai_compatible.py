@@ -29,15 +29,18 @@ from src.llm.port import (
     LlmResult,
     LlmUnavailable,
     LlmUsage,
+    StreamEnd,
+    TextDelta,
 )
 from src.llm.strict_schema import to_strict_schema
 
 if TYPE_CHECKING:
-    from collections.abc import Awaitable, Callable, Sequence
+    from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 
     from pydantic import SecretStr
 
     from src.core.llm_models import LlmModelEntry
+    from src.llm.port import ChatChunk
 
 __all__ = ["OpenAICompatibleLlmAdapter"]
 
@@ -60,8 +63,31 @@ class _Retry:
     delay: float
 
 
+class _StreamRetry(Exception):
+    """A stream attempt failed **before any text was delivered**: it may be repeated once.
+
+    Internal control flow between ``_stream_attempt`` and ``stream``; it never leaves this module.
+    """
+
+    def __init__(self, retry: _Retry) -> None:
+        super().__init__(retry.failure)
+        self.retry = retry
+
+
+@dataclass(slots=True)
+class _StreamState:
+    """What one stream attempt has seen so far (reset for every attempt)."""
+
+    delivered: bool = False
+    """Whether any text has been handed to the caller: from then on nothing may be retried."""
+    finish_reason: str | None = None
+    usage: LlmUsage | None = None
+    model_id: str | None = None
+    chunks: int = 0
+
+
 class OpenAICompatibleLlmAdapter:
-    """``StructuredLlmPort`` over a chat-completions endpoint."""
+    """``StructuredLlmPort`` and ``ChatLlmPort`` over a chat-completions endpoint."""
 
     def __init__(
         self,
@@ -95,6 +121,182 @@ class OpenAICompatibleLlmAdapter:
         body = self._body(messages, schema, schema_name)
         payload = await self._post(body)
         return self._decode(payload, schema)
+
+    async def stream(
+        self, messages: Sequence[LlmMessage], *, max_output_tokens: int
+    ) -> AsyncIterator[ChatChunk]:
+        """See :meth:`ChatLlmPort.stream`.
+
+        The single transport retry applies **only before the first text delta**: once the caller
+        has seen text, a reply cannot be spliced, so any later failure raises.
+        """
+        body = self._stream_body(messages, max_output_tokens)
+        headers = {"Authorization": f"Bearer {self._api_key.get_secret_value()}"}
+        failure = "transport"
+        for attempt in range(1, _MAX_ATTEMPTS + 1):
+            state = _StreamState()
+            try:
+                async for chunk in self._stream_attempt(body, headers, attempt, state):
+                    yield chunk
+            except _StreamRetry as retry:
+                failure = retry.retry.failure
+                if attempt < _MAX_ATTEMPTS:
+                    await self._sleep(retry.retry.delay)
+                continue
+            return
+        raise LlmUnavailable(f"LLM provider unavailable ({failure})")
+
+    def _stream_body(
+        self, messages: Sequence[LlmMessage], max_output_tokens: int
+    ) -> dict[str, Any]:
+        entry = self._entry
+        body: dict[str, Any] = {}
+        if entry.temperature is not None:
+            body["temperature"] = entry.temperature
+        extra = {k: v for k, v in entry.extra_body.items() if k not in PROTECTED_BODY_KEYS}
+        # The contract keys go in last: ``extra_body`` cannot turn streaming or usage off.
+        return {
+            **body,
+            **extra,
+            "max_tokens": max_output_tokens,
+            "stream": True,
+            "stream_options": {"include_usage": True},
+            "model": entry.model,
+            "messages": [{"role": m.role, "content": m.content} for m in messages],
+        }
+
+    async def _stream_attempt(
+        self, body: dict[str, Any], headers: dict[str, str], attempt: int, state: _StreamState
+    ) -> AsyncIterator[ChatChunk]:
+        """One streaming request: text deltas, then the end.
+
+        Raises:
+            _StreamRetry: Failed before any text was delivered, in a way worth one more attempt.
+            LlmRejected: A final ``4xx``.
+            LlmUnavailable: The stream broke after text was delivered, or ended without an end.
+            LlmOutputInvalid: A line of the stream is not a completion chunk.
+        """
+        started = time.perf_counter()
+        done = False
+        try:
+            async with self._client.stream(
+                "POST",
+                self._url,
+                json=body,
+                headers=headers,
+                timeout=httpx.Timeout(self._entry.timeout_s),
+            ) as response:
+                status = response.status_code
+                if status != httpx.codes.OK:
+                    self._log_stream("failed", started, attempt, state, status=status)
+                    if not _is_retryable(status):
+                        raise LlmRejected(status)
+                    retry_after = _retry_after(response)
+                    raise _StreamRetry(
+                        _Retry(
+                            f"http_{status}",
+                            retry_after if retry_after is not None else _DEFAULT_BACKOFF_SECONDS,
+                        )
+                    )
+                async for line in response.aiter_lines():
+                    payload = _data_of(line)
+                    if payload is None:
+                        continue
+                    if payload == "[DONE]":
+                        done = True
+                        break
+                    if text := self._read_chunk(payload, state):
+                        state.delivered = True
+                        yield TextDelta(text)
+        except (httpx.TimeoutException, httpx.TransportError):
+            self._log_stream("failed", started, attempt, state, status=None)
+            if state.delivered:
+                raise LlmUnavailable("LLM stream was interrupted") from None
+            raise _StreamRetry(_Retry("transport", _DEFAULT_BACKOFF_SECONDS)) from None
+        if not done and state.finish_reason is None:
+            # The body closed without ``[DONE]`` and without a finish chunk: a cut-off stream,
+            # not a reply that ended.
+            self._log_stream("failed", started, attempt, state, status=httpx.codes.OK)
+            if state.delivered:
+                raise LlmUnavailable("LLM stream ended unexpectedly")
+            raise _StreamRetry(_Retry("transport", _DEFAULT_BACKOFF_SECONDS))
+        self._log_stream("finished", started, attempt, state, status=httpx.codes.OK)
+        yield StreamEnd(
+            finish_reason=state.finish_reason,
+            usage=state.usage or LlmUsage(prompt_tokens=0, completion_tokens=0),
+            model_id=state.model_id,
+        )
+
+    def _read_chunk(self, payload: str, state: _StreamState) -> str:
+        """Fold one ``data:`` payload into ``state``; returns the text delta it carried (or ``""``).
+
+        Raises:
+            LlmOutputInvalid: The payload is not a JSON object. No text, no chaining: the payload
+                is reply content.
+            LlmUnavailable: The provider reported an error inside the stream after text was
+                delivered (before that it is retried).
+        """
+        try:
+            chunk = json.loads(payload)
+        except ValueError:
+            raise LlmOutputInvalid("LLM stream chunk is not JSON") from None
+        if not isinstance(chunk, dict):
+            raise LlmOutputInvalid("LLM stream chunk is not a JSON object")
+        state.chunks += 1
+        if "error" in chunk and not chunk.get("choices"):
+            if state.delivered:
+                raise LlmUnavailable("LLM stream reported an error")
+            raise _StreamRetry(_Retry("stream_error", _DEFAULT_BACKOFF_SECONDS))
+        usage = _reported_usage(chunk)
+        if usage is not None:
+            state.usage = usage
+        model = chunk.get("model")
+        if isinstance(model, str) and model:
+            state.model_id = model
+        choices = chunk.get("choices")
+        choice = choices[0] if isinstance(choices, list) and choices else None
+        if not isinstance(choice, dict):
+            return ""  # the usage chunk (``choices: []``) and keep-alives carry no text
+        finish = choice.get("finish_reason")
+        if isinstance(finish, str) and finish:
+            state.finish_reason = finish
+        delta = choice.get("delta")
+        content = delta.get("content") if isinstance(delta, dict) else None
+        return content if isinstance(content, str) else ""
+
+    def _log_stream(
+        self,
+        outcome: str,
+        started: float,
+        attempt: int,
+        state: _StreamState,
+        *,
+        status: int | None,
+    ) -> None:
+        """Metadata only: never a delta, never a prompt."""
+        prompt_tokens = state.usage.prompt_tokens if state.usage else None
+        completion_tokens = state.usage.completion_tokens if state.usage else None
+        duration_ms = int((time.perf_counter() - started) * 1000)
+        if outcome == "finished":
+            logger.info(
+                "llm.stream_finished",
+                model_key=self._model_key,
+                status_code=status,
+                finish_reason=state.finish_reason,
+                prompt_tokens=prompt_tokens,
+                completion_tokens=completion_tokens,
+                duration_ms=duration_ms,
+                attempt=attempt,
+            )
+        else:
+            logger.info(
+                "llm.stream_failed",
+                model_key=self._model_key,
+                status_code=status,
+                delivered=state.delivered,
+                duration_ms=duration_ms,
+                attempt=attempt,
+            )
 
     # -- request -----------------------------------------------------------------------------
 
@@ -232,6 +434,15 @@ def _reported_usage(payload: dict[str, Any]) -> LlmUsage | None:
         prompt_tokens=prompt if isinstance(prompt, int) else 0,
         completion_tokens=completion if isinstance(completion, int) else 0,
     )
+
+
+def _data_of(line: str) -> str | None:
+    """The payload of a server-sent ``data:`` line; ``None`` for blank lines, comments (``:``) and
+    every other field (``event:``, ``id:``, ``retry:``)."""
+    if not line.startswith("data:"):
+        return None
+    payload = line[len("data:") :].strip()
+    return payload or None
 
 
 def _put_in_leading_system_message(wire_messages: list[dict[str, Any]], text: str) -> None:

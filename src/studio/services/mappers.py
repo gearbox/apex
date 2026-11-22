@@ -26,7 +26,7 @@ from src.core.enums import (
     StudioRunStatus,
 )
 from src.studio.documents import LyricsDocument, PlanDocument, decode_stored
-from src.studio.planner.context import MemorySnapshot
+from src.studio.planner.context import ArtistSnapshot, MemorySnapshot
 
 if TYPE_CHECKING:
     from src.db.models.studio import (
@@ -41,6 +41,7 @@ if TYPE_CHECKING:
 __all__ = [
     "DANGLING_CURRENT_POINTER",
     "artist_out",
+    "artist_snapshot",
     "decode_lyrics",
     "decode_plan",
     "is_current",
@@ -90,6 +91,21 @@ def memory_out(memory: StudioArtistMemory) -> MemoryOut:
         origin=StudioMemoryOrigin(memory.origin),
         created_at=memory.created_at,
         updated_at=memory.updated_at,
+    )
+
+
+def artist_snapshot(artist: StudioArtist) -> ArtistSnapshot:
+    """Every planner-relevant field of the artist, as a run or a chat records it."""
+    return ArtistSnapshot(
+        id=artist.id,
+        name=artist.name,
+        persona=artist.persona,
+        voice_notes=artist.voice_notes,
+        default_language=artist.default_language,
+        style_tags=tuple(artist.style_tags),
+        global_avoid=tuple(artist.global_avoid),
+        aesthetic_references=tuple(artist.aesthetic_references),
+        updated_at=artist.updated_at,
     )
 
 
