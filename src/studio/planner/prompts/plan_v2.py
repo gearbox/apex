@@ -42,6 +42,8 @@ __all__ = [
 ]
 
 PROMPT_VERSION: Final = "plan-v2"
+_REQUEST_BLOCK: Final = "brief"
+"""The tag of the user-message block that carries the request; the memory rule names it too."""
 
 _SYSTEM_TEMPLATE: Final = """\
 You plan the structure of a song for a music production tool. You return one JSON object and nothing else.
@@ -67,7 +69,7 @@ def build_system_prompt(rating: ContentRating, memories: Sequence[MemorySnapshot
     return _SYSTEM_TEMPLATE.format(
         kinds=kinds,
         policy=policy_block(rating),
-        memory_rule=memory_rule(memories, request_block="brief"),
+        memory_rule=memory_rule(memories, request_block=_REQUEST_BLOCK),
     )
 
 
@@ -92,7 +94,7 @@ def build_plan_messages(context: RunContextSnapshot, request: PlanRunRequest) ->
         blocks.append(block("project_concept", clean(context.concept)))
     if context.current_plan is not None:
         blocks.append(block("current_plan", plan_lines(context.current_plan)))
-    blocks.append(block("brief", clean(request.brief)))
+    blocks.append(block(_REQUEST_BLOCK, clean(request.brief)))
     return [
         LlmMessage(
             "system",

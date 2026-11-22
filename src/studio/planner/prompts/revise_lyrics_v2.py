@@ -50,6 +50,8 @@ __all__ = [
 ]
 
 PROMPT_VERSION: Final = "revise-lyrics-v2"
+_REQUEST_BLOCK: Final = "instruction"
+"""The tag of the user-message block that carries the request; the memory rule names it too."""
 
 _SYSTEM_TEMPLATE: Final = """\
 You revise parts of existing song lyrics for a music production tool. You return one JSON object and nothing else.
@@ -74,7 +76,7 @@ If the instruction asks for something these rules forbid, set "refusal" to "cont
 def build_system_prompt(rating: ContentRating, memories: Sequence[MemorySnapshot] = ()) -> str:
     """The system message for a product with ``rating``; the memory rule only when ``memories``."""
     return _SYSTEM_TEMPLATE.format(
-        policy=policy_block(rating), memory_rule=memory_rule(memories, request_block="instruction")
+        policy=policy_block(rating), memory_rule=memory_rule(memories, request_block=_REQUEST_BLOCK)
     )
 
 
@@ -108,7 +110,7 @@ def build_revise_messages(
         )
         if optional is not None
     )
-    blocks.append(block("instruction", clean(request.instruction)))
+    blocks.append(block(_REQUEST_BLOCK, clean(request.instruction)))
     return [
         LlmMessage(
             "system",

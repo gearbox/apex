@@ -10,7 +10,7 @@ auto-fill candidates, **in order, while the next one fits the budget; stop at th
 not.** It never skips ahead to a smaller, less salient memory: that would invert the salience order.
 
 Every memory is introduced by a **key**, ``m1 … mN`` in prompt order, so that a model refusing
-because of a memory (R5) can name it; ``memory_ids_for_keys`` maps the keys it names back to ids.
+because of a memory (P2b-10) can name it; ``memory_ids_for_keys`` maps the keys it names back to ids.
 The key is part of the rendered text, so it is part of what the budget counts: a memory's cost
 depends on its **position** (``m10`` is a character longer than ``m9``), and the size computed at
 submit for the pins equals the size at claim for the same pins, because pins come first at both.

@@ -19,7 +19,8 @@ syllable range, an avoid-word) succeed with warnings (P2a-44).
 A round that fails at the port (an error, an unusable reply on the last call) never discards a
 validated document: when only soft problems were left, the run ends with that document and the
 warning ``revision_incomplete``; with a hard problem there is nothing usable and the error
-propagates (P2a-44, R1). A run that the 180 s deadline cancels mid-round still ends ``run_timeout``.
+propagates (P2a-44, P2a-B). A run that the 180 s deadline cancels mid-round still ends
+``run_timeout``.
 """
 
 from __future__ import annotations
@@ -345,7 +346,7 @@ def _route(state: LyricsState) -> Literal["revise", "done"]:
 
 
 def _after_revise(state: LyricsState) -> Literal["check", "done"]:
-    """A round that failed at the port has already set the outcome (R1); otherwise check again."""
+    """A round that failed at the port has already set the outcome; otherwise check again."""
     return "done" if state["outcome"] is not None else "check"
 
 
