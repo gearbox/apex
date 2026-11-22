@@ -6,7 +6,8 @@ foreign id read nothing); writes are Core ``insert/update/delete … RETURNING``
 ``flush()`` or ``commit()``; locking reads use ``populate_existing``.
 
 Lock order: **artist → chat → message** (never the reverse). ``StudioChatRepository.lock`` takes
-the chat row only; the artist lock is the caller's, taken first. The per-user quota lock
+the chat row only; the artist lock is the caller's, taken first. An artist delete takes the artist
+and then **all** of its chats (``lock_for_artist``, in id order). The per-user quota lock
 (``lock_user_quota``) is taken after the chat lock and nothing takes it before one.
 
 Every state change of a reply or a draft is one guarded ``UPDATE … WHERE status = 'pending'
@@ -106,6 +107,31 @@ class StudioChatRepository:
             .execution_options(**_FRESH)
         )
         return result.scalar_one_or_none()
+
+    async def lock_for_artist(
+        self, artist_id: UUID, *, user_id: UUID, product_id: str
+    ) -> list[UUID]:
+        """``SELECT id … FOR UPDATE ORDER BY id`` every chat of the artist; returns their ids.
+
+        The artist delete takes these after the artist row (artist → chat). A send or a draft
+        request holds its chat's lock until it commits, so the delete waits for it and then sees
+        the pending row it wrote; one that arrives later waits on the delete and finds no chat.
+        Without these locks a send that commits between the delete's pending check and its
+        ``DELETE`` would be cascaded away with its reservation. The fixed id order keeps two
+        callers that lock several chats from deadlocking.
+        """
+        result = await self._session.execute(
+            select(StudioArtistChat.id)
+            .where(
+                StudioArtistChat.artist_id == artist_id,
+                StudioArtistChat.user_id == user_id,
+                StudioArtistChat.product_id == product_id,
+            )
+            .order_by(StudioArtistChat.id)
+            .with_for_update()
+            .execution_options(**_FRESH)
+        )
+        return list(result.scalars().all())
 
     async def count_for_artist(self, artist_id: UUID, *, user_id: UUID, product_id: str) -> int:
         result = await self._session.execute(
@@ -337,6 +363,23 @@ class StudioChatMessageRepository:
         )
         return result.first() is not None
 
+    async def has_pending_reply_for_artist(
+        self, artist_id: UUID, *, user_id: UUID, product_id: str
+    ) -> bool:
+        """Whether any chat of the artist has a reply in flight."""
+        result = await self._session.execute(
+            select(StudioArtistChatMessage.id)
+            .join(StudioArtistChat, StudioArtistChat.id == StudioArtistChatMessage.chat_id)
+            .where(
+                StudioArtistChat.artist_id == artist_id,
+                StudioArtistChatMessage.role == StudioChatRole.ARTIST.value,
+                StudioArtistChatMessage.status == _PENDING_MESSAGE,
+                *self._scope(user_id, product_id),
+            )
+            .limit(1)
+        )
+        return result.first() is not None
+
     async def list_page(
         self,
         chat_id: UUID,
@@ -388,18 +431,6 @@ class StudioChatMessageRepository:
             .where(
                 StudioArtistChatMessage.role == StudioChatRole.ARTIST.value,
                 StudioArtistChatMessage.status == _PENDING_MESSAGE,
-                *self._scope(user_id, product_id),
-            )
-        )
-        return result.scalar_one()
-
-    async def count_user_messages_in_last_hour(self, *, user_id: UUID, product_id: str) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(StudioArtistChatMessage)
-            .where(
-                StudioArtistChatMessage.role == StudioChatRole.USER.value,
-                StudioArtistChatMessage.created_at > func.now() - timedelta(hours=1),
                 *self._scope(user_id, product_id),
             )
         )
@@ -601,22 +632,27 @@ class StudioMemoryDraftRepository:
         )
         return result.first() is not None
 
+    async def has_pending_for_artist(
+        self, artist_id: UUID, *, user_id: UUID, product_id: str
+    ) -> bool:
+        """Whether any chat of the artist has a memory draft in flight."""
+        result = await self._session.execute(
+            select(StudioMemoryDraft.id)
+            .join(StudioArtistChat, StudioArtistChat.id == StudioMemoryDraft.chat_id)
+            .where(
+                StudioArtistChat.artist_id == artist_id,
+                StudioMemoryDraft.status == _PENDING_DRAFT,
+                *self._scope(user_id, product_id),
+            )
+            .limit(1)
+        )
+        return result.first() is not None
+
     async def count_pending(self, *, user_id: UUID, product_id: str) -> int:
         result = await self._session.execute(
             select(func.count())
             .select_from(StudioMemoryDraft)
             .where(StudioMemoryDraft.status == _PENDING_DRAFT, *self._scope(user_id, product_id))
-        )
-        return result.scalar_one()
-
-    async def count_in_last_hour(self, *, user_id: UUID, product_id: str) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(StudioMemoryDraft)
-            .where(
-                StudioMemoryDraft.created_at > func.now() - timedelta(hours=1),
-                *self._scope(user_id, product_id),
-            )
         )
         return result.scalar_one()
 

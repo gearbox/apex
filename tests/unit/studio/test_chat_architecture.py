@@ -271,9 +271,28 @@ def test_the_sweep_workers_lease_name_is_stable() -> None:
     )
 
 
-def test_migration_060_leaves_the_runs_alone_and_never_imports_application_code() -> None:
+def test_migration_060_only_reads_the_runs_for_the_backfill_and_never_imports_application_code() -> (
+    None
+):
+    """A memory draft is its own table, not a kind of planner run: 060 never alters
+    ``studio_runs``. The one thing it does with it is the usage ledger's backfill, a single
+    ``INSERT … SELECT`` of the runs of the last hour (R2)."""
     source = (ROOT / "alembic/versions/060_studio_artist_chat.py").read_text()
-    assert "studio_runs" not in source
+    tree = ast.parse(source)
+    docstring = ast.get_docstring(tree, clean=False)
+    mentions = [
+        node.value
+        for node in ast.walk(tree)
+        if isinstance(node, ast.Constant)
+        and isinstance(node.value, str)
+        and node.value != docstring
+        and "studio_runs" in node.value
+    ]
+    assert len(mentions) == 1  # the backfill, and nothing else in the code
+    (backfill,) = mentions
+    assert backfill.startswith("INSERT INTO studio_llm_usage")
+    assert "FROM studio_runs WHERE created_at > now() - interval '1 hour'" in backfill
+    assert not {"UPDATE", "DELETE", "ALTER", "DROP"} & set(backfill.upper().split())
     assert not re.search(r"^\s*(from|import)\s+src\b", source, flags=re.MULTILINE)
     assert 'revision: str = "060"' in source
     assert 'down_revision: str | Sequence[str] | None = "059"' in source

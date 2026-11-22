@@ -740,14 +740,7 @@ class TestLimits:
         chat_id = await world.new_chat(actor)
         world.chat_llm.add(reply(LONG), reply(LONG))
         await world.ask(actor, chat_id, "one")
-        async with world.factory() as session, session.begin():
-            await session.execute(
-                text(
-                    "UPDATE studio_artist_chat_messages SET created_at = now() - interval '2 hours' "
-                    "WHERE user_id = :u"
-                ),
-                {"u": actor.user_id},
-            )
+        await world.age_usage(actor)  # the limit counts the usage ledger (R2), not the messages
         await world.ask(actor, chat_id, "two")
 
     async def test_a_chat_holds_at_most_two_hundred_messages(

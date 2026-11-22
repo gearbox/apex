@@ -17,6 +17,7 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "ArtistBusy",
     "ArtistInUse",
     "ArtistLimitReached",
     "ArtistNameConflict",
@@ -395,6 +396,18 @@ class ChatBusy(StudioError):
     code = "chat_busy"
     status_code = 409
     message = "The chat has a reply or a memory draft in progress."
+
+
+class ArtistBusy(StudioError):
+    """An artist with a pending chat reply or memory draft cannot be deleted (S1-P2c R1).
+
+    The cascade ``artist → chats → messages / drafts`` would delete a paid, pending row whose
+    reservation then never gets refunded; the user retries in a few seconds, as for ``ChatBusy``.
+    """
+
+    code = "artist_busy"
+    status_code = 409
+    message = "The artist has a chat reply or memory draft in progress."
 
 
 class MemoryDraftInProgress(StudioError):

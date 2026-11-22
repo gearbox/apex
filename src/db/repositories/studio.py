@@ -40,6 +40,7 @@ from sqlalchemy.orm import aliased
 
 from src.core.enums import (
     StudioDocumentKind,
+    StudioLlmUsageKind,
     StudioMemoryOrigin,
     StudioMemoryStatus,
     StudioRunStage,
@@ -51,6 +52,7 @@ from src.db.models.studio import (
     StudioArtist,
     StudioArtistMemory,
     StudioDocumentVersion,
+    StudioLlmUsage,
     StudioProjectProfile,
     StudioRun,
     StudioTrack,
@@ -70,6 +72,7 @@ __all__ = [
     "StudioArtistMemoryRepository",
     "StudioArtistRepository",
     "StudioDocumentVersionRepository",
+    "StudioLlmUsageRepository",
     "StudioProjectRepository",
     "StudioRunRepository",
     "StudioTrackRepository",
@@ -1256,18 +1259,6 @@ class StudioRunRepository:
             {"ns": _RUN_QUOTA_LOCK_NAMESPACE, "uid": str(user_id)},
         )
 
-    async def count_created_in_last_hour(self, *, user_id: UUID, product_id: str) -> int:
-        result = await self._session.execute(
-            select(func.count())
-            .select_from(StudioRun)
-            .where(
-                StudioRun.user_id == user_id,
-                StudioRun.product_id == product_id,
-                StudioRun.created_at > func.now() - timedelta(hours=1),
-            )
-        )
-        return result.scalar_one()
-
     async def count_active(self, *, user_id: UUID, product_id: str) -> int:
         result = await self._session.execute(
             select(func.count())
@@ -1489,3 +1480,58 @@ class StudioRunRepository:
             .execution_options(**_FRESH, synchronize_session=False)
         )
         return result.scalars().all()
+
+
+class StudioLlmUsageRepository:
+    """Data access for ``studio_llm_usage``: the ledger behind the hourly limits (R2).
+
+    Used by planner runs and by the artist chat. Every row is written in the savepoint of the job
+    it accounts for, and read and purged under the caller's per-user advisory quota lock
+    (``StudioRunRepository.lock_user_quota`` / ``StudioChatRepository.lock_user_quota``), so
+    "purge, count, then record" cannot interleave with another request of the same user. The
+    caller owns the lock; this class takes none.
+    """
+
+    def __init__(self, session: AsyncSession) -> None:
+        self._session = session
+
+    async def record(self, *, user_id: UUID, product_id: str, kind: StudioLlmUsageKind) -> None:
+        """Account for one accepted job. Call inside the job's savepoint: a ``402`` that rolls the
+        job back rolls this back with it."""
+        await self._session.execute(
+            pg_insert(StudioLlmUsage).values(
+                id=new_id(), user_id=user_id, product_id=product_id, kind=kind.value
+            )
+        )
+
+    async def count_last_hour(
+        self, *, user_id: UUID, product_id: str, kinds: Collection[StudioLlmUsageKind]
+    ) -> int:
+        """Rows of ``kinds`` recorded in the last hour (strictly: ``created_at > now() - 1 h``)."""
+        result = await self._session.execute(
+            select(func.count())
+            .select_from(StudioLlmUsage)
+            .where(
+                StudioLlmUsage.user_id == user_id,
+                StudioLlmUsage.product_id == product_id,
+                StudioLlmUsage.kind.in_([kind.value for kind in kinds]),
+                StudioLlmUsage.created_at > func.now() - timedelta(hours=1),
+            )
+        )
+        return result.scalar_one()
+
+    async def purge_older_than_hour(
+        self, *, user_id: UUID, product_id: str, kinds: Collection[StudioLlmUsageKind]
+    ) -> None:
+        """Delete the user's rows of ``kinds`` that no longer count (``created_at <= now() - 1 h``,
+        the exact complement of :meth:`count_last_hour`)."""
+        await self._session.execute(
+            delete(StudioLlmUsage)
+            .where(
+                StudioLlmUsage.user_id == user_id,
+                StudioLlmUsage.product_id == product_id,
+                StudioLlmUsage.kind.in_([kind.value for kind in kinds]),
+                StudioLlmUsage.created_at <= func.now() - timedelta(hours=1),
+            )
+            .execution_options(synchronize_session=False)
+        )

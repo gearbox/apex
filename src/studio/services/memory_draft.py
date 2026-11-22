@@ -25,12 +25,12 @@ from typing import TYPE_CHECKING, Final
 import structlog
 from sqlalchemy.exc import IntegrityError
 
-from src.core.enums import StudioChatMessageStatus
+from src.core.enums import StudioChatMessageStatus, StudioLlmUsageKind
 from src.core.product_registry import get_product_config_by_slug
 from src.core.uid import new_id
 from src.db.integrity import violated_constraint
 from src.db.models.studio_chat import DRAFT_ONE_PENDING_PER_SOURCE, DRAFT_USER_IDEMPOTENCY
-from src.db.repositories.studio import StudioArtistRepository
+from src.db.repositories.studio import StudioArtistRepository, StudioLlmUsageRepository
 from src.db.repositories.studio_chat import (
     StudioChatMessageRepository,
     StudioChatRepository,
@@ -103,6 +103,7 @@ class MemoryDraftService:
         self._chats = StudioChatRepository(session)
         self._messages = StudioChatMessageRepository(session)
         self._drafts = StudioMemoryDraftRepository(session)
+        self._usage = StudioLlmUsageRepository(session)
 
     async def create(
         self,
@@ -260,6 +261,11 @@ class MemoryDraftService:
                     description="Studio memory draft",
                 )
                 balance_event = reserved.event
+            # Accepted: it counts towards the hourly limit however the draft ends (a 402 above
+            # rolls this savepoint back with the draft).
+            await self._usage.record(
+                user_id=user_id, product_id=product_id, kind=StudioLlmUsageKind.MEMORY_DRAFT
+            )
         return draft, balance_event
 
     async def _replay(
@@ -276,16 +282,22 @@ class MemoryDraftService:
         return DraftWrite(draft=existing, changed=False)
 
     async def _check_limits(self, user_id: UUID, product_id: str) -> None:
-        """The same per-user limits as sending a message (they share the budget)."""
+        """The same per-user limits as sending a message (they share the budget).
+
+        The hourly count reads the usage ledger, not the draft rows (R2): see
+        ``ChatService._check_limits``.
+        """
         await self._chats.lock_user_quota(user_id)
         pending = await self._messages.count_pending_replies(
             user_id=user_id, product_id=product_id
         ) + await self._drafts.count_pending(user_id=user_id, product_id=product_id)
         if pending >= self._settings.studio_chat_max_pending_per_user:
             raise ChatRateLimited
-        recent = await self._messages.count_user_messages_in_last_hour(
-            user_id=user_id, product_id=product_id
-        ) + await self._drafts.count_in_last_hour(user_id=user_id, product_id=product_id)
+        kinds = StudioLlmUsageKind.chat()
+        await self._usage.purge_older_than_hour(user_id=user_id, product_id=product_id, kinds=kinds)
+        recent = await self._usage.count_last_hour(
+            user_id=user_id, product_id=product_id, kinds=kinds
+        )
         if recent >= self._settings.studio_chat_jobs_per_user_per_hour:
             raise ChatRateLimited
 

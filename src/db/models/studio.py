@@ -53,6 +53,7 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.core.enums import (
     StudioDocumentKind,
     StudioDocumentOrigin,
+    StudioLlmUsageKind,
     StudioMemoryOrigin,
     StudioMemoryStatus,
     StudioReleaseKind,
@@ -74,6 +75,7 @@ __all__ = [
     "StudioArtist",
     "StudioArtistMemory",
     "StudioDocumentVersion",
+    "StudioLlmUsage",
     "StudioProjectProfile",
     "StudioRun",
     "StudioTrack",
@@ -581,3 +583,46 @@ class StudioRun(Base):
 
     def __repr__(self) -> str:
         return f"<StudioRun {self.id} track={self.track_id} {self.kind} {self.status}>"
+
+
+class StudioLlmUsage(Base):
+    """One accepted, priced LLM job of the studio: the ledger behind the hourly limits (R2).
+
+    ``STUDIO_RUNS_PER_USER_PER_HOUR`` and ``STUDIO_CHAT_JOBS_PER_USER_PER_HOUR`` exist to cap
+    provider spend whatever the price is (a price of 0 bills nothing). Counting the surviving
+    ``studio_runs`` / chat rows made the cap resettable: send → complete → delete the chat (or the
+    track) → repeat. This table is **append-only and has no foreign key to anything a studio
+    delete reaches** (no chat, message, draft, track or run): the one FK is to ``users``, so
+    deleting an account removes its rows and nothing else does.
+
+    A row is written in the same savepoint as the job it accounts for (a replay records nothing,
+    a ``402`` rolls it back with the job) and counts however the job ends: completed, failed,
+    refunded or cancelled.
+
+    Retention: the limit check, under the same per-user advisory lock, deletes the user's rows
+    older than an hour before it counts, so an active user keeps about one hour's worth with no
+    worker. The rows of a user who stops sending stay (at most one hour's allowance, a few hundred
+    rows) until their next request or the account's deletion. Nothing reads them for anything but
+    the count, and they hold no text.
+
+    ``product_id`` has no index of its own: the window index leads with ``(user_id, product_id)``
+    and is the only access path (the ``users`` cascade finds rows by its ``user_id`` prefix).
+    """
+
+    __tablename__ = "studio_llm_usage"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("users.id", ondelete="CASCADE"), nullable=False
+    )
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False)
+    kind: Mapped[str] = mapped_column(String(20), nullable=False)
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        CheckConstraint(_in_list("kind", StudioLlmUsageKind), name="ck_studio_llm_usage_kind"),
+        Index("ix_studio_llm_usage_window", "user_id", "product_id", "kind", "created_at"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StudioLlmUsage {self.id} {self.kind}>"

@@ -346,7 +346,7 @@ Every feature that calls a chat model (`src/llm`) takes its models from this one
 | `STUDIO_RUN_DEADLINE_SECONDS` | `180` | `int (30–600)` | Wall-clock budget of one run once it starts. A run past its lease is failed `run_timeout` and refunded; it is never executed twice. |
 | `STUDIO_RUN_MAX_CONCURRENT` | `4` | `int (1–16)` | Runs one worker process executes at once. |
 | `STUDIO_RUN_MAX_ACTIVE_PER_USER` | `3` | `int` | Queued + running runs one user may have (`409 run_limit_reached`). One active run per track is a database constraint (`409 run_in_progress`). |
-| `STUDIO_RUNS_PER_USER_PER_HOUR` | `30` | `int` | Runs one user may create per rolling hour, counted in the database (`429 run_rate_limited`). |
+| `STUDIO_RUNS_PER_USER_PER_HOUR` | `30` | `int` | Runs one user may have accepted per rolling hour, counted in the database from the usage ledger `studio_llm_usage` (`429 run_rate_limited`). Whatever the price: deleting a track (and its runs) does not give the allowance back. |
 | `STUDIO_RUN_WORKER_INTERVAL_SECONDS` | `2` | `int (1–60)` | Seconds between run-worker ticks. |
 | `STUDIO_RUN_WORKER_IN_PROCESS` | `true` | `bool` | Start the run worker in this process (leader-elected like the other workers). |
 | `STUDIO_CHAT_ENABLED` | `false` | `bool` | Separate kill switch for the **artist chat** ("interview your artist", contract §13). When `false` every chat and memory-draft route answers `404` and the chat sweep worker is not started. Only has effect together with `STUDIO_ENABLED`. When `true`, startup fails (naming the setting, never a value) unless `LLM_MODELS` is non-empty and valid, the chat model is a registry key **with `supports_streaming: true`**, and the memory-draft model is a registry key. Chat text goes to the configured LLM provider and through Redis (live stream) and nowhere else; it is never logged. The reply tasks run in the API process whatever `WORKER_MODE` is; only the sweep is a worker. |
@@ -358,7 +358,7 @@ Every feature that calls a chat model (`src/llm`) takes its models from this one
 | `STUDIO_CHAT_MAX_OUTPUT_TOKENS` | `700` | `int (64–4000)` | Output limit of one reply; a longer reply is kept, `truncated`. |
 | `STUDIO_CHAT_REPLY_DEADLINE_SECONDS` | `120` | `int (10–600)` | Wall-clock budget of one reply or memory draft. A row nobody finished is failed `reply_timeout` and refunded by the sweep 30 s after the deadline. |
 | `STUDIO_CHAT_MAX_PENDING_PER_USER` | `3` | `int (1–50)` | Replies + memory drafts one user may have pending (`429 chat_rate_limited`). One pending reply per chat is a database constraint (`409 chat_reply_in_progress`). |
-| `STUDIO_CHAT_JOBS_PER_USER_PER_HOUR` | `120` | `int` | User messages + memory drafts one user may create per rolling hour, counted in the database (`429 chat_rate_limited`). |
+| `STUDIO_CHAT_JOBS_PER_USER_PER_HOUR` | `120` | `int` | User messages + memory drafts one user may have accepted per rolling hour, counted in the database from the usage ledger `studio_llm_usage` (`429 chat_rate_limited`). Whatever the price: deleting a chat (or the artist) does not give the allowance back. |
 | `STUDIO_CHAT_SWEEP_INTERVAL_SECONDS` | `30` | `int (5–600)` | Seconds between sweeps of orphaned pending replies and drafts (leader-elected). |
 | `STUDIO_CHAT_SHUTDOWN_GRACE_SECONDS` | `10` | `int (1–120)` | How long shutdown waits for in-flight replies to be failed (`server_shutdown`) and refunded. |
 

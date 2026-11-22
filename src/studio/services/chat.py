@@ -27,10 +27,11 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.core.enums import StudioLlmUsageKind
 from src.core.uid import new_id
 from src.db.integrity import violated_constraint
 from src.db.models.studio_chat import CHAT_ONE_PENDING_REPLY, MESSAGE_CLIENT_ID_UNIQUE
-from src.db.repositories.studio import StudioArtistRepository
+from src.db.repositories.studio import StudioArtistRepository, StudioLlmUsageRepository
 from src.db.repositories.studio_chat import (
     StudioChatMessageRepository,
     StudioChatRepository,
@@ -123,6 +124,7 @@ class ChatService:
         self._chats = StudioChatRepository(session)
         self._messages = StudioChatMessageRepository(session)
         self._drafts = StudioMemoryDraftRepository(session)
+        self._usage = StudioLlmUsageRepository(session)
 
     # -- chats -------------------------------------------------------------------------------
 
@@ -446,16 +448,22 @@ class ChatService:
         return ChatWrite(user_message=existing, artist_message=reply, changed=False)
 
     async def _check_limits(self, user_id: UUID, product_id: str) -> None:
-        """The per-user limits, counted in the database under the user's quota lock."""
+        """The per-user limits, counted in the database under the user's quota lock.
+
+        The hourly count reads the usage ledger, not the chat rows: deleting a chat must not reset
+        it (R2). Rows that no longer count are purged first, under the same lock.
+        """
         await self._chats.lock_user_quota(user_id)
         pending = await self._messages.count_pending_replies(
             user_id=user_id, product_id=product_id
         ) + await self._drafts.count_pending(user_id=user_id, product_id=product_id)
         if pending >= self._settings.studio_chat_max_pending_per_user:
             raise ChatRateLimited
-        recent = await self._messages.count_user_messages_in_last_hour(
-            user_id=user_id, product_id=product_id
-        ) + await self._drafts.count_in_last_hour(user_id=user_id, product_id=product_id)
+        kinds = StudioLlmUsageKind.chat()
+        await self._usage.purge_older_than_hour(user_id=user_id, product_id=product_id, kinds=kinds)
+        recent = await self._usage.count_last_hour(
+            user_id=user_id, product_id=product_id, kinds=kinds
+        )
         if recent >= self._settings.studio_chat_jobs_per_user_per_hour:
             raise ChatRateLimited
 
@@ -514,6 +522,11 @@ class ChatService:
                 )
                 balance_event = reserved.event
             await self._chats.add_messages(chat_id, user_id=user_id, product_id=product_id, count=2)
+            # Accepted: it counts towards the hourly limit however the reply ends, and whatever
+            # happens to the chat afterwards. A 402 above rolls this savepoint back with the pair.
+            await self._usage.record(
+                user_id=user_id, product_id=product_id, kind=StudioLlmUsageKind.CHAT_MESSAGE
+            )
         return user_message, artist_message, balance_event
 
     # -- after commit ------------------------------------------------------------------------

@@ -1036,7 +1036,13 @@ class Settings(BaseSettings):
         default=3, ge=1, le=50, description="Queued + running runs one user may have."
     )
     studio_runs_per_user_per_hour: int = Field(
-        default=30, ge=1, le=10_000, description="Runs one user may create per rolling hour."
+        default=30,
+        ge=1,
+        le=10_000,
+        description=(
+            "Runs one user may have accepted per rolling hour, counted in the database from the "
+            "studio usage ledger (deleting a track does not reset it)."
+        ),
     )
     studio_run_worker_interval_seconds: int = Field(
         default=2, ge=1, le=60, description="Seconds between run-worker ticks (sweep + claim)."
@@ -1116,8 +1122,9 @@ class Settings(BaseSettings):
         ge=1,
         le=100_000,
         description=(
-            "User messages + memory drafts one user may create per rolling hour, counted in the "
-            "database (429 chat_rate_limited)."
+            "User messages + memory drafts one user may have accepted per rolling hour, counted "
+            "in the database from the studio usage ledger (429 chat_rate_limited; deleting a "
+            "chat does not reset it)."
         ),
     )
     studio_chat_sweep_interval_seconds: int = Field(

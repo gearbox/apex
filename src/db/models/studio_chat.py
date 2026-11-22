@@ -22,8 +22,11 @@ Chat text is user data: nothing here is ever logged, and the API returns it to i
   same machinery, ``studio_runs`` untouched.
 
 Lock order: artist → chat → message. Cascades: deleting an artist deletes its chats, their
-messages and drafts; deleting a chat deletes its messages and drafts (the service refuses while a
-reply or a draft is pending).
+messages and drafts; deleting a chat deletes its messages and drafts (the services refuse while a
+reply or a draft is pending: ``ArtistBusy`` / ``ChatBusy``).
+
+The hourly limit does not count these rows (deleting a chat would reset it): every accepted job is
+also written to ``studio_llm_usage`` (``src/db/models/studio.py``), which no studio delete reaches.
 """
 
 from __future__ import annotations
@@ -229,8 +232,9 @@ class StudioArtistChatMessage(Base):
             ),
         ),
         Index("ix_studio_chat_messages_chat_position", "chat_id", text("position DESC")),
-        # The hourly limit counts a user's recent messages.
-        Index("ix_studio_chat_messages_user_created", "user_id", text("created_at DESC")),
+        # The users ON DELETE CASCADE finds this table's rows by user_id. (The hourly limit no
+        # longer reads this table: it counts ``studio_llm_usage``, which a delete cannot reach.)
+        Index("ix_studio_artist_chat_messages_user_id", "user_id"),
         Index(
             "ix_studio_chat_messages_pending",
             "created_at",
@@ -332,7 +336,8 @@ class StudioMemoryDraft(Base):
             "created_at",
             postgresql_where=text(f"status = '{StudioMemoryDraftStatus.PENDING.value}'"),
         ),
-        Index("ix_studio_memory_drafts_user_created", "user_id", text("created_at DESC")),
+        # The users ON DELETE CASCADE finds this table's rows by user_id.
+        Index("ix_studio_memory_drafts_user_id", "user_id"),
     )
 
     def __repr__(self) -> str:

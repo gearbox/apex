@@ -27,7 +27,12 @@ from src.api.app import (
     legal_acceptance_required_handler,
     studio_error_handler,
 )
-from src.api.dependencies.common import get_product_id, get_studio_memory_service
+from src.api.dependencies.common import (
+    get_product_id,
+    get_studio_artist_service,
+    get_studio_memory_service,
+)
+from src.api.routes.studio_artists import StudioArtistController
 from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.security.jwt import JWTConfig, JWTService
@@ -116,13 +121,14 @@ def _build_app(world: ChatWorld, recorder: RecordingSupervisor) -> Litestar:
         )
 
     app = Litestar(
-        route_handlers=[StudioChatController, StudioMemoryController],
+        route_handlers=[StudioChatController, StudioMemoryController, StudioArtistController],
         dependencies={
             "session": Provide(provide_session),
             "product_id": Provide(get_product_id, sync_to_thread=False),
             "studio_chat_service": Provide(provide_chat_service, sync_to_thread=False),
             "studio_memory_draft_service": Provide(provide_draft_service, sync_to_thread=False),
             "studio_memory_service": Provide(get_studio_memory_service, sync_to_thread=False),
+            "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
         },
         exception_handlers={
             HTTPException: http_exception_handler,
@@ -449,6 +455,24 @@ class TestSending:
         response = await client.delete(f"{S}/chats/{chat_id}", headers=actor.headers)
         assert response.status_code == 409
         assert response.json()["error"] == "chat_busy"
+
+    async def test_deleting_an_artist_with_a_pending_reply_is_409_artist_busy(
+        self, client: AsyncTestClient[Litestar], world: ChatWorld, actor: Actor
+    ) -> None:
+        """An artist no project uses, with a reply in flight: refused, nothing deleted or lost."""
+        created = await client.post(f"{S}/artists", headers=actor.headers, json={"name": "Spare"})
+        artist_id = created.json()["id"]
+        chat = await client.post(
+            f"{S}/artists/{artist_id}/chats", headers=actor.headers, json={"title": "Interview"}
+        )
+        chat_id = chat.json()["id"]
+        assert (await _send(client, actor, chat_id)).status_code == 202  # pending, task not run
+
+        refused = await client.delete(f"{S}/artists/{artist_id}", headers=actor.headers)
+        assert refused.status_code == 409
+        assert refused.json()["error"] == "artist_busy"
+        assert (await client.get(f"{S}/chats/{chat_id}", headers=actor.headers)).status_code == 200
+        assert await world.refunds_and_debits(actor) == (1, 0)  # the reservation is untouched
 
 
 class TestMessages:

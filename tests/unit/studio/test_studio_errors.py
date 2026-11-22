@@ -60,6 +60,7 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.ChatFull, 409, "chat_full"),
     (e.ChatReplyInProgress, 409, "chat_reply_in_progress"),
     (e.ChatBusy, 409, "chat_busy"),
+    (e.ArtistBusy, 409, "artist_busy"),
     (e.MemoryDraftInProgress, 409, "memory_draft_in_progress"),
     (e.MessageNotComplete, 422, "message_not_complete"),
     (e.ChatRateLimited, 429, "chat_rate_limited"),

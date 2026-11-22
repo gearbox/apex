@@ -1,10 +1,12 @@
-"""Migration 060: the artist chat tables (invariant 18).
+"""Migration 060: the artist chat tables and the LLM usage ledger (invariant 18, R2).
 
-The upgrade creates ``studio_artist_chats``, ``studio_artist_chat_messages`` and
-``studio_memory_drafts`` with their CHECKs, composite owner FKs and indexes; the downgrade drops
-the three tables in reverse order and touches nothing else. After ``downgrade 059 && upgrade head``
-the models and the migrations do not drift (the ``alembic check`` of the PR checklist, run here
-through the same comparison). The migration never imports application code.
+The upgrade creates ``studio_artist_chats``, ``studio_artist_chat_messages``,
+``studio_memory_drafts`` and ``studio_llm_usage`` with their CHECKs, composite owner FKs and
+indexes; the downgrade drops the four tables in reverse order and touches nothing else. The usage
+ledger's only foreign key is to ``users`` (nothing a studio delete reaches), and the upgrade
+backfills the runs of the last hour into it. After ``downgrade 059 && upgrade head`` the models and
+the migrations do not drift (the ``alembic check`` of the PR checklist, run here through the same
+comparison). The migration never imports application code.
 """
 
 from __future__ import annotations
@@ -12,7 +14,7 @@ from __future__ import annotations
 import importlib.util
 from pathlib import Path
 from typing import TYPE_CHECKING
-from uuid import uuid4
+from uuid import UUID, uuid4
 
 import pytest
 from alembic.autogenerate import compare_metadata
@@ -21,6 +23,7 @@ from alembic.runtime.migration import MigrationContext
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
+from src.core.enums import StudioLlmUsageKind
 from src.db.models.base import Base
 
 if TYPE_CHECKING:
@@ -29,8 +32,15 @@ if TYPE_CHECKING:
     from sqlalchemy import Connection
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
+    from tests.studio_runs_support import RunWorld
+
 _PATH = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "060_studio_artist_chat.py"
-_TABLES = ("studio_artist_chats", "studio_artist_chat_messages", "studio_memory_drafts")
+_TABLES = (
+    "studio_artist_chats",
+    "studio_artist_chat_messages",
+    "studio_memory_drafts",
+    "studio_llm_usage",
+)
 _CHECKS = {
     "studio_artist_chats": {
         "ck_studio_artist_chats_message_count",
@@ -56,6 +66,7 @@ _CHECKS = {
         "ck_studio_drafts_price",
         "ck_studio_drafts_revision",
     },
+    "studio_llm_usage": {"ck_studio_llm_usage_kind"},
 }
 _OWNER_FKS = {
     "studio_artist_chats": {
@@ -80,6 +91,7 @@ _OWNER_FKS = {
             "REFERENCES studio_artist_chats(id, user_id, product_id)",
         ),
     },
+    "studio_llm_usage": {},  # no owner FK: its one foreign key is to ``users``
 }
 
 
@@ -148,7 +160,7 @@ async def test_the_tables_have_their_checks_and_cascading_owner_foreign_keys(
                 )
             }
             # every FK of a chat table is ON DELETE CASCADE: the user, and the parent with the
-            # owner pair
+            # owner pair (the usage ledger has the user only)
             assert {on_delete for on_delete, _ in foreign_keys.values()} == {"c"}, table
             for name, parts in _OWNER_FKS[table].items():
                 assert name in foreign_keys, name
@@ -193,18 +205,33 @@ async def test_the_indexes_serve_the_documented_queries(db_engine: AsyncEngine) 
     async with db_engine.connect() as connection:
         chats = await _index_definition(connection, "ix_studio_artist_chats_list")
         position = await _index_definition(connection, "ix_studio_chat_messages_chat_position")
-        hourly = await _index_definition(connection, "ix_studio_chat_messages_user_created")
         sweep = await _index_definition(connection, "ix_studio_chat_messages_pending")
         draft_sweep = await _index_definition(connection, "ix_studio_memory_drafts_pending")
+        message_user = await _index_definition(connection, "ix_studio_artist_chat_messages_user_id")
+        draft_user = await _index_definition(connection, "ix_studio_memory_drafts_user_id")
+        existing = {
+            row[0]
+            for row in await connection.execute(
+                text(
+                    "SELECT indexname FROM pg_indexes "
+                    "WHERE indexname IN ('ix_studio_chat_messages_user_created', "
+                    "'ix_studio_memory_drafts_user_created')"
+                )
+            )
+        }
     assert chats.endswith("(artist_id, updated_at DESC, id DESC)")
     assert position.endswith(('(chat_id, "position" DESC)', "(chat_id, position DESC)"))
-    assert hourly.endswith("(user_id, created_at DESC)")
     assert "(created_at)" in sweep
     assert "status)::text = 'pending'" in sweep
     assert "status)::text = 'pending'" in draft_sweep
+    # The hourly limit no longer reads these tables (it counts the usage ledger), so the indexes
+    # that existed for it are gone; the users ON DELETE CASCADE keeps a plain user_id index.
+    assert existing == set()
+    assert message_user.endswith("USING btree (user_id)")
+    assert draft_user.endswith("USING btree (user_id)")
 
 
-async def test_downgrade_drops_the_three_tables_and_nothing_else_and_upgrade_restores_them(
+async def test_downgrade_drops_the_four_tables_and_nothing_else_and_upgrade_restores_them(
     db_engine: AsyncEngine,
 ) -> None:
     async with db_engine.connect() as connection:
@@ -213,9 +240,10 @@ async def test_downgrade_drops_the_three_tables_and_nothing_else_and_upgrade_res
         await connection.run_sync(_run, "downgrade")
         for table in _TABLES:
             assert not await _exists(connection, table), table
-        # what 059 made is still there
+        # what 059 made (and what the ledger's rows were backfilled from) is still there
         assert await _exists(connection, "studio_artist_memories")
         assert await _exists(connection, "studio_artists")
+        assert await _exists(connection, "studio_runs")
 
         await connection.run_sync(_run, "upgrade")
         for table in _TABLES:
@@ -228,7 +256,9 @@ def _drift(connection: Connection) -> list[str]:
     """What ``alembic check`` would report for the tables this migration touches."""
     diffs = compare_metadata(MigrationContext.configure(connection), Base.metadata)
     flat = [str(item) for diff in diffs for item in (diff if isinstance(diff, list) else [diff])]
-    return [item for item in flat if "chat" in item or "memory_draft" in item]
+    return [
+        item for item in flat if "chat" in item or "memory_draft" in item or "llm_usage" in item
+    ]
 
 
 async def test_after_downgrade_and_upgrade_the_models_and_the_migration_do_not_drift(
@@ -378,4 +408,124 @@ async def test_a_valid_pair_and_a_valid_draft_are_accepted_and_cascade_with_the_
                 )
             ).scalar_one()
             assert remaining == 0, table
+        await transaction.rollback()
+
+
+# ---------------------------------------------------------------------------------------------
+# the usage ledger (R2)
+# ---------------------------------------------------------------------------------------------
+
+
+async def test_the_usage_ledger_has_its_check_its_window_index_and_only_the_users_foreign_key(
+    db_engine: AsyncEngine,
+) -> None:
+    async with db_engine.connect() as connection:
+        check = (
+            await connection.execute(
+                text(
+                    "SELECT pg_get_constraintdef(oid) FROM pg_constraint "
+                    "WHERE conname = 'ck_studio_llm_usage_kind'"
+                )
+            )
+        ).scalar_one()
+        window = await _index_definition(connection, "ix_studio_llm_usage_window")
+        references = {
+            row[0]
+            for row in await connection.execute(
+                text(
+                    "SELECT confrelid::regclass::text FROM pg_constraint "
+                    "WHERE conrelid = 'studio_llm_usage'::regclass AND contype = 'f'"
+                )
+            )
+        }
+        columns = {
+            row[0]: (row[1], row[2])
+            for row in await connection.execute(
+                text(
+                    "SELECT column_name, data_type, is_nullable FROM information_schema.columns "
+                    "WHERE table_name = 'studio_llm_usage'"
+                )
+            )
+        }
+    for kind in StudioLlmUsageKind:  # generated from the enum, like every other CHECK
+        assert f"'{kind.value}'" in check
+    assert window.endswith("USING btree (user_id, product_id, kind, created_at)")
+    # the point of the table: no chat, message, draft, track or run can reach it
+    assert references == {"users"}
+    assert columns == {
+        "id": ("uuid", "NO"),
+        "user_id": ("uuid", "NO"),
+        "product_id": ("character varying", "NO"),
+        "kind": ("character varying", "NO"),
+        "created_at": ("timestamp with time zone", "NO"),
+    }
+
+
+async def test_an_unknown_usage_kind_is_refused_and_deleting_the_user_removes_the_rows(
+    db_engine: AsyncEngine,
+) -> None:
+    async with db_engine.connect() as connection:
+        transaction = await connection.begin()
+        user_id, _, _ = await _seed(connection)
+        insert = text(
+            "INSERT INTO studio_llm_usage (id, user_id, product_id, kind) "
+            "VALUES (:id, :user, 'vex', :kind)"
+        )
+        with pytest.raises(IntegrityError):
+            async with connection.begin_nested():
+                await connection.execute(
+                    insert, {"id": uuid4(), "user": user_id, "kind": "image_generation"}
+                )
+        await connection.execute(insert, {"id": uuid4(), "user": user_id, "kind": "chat_message"})
+        await connection.execute(text("DELETE FROM users WHERE id = :id"), {"id": user_id})
+        remaining = (
+            await connection.execute(
+                text("SELECT count(*) FROM studio_llm_usage WHERE user_id = :id"), {"id": user_id}
+            )
+        ).scalar_one()
+        assert remaining == 0
+        await transaction.rollback()
+
+
+async def test_the_upgrade_backfills_the_runs_of_the_last_hour_and_only_those(
+    run_world: RunWorld, db_engine: AsyncEngine
+) -> None:
+    """A deploy inside the hour must not hand out a fresh run allowance (R2).
+
+    One run is recent, one is two hours old (the clock is moved with SQL), one belongs to a
+    bystander: after ``downgrade && upgrade`` the ledger holds exactly the two last-hour runs, as
+    ``run`` rows carrying the run's own ``created_at``.
+    """
+    actor = await run_world.add_actor()
+    other = await run_world.add_actor()
+    tracks = [await run_world.new_track(actor, f"T{i}") for i in range(2)]
+    recent = await run_world.submit(actor, tracks[0])
+    old = await run_world.submit(actor, tracks[1])
+    bystander = await run_world.submit(other, await run_world.new_track(other))
+    async with run_world.factory() as session, session.begin():
+        await session.execute(
+            text("UPDATE studio_runs SET created_at = now() - interval '2 hours' WHERE id = :id"),
+            {"id": old.run.id},
+        )
+
+    async def backfilled(connection: AsyncConnection, user_id: UUID) -> list[tuple[str, object]]:
+        rows = await connection.execute(
+            text(
+                "SELECT kind, created_at FROM studio_llm_usage WHERE user_id = :id "
+                "ORDER BY created_at"
+            ),
+            {"id": user_id},
+        )
+        return [(row[0], row[1]) for row in rows]
+
+    async with db_engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(_run, "downgrade")
+        await connection.run_sync(_run, "upgrade")
+        assert await backfilled(connection, actor.user_id) == [
+            ("run", (await run_world.run(recent.run.id)).created_at)
+        ]
+        assert await backfilled(connection, other.user_id) == [
+            ("run", (await run_world.run(bystander.run.id)).created_at)
+        ]
         await transaction.rollback()

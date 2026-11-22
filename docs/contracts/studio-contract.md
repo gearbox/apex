@@ -204,7 +204,7 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | GET | `/artists` | 200 page | `limit` 1–50 (30) |
 | POST | `/artists` | 201 `Artist` | max **50** artists per user |
 | GET / PATCH | `/artists/{id}` | 200 `Artist` | |
-| DELETE | `/artists/{id}` | 204 | `409 artist_in_use` while a project uses it |
+| DELETE | `/artists/{id}` | 204 — its memories, **chats, messages and memory drafts** go with it | `409 artist_busy` while a chat reply or a memory draft of the artist is `pending` (§13); else `409 artist_in_use` while a project uses it. When both apply, `artist_busy` is the answer |
 | GET | `/artists/{id}/memories` | 200 page of `Memory` | `?status=active\|archived` (default `active`), `limit` 1–50 (30), diary order — see §12 |
 | POST | `/artists/{id}/memories` | 201 `Memory` | max **200 active** per artist; `409 memory_limit_reached` — see §12 |
 | GET / PATCH | `/memories/{id}` | 200 `Memory` | PATCH also archives / restores (`status`) |
@@ -324,6 +324,7 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 404 | `lyrics_version_not_found` | a `revise_lyrics` run's `lyrics_version_id` is not a lyrics version of this track (§11) |
 | 409 | `artist_name_conflict` | name already used (case-insensitive) |
 | 409 | `artist_limit_reached` | 50 artists |
+| 409 | `artist_busy` | a chat reply or a memory draft of the artist is still `pending` (it has been paid for and is about to be written): retry in a few seconds (§13) |
 | 409 | `artist_in_use` | `detail: {project_count}` |
 | 409 | `memory_limit_reached` | the artist already has 200 **active** memories (creating, or restoring an archived one, §12) |
 | 409 | `project_has_tracks` | disabling studio on a project with tracks |
@@ -649,7 +650,7 @@ The same `Idempotency-Key` with the same body returns the **same run** with `200
 | `409` | `run_limit_reached` | you already have 3 active runs (configurable) |
 | `409` | `idempotency_conflict` | see above |
 | `422` | `document_invalid` | the body is invalid after normalization, an input cannot be used (the table above), or a pinned memory cannot be used (the memories table above) — `detail.issues` |
-| `429` | `run_rate_limited` | more than 30 runs created in the last hour (configurable) |
+| `429` | `run_rate_limited` | more than 30 runs accepted in the last hour (configurable). Every **accepted** run counts, however it ends (finished, failed, cancelled, refunded) and **whatever happens to it later: deleting the track, which removes its runs, does not give the allowance back** (a usage ledger the deletes do not reach). A replay of the same `Idempotency-Key` and a `402` count nothing |
 
 `409 run_in_progress` is also what `DELETE /v1/studio/tracks/{id}` answers while the track has an active run (a finished run never blocks a delete; deleting the track removes its runs).
 
@@ -908,7 +909,7 @@ All under `/v1/studio`.
 | `POST` | `/artists/{artist_id}/chats` | `201` `Chat` — body `{title}` |
 | `GET` | `/chats/{chat_id}` | `200` `Chat` |
 | `PATCH` | `/chats/{chat_id}` | `200` `Chat` — body `{title}` (the only editable field) |
-| `DELETE` | `/chats/{chat_id}` | `204` — its messages and memory drafts go with it. `409 chat_busy` while a reply or a memory draft of the chat is `pending` |
+| `DELETE` | `/chats/{chat_id}` | `204` — its messages and memory drafts go with it. `409 chat_busy` while a reply or a memory draft of the chat is `pending` (deleting the **artist** is refused the same way, `409 artist_busy`: see below) |
 | `GET` | `/chats/{chat_id}/messages` | `200` page, **newest first** by `position`; `?before=<position>` keyset (only older messages), `?limit=1..50` (30). A page's `next_cursor` is the last item's `position`: pass it as `before`. |
 | `POST` | `/chats/{chat_id}/messages` | **`202`** `{user_message, artist_message}` — see below |
 | `GET` | `/chat-messages/{message_id}` | `200` `Message` — **how you read a reply** (the stored text) |
@@ -916,6 +917,8 @@ All under `/v1/studio`.
 | `GET` | `/memory-drafts/{draft_id}` | `200` `MemoryDraft` |
 
 Another user's (or another product's, or an unknown) chat, message or draft is the same `404`: `chat_not_found`, `message_not_found`, `memory_draft_not_found` (`artist_not_found` for the artist-scoped list and create).
+
+**Deleting an artist deletes its chats** (`DELETE /artists/{id}`, §3): the chats, their messages and their memory drafts go with it. A reply or a memory draft that is still `pending` has already been paid for and a background task is about to write it, so the delete is refused with **`409 artist_busy`** (`"The artist has a chat reply or memory draft in progress."`) until it has finished or failed — wait for `studio.chat.message.updated` / `studio.memory_draft.updated`, or retry in a few seconds, as for `409 chat_busy` on a single chat. Nothing is deleted and nothing is charged by a refused delete. If you start a reply while the artist is being deleted, one of the two wins cleanly: a send that commits first makes the delete answer `artist_busy`; a delete that commits first makes the send a `404 chat_not_found` (and nothing is reserved). When the artist is also used by a project, `artist_busy` is reported before `artist_in_use`.
 
 ### Sending a message
 
@@ -925,6 +928,7 @@ Another user's (or another product's, or an unknown) chat, message or draft is t
 - **Idempotent through `client_message_id`** (unique per chat): sending the same id with the same content again — a retry after a lost response — returns the **same pair** with `202`, charges nothing more and starts nothing. The same id with other content is `409 idempotency_conflict`. Generate one id per user action, not per retry.
 - **One reply at a time** per chat: while the previous message is `pending`, a new one is `409 chat_reply_in_progress`. Wait for `studio.chat.message.updated`, or `GET` the message.
 - `409 chat_full` at 200 messages; `429 chat_rate_limited` when you have 3 replies and memory drafts `pending` at once, or have started more than 120 messages and drafts in the last hour (both counted on the server); `402` when the balance cannot cover the reservation — and then **nothing** is written: no message, no charge.
+- **The hourly limit counts what was accepted, not what is still there.** Every accepted message and memory draft is recorded in a usage ledger that no delete reaches, so deleting a chat (or the artist) does **not** give the allowance back, whatever the price is (the limit exists to cap provider spend, and a price of 0 bills nothing). A replay (same `client_message_id` / `Idempotency-Key`) and a `402` are not accepted jobs and count nothing. The allowance is a rolling hour: each request counts only what was accepted in the last 60 minutes.
 
 ### The reply stream (SSE)
 

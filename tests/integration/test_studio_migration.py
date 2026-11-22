@@ -40,6 +40,7 @@ _TABLES = (
     "studio_artist_chats",
     "studio_artist_chat_messages",
     "studio_memory_drafts",
+    "studio_llm_usage",  # also added by 060: the hourly-limit ledger (its only FK is to users)
 )
 
 

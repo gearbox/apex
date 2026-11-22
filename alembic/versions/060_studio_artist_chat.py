@@ -1,11 +1,11 @@
-"""Studio artist chat: chats, messages and memory drafts.
+"""Studio artist chat: chats, messages and memory drafts, and the LLM usage ledger.
 
 Revision ID: 060
 Revises: 059
 Create Date: 2026-11-22 00:00:00.000000
 
-Three tables (see ``src/db/models/studio_chat.py`` for the rationale); every existing table is
-untouched (a memory draft is its own table, not a kind of planner run):
+Four tables (see ``src/db/models/studio_chat.py`` and ``studio.py`` for the rationale); every
+existing table is untouched (a memory draft is its own table, not a kind of planner run):
 
 * ``studio_artist_chats`` - a conversation with an artist. The composite FK
   ``(artist_id, user_id, product_id) -> studio_artists (id, user_id, product_id)``
@@ -22,10 +22,17 @@ untouched (a memory draft is its own table, not a kind of planner run):
 * ``studio_memory_drafts`` - an LLM job that turns one message into a memory draft: composite FKs
   to the message and to the chat (both ``ON DELETE CASCADE``), ``UNIQUE (user_id,
   idempotency_key)``, at most one ``pending`` draft per source message.
+* ``studio_llm_usage`` - the append-only ledger behind the hourly limits (chat messages, memory
+  drafts **and planner runs**): one row per accepted job, written with the job and counted over the
+  last hour. Its only foreign key is to ``users``; nothing a studio delete reaches points at it, so
+  deleting a chat or a track cannot reset a limit. The upgrade backfills the runs of the last hour
+  from ``studio_runs`` in one statement, so a deploy inside the hour does not hand out a fresh
+  allowance (the chat tables are new: nothing to backfill for them).
 
 The CHECK lists are the StrEnums' wire values, spelled out (a migration never imports ``src``).
 
-Downgrade drops the three tables (and every chat, message and draft in them), in reverse order.
+Downgrade drops the four tables (and every chat, message, draft and usage row in them), in reverse
+order.
 """
 
 from collections.abc import Sequence
@@ -175,10 +182,9 @@ def upgrade() -> None:
         "studio_artist_chat_messages",
         ["chat_id", sa.text("position DESC")],
     )
+    # the users ON DELETE CASCADE finds this table's rows by user_id
     op.create_index(
-        "ix_studio_chat_messages_user_created",
-        "studio_artist_chat_messages",
-        ["user_id", sa.text("created_at DESC")],
+        "ix_studio_artist_chat_messages_user_id", "studio_artist_chat_messages", ["user_id"]
     )
     op.create_index(
         "ix_studio_chat_messages_pending",
@@ -265,16 +271,44 @@ def upgrade() -> None:
         ["created_at"],
         postgresql_where=sa.text("status = 'pending'"),
     )
+    # the users ON DELETE CASCADE finds this table's rows by user_id
+    op.create_index("ix_studio_memory_drafts_user_id", "studio_memory_drafts", ["user_id"])
+
+    # -- LLM usage ledger ----------------------------------------------------------------------
+    op.create_table(
+        "studio_llm_usage",
+        sa.Column("id", _UUID, nullable=False),
+        sa.Column("user_id", _UUID, nullable=False),
+        sa.Column("product_id", sa.String(32), nullable=False),
+        sa.Column("kind", sa.String(20), nullable=False),
+        sa.Column("created_at", _TS, server_default=_NOW, nullable=False),
+        sa.PrimaryKeyConstraint("id"),
+        # the only foreign key: account deletion removes the rows, nothing else does
+        sa.ForeignKeyConstraint(["user_id"], ["users.id"], ondelete="CASCADE"),
+        sa.CheckConstraint(
+            "kind IN ('chat_message', 'memory_draft', 'run')", name="ck_studio_llm_usage_kind"
+        ),
+    )
     op.create_index(
-        "ix_studio_memory_drafts_user_created",
-        "studio_memory_drafts",
-        ["user_id", sa.text("created_at DESC")],
+        "ix_studio_llm_usage_window",
+        "studio_llm_usage",
+        ["user_id", "product_id", "kind", "created_at"],
+    )
+    # The runs of the last hour already count towards STUDIO_RUNS_PER_USER_PER_HOUR; carry them
+    # over in one statement so that deploying inside the hour does not reset the allowance.
+    op.execute(
+        sa.text(
+            "INSERT INTO studio_llm_usage (id, user_id, product_id, kind, created_at) "
+            "SELECT gen_random_uuid(), user_id, product_id, 'run', created_at "
+            "FROM studio_runs WHERE created_at > now() - interval '1 hour'"
+        )
     )
 
 
 def downgrade() -> None:
-    """Downgrade database schema (drops every chat, message and memory draft)."""
+    """Downgrade database schema (drops every chat, message, memory draft and usage row)."""
     # Reverse order: drafts reference messages and chats; messages reference chats.
+    op.drop_table("studio_llm_usage")
     op.drop_table("studio_memory_drafts")
     op.drop_table("studio_artist_chat_messages")
     op.drop_table("studio_artist_chats")

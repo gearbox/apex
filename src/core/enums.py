@@ -1075,3 +1075,25 @@ class StudioMemoryDraftStatus(StrEnum):
     PENDING = "pending"
     COMPLETE = "complete"
     FAILED = "failed"
+
+
+class StudioLlmUsageKind(StrEnum):
+    """What one row of the studio's LLM usage ledger accounts for (hourly limits, S1-P2c R2).
+
+    One member per kind of accepted, priced LLM job; the CHECK on ``studio_llm_usage.kind`` is
+    generated from this enum.
+    """
+
+    CHAT_MESSAGE = "chat_message"
+    MEMORY_DRAFT = "memory_draft"
+    RUN = "run"
+
+    @classmethod
+    def chat(cls) -> tuple[StudioLlmUsageKind, ...]:
+        """The kinds that share the chat's hourly budget (``STUDIO_CHAT_JOBS_PER_USER_PER_HOUR``)."""
+        return (cls.CHAT_MESSAGE, cls.MEMORY_DRAFT)
+
+    @classmethod
+    def runs(cls) -> tuple[StudioLlmUsageKind, ...]:
+        """The kinds that count towards ``STUDIO_RUNS_PER_USER_PER_HOUR``."""
+        return (cls.RUN,)

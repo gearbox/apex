@@ -9,6 +9,7 @@ cleaning up.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from datetime import timedelta
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -579,6 +580,32 @@ class RunWorld:
                     "WHERE id = :id"
                 ),
                 {"id": run_id},
+            )
+
+    async def usage(self, actor: Actor, *kinds: str) -> int:
+        """Rows of the hourly-limit ledger (``studio_llm_usage``) of ``actor``, of ``kinds`` (all
+        kinds when none is given)."""
+        query = "SELECT count(*) FROM studio_llm_usage WHERE user_id = :u"
+        params: dict[str, Any] = {"u": actor.user_id}
+        if kinds:
+            query += " AND kind = ANY(:kinds)"
+            params["kinds"] = list(kinds)
+        async with self.factory() as session:
+            return (await session.execute(text(query), params)).scalar_one()
+
+    async def age_usage(self, actor: Actor, *, age: timedelta = timedelta(hours=2)) -> None:
+        """Make everything the hourly limits have counted for ``actor`` so far look old.
+
+        The limits count the usage ledger, not the rows of the jobs (deleting those must not reset
+        them), so this is what "an hour passed" means for a test.
+        """
+        async with self.factory() as session, session.begin():
+            await session.execute(
+                text(
+                    "UPDATE studio_llm_usage SET created_at = now() - CAST(:age AS interval) "
+                    "WHERE user_id = :u"
+                ),
+                {"age": age, "u": actor.user_id},
             )
 
     async def refunds_and_debits(self, actor: Actor) -> tuple[int, int]:
