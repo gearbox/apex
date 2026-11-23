@@ -17,7 +17,7 @@ from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
 import pytest
-from sqlalchemy import delete, select, text
+from sqlalchemy import delete, select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from src.api.schemas.studio import ArtistCreate, ArtistPatch
@@ -25,6 +25,7 @@ from src.db.models.studio import StudioArtist
 from src.db.models.user import User
 from src.studio.errors import StudioDocumentInvalid
 from src.studio.services.artist import ArtistService
+from tests.db_locks import backend_pid, wait_until_blocked_by
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Callable, Coroutine
@@ -87,18 +88,23 @@ async def _stored(factory: Factory, artist_id: UUID) -> dict[str, list[str]]:
 
 
 class _PausedPatch:
-    """Request A: acquires the artist lock, then pauses just before its UPDATE."""
+    """Request A: acquires the artist lock, then pauses just before its UPDATE.
+
+    ``pid`` is A's backend, known once ``reached_update`` is set: the lock B must wait on is A's.
+    """
 
     def __init__(
         self, factory: Factory, user_id: UUID, artist_id: UUID, patch: ArtistPatch
     ) -> None:
         self.reached_update = asyncio.Event()
         self.release = asyncio.Event()
+        self.pid = 0
         self._factory = factory
         self._args = (artist_id, user_id, PRODUCT, patch)
 
     async def run(self) -> None:
         async with self._factory() as session:
+            self.pid = await backend_pid(session)
             service = ArtistService(session)
             real_update = service._repo.update
 
@@ -120,23 +126,6 @@ async def _patch_and_commit(
         await session.commit()
 
 
-async def _wait_until_blocked_on_a_lock(db_engine: AsyncEngine) -> None:
-    async with db_engine.connect() as probe:
-        for _ in range(500):
-            waiting = (
-                await probe.execute(
-                    text(
-                        "SELECT count(*) FROM pg_stat_activity "
-                        "WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                    )
-                )
-            ).scalar_one()
-            if waiting:
-                return
-            await asyncio.sleep(0.01)
-    pytest.fail("the second PATCH never blocked on the artist row lock")
-
-
 async def _overlap(
     db_engine: AsyncEngine,
     first: _PausedPatch,
@@ -154,7 +143,7 @@ async def _overlap(
     # B is blocked behind A's lock: it cannot finish while A holds it ...
     with pytest.raises(TimeoutError):
         await asyncio.wait_for(asyncio.shield(task_b), 0.5)
-    await _wait_until_blocked_on_a_lock(db_engine)  # ... and the database agrees it is waiting
+    await wait_until_blocked_by(db_engine, first.pid)  # ... and the database agrees: on A's lock
     assert not task_a.done()
 
     first.release.set()

@@ -27,7 +27,7 @@ from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST
 from src.studio.errors import MemoryLimitReached
 from src.studio.services.artist import ArtistService
 from src.studio.services.memory import MemoryService
-from tests.integration.test_studio_artist_concurrency import _wait_until_blocked_on_a_lock
+from tests.db_locks import backend_pid, wait_until_blocked_by
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator, Awaitable, Callable, Coroutine
@@ -120,6 +120,7 @@ class _Paused:
     ) -> None:
         self.reached = asyncio.Event()
         self.release = asyncio.Event()
+        self.pid = 0  # A's backend, known once ``reached`` is set
         self.result: object = None
         self._world = world
         self._method = method
@@ -127,6 +128,7 @@ class _Paused:
 
     async def run(self) -> None:
         async with self._world.factory() as session:
+            self.pid = await backend_pid(session)
             service = MemoryService(session)
             real = getattr(service._memories, self._method)
 
@@ -158,7 +160,7 @@ async def _overlap(
     task_b = asyncio.create_task(second())
     with pytest.raises(TimeoutError):  # B cannot finish while A holds the artist lock ...
         await asyncio.wait_for(asyncio.shield(task_b), 0.5)
-    await _wait_until_blocked_on_a_lock(db_engine)  # ... and the database agrees it is waiting
+    await wait_until_blocked_by(db_engine, first.pid)  # ... and the database agrees: on A's lock
     assert not task_a.done()
     first.release.set()
     a, b = await asyncio.wait_for(asyncio.gather(task_a, task_b, return_exceptions=True), 10)
@@ -337,9 +339,11 @@ class TestLockOrder:
 
         reached = asyncio.Event()
         release = asyncio.Event()
+        holder: list[int] = []  # the artist PATCH's backend, which holds the artist row
 
         async def artist_patch() -> None:
             async with world.factory() as session:
+                holder.append(await backend_pid(session))
                 service = ArtistService(session)
                 real = service._repo.update
 
@@ -366,7 +370,7 @@ class TestLockOrder:
         )
         with pytest.raises(TimeoutError):
             await asyncio.wait_for(asyncio.shield(task_b), 0.5)
-        await _wait_until_blocked_on_a_lock(db_engine)
+        await wait_until_blocked_by(db_engine, holder[0])
         release.set()
         await asyncio.wait_for(asyncio.gather(task_a, task_b), 10)
         assert (await world.row(memory_id)).title == "renamed"

@@ -14,7 +14,7 @@ one rolled-back transaction, which a second connection cannot see).
 from __future__ import annotations
 
 import asyncio
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Any
 from uuid import uuid4
 
 import pytest
@@ -32,15 +32,16 @@ from src.llm.port import LlmUnavailable
 from src.studio.chat.draft import MemoryDraftDraft
 from src.studio.errors import ArtistBusy, ArtistInUse, ChatNotFound, StudioError
 from src.studio.services.artist import ArtistService
-from tests.integration.test_studio_artist_concurrency import _wait_until_blocked_on_a_lock
+from tests.db_locks import backend_pid, wait_until_blocked
 from tests.llm_support import FakeLlm
 from tests.studio_chat_support import reply
 from tests.studio_runs_support import PRODUCT
 
 if TYPE_CHECKING:
+    from collections.abc import Awaitable, Callable
     from uuid import UUID
 
-    from sqlalchemy.ext.asyncio import AsyncEngine
+    from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession
 
     from tests.studio_chat_support import ChatWorld
     from tests.studio_runs_support import Actor
@@ -285,61 +286,112 @@ class TestRacesWithASend:
     ) -> None:
         """Without the chat locks a send that commits between the delete's pending check and its
         ``DELETE`` would be cascaded away with its reservation. With them, in both orders,
-        ``sum(reserved) - sum(refunded) == price * completed replies``."""
+        ``sum(reserved) - sum(refunded) == price * completed replies``.
+
+        The racing request reports its own backend pid and the test waits for **that** backend to
+        block on a lock - never for "some session is waiting". Whatever fails, the open session
+        closes first (its transaction rolls back) and the racing task is then awaited, so a failure
+        is one clean ``FAILED`` and the fixture teardown never meets a live transaction.
+
+        Pool headroom: every session here comes from ``chat_world.factory``, bound to the
+        integration ``db_engine``, which is a ``NullPool`` engine - each session opens its own
+        connection, so no request can wait for a pooled one. The world's own pool (``pool_size=4``)
+        belongs to the supervisor and is first used by ``dispatch``, after the race is over.
+        """
         spare = await _spare_artist(chat_world, actor)
         chat_id = await chat_world.new_chat(actor, artist=spare)
         chat_world.chat_llm.add(reply(LONG))
         message = MessageCreate(client_message_id=uuid4(), content="Tell me about the rooftop.")
         price = chat_world.settings.studio_chat_message_price
+        pid: asyncio.Future[int] = asyncio.get_running_loop().create_future()
+        racer: asyncio.Task[StudioError | None] | None = None
 
-        if order == "send-first":
-            # A holds the chat lock mid-send; B deletes the artist and must wait for it.
-            async with chat_world.factory() as session_a:
-                write = await chat_world.chat_service(session_a).send(
-                    chat_id, actor.user_id, PRODUCT, message
-                )
-                delete = asyncio.create_task(_delete_outcome(chat_world, actor, spare))
-                await _wait_until_blocked_on_a_lock(db_engine)
-                assert not delete.done()
-                await session_a.commit()
-            error = await asyncio.wait_for(delete, 10)
+        try:
+            if order == "send-first":
+                # A holds the chat lock mid-send; B deletes the artist and must wait for it.
+                async with chat_world.factory() as session_a:
+                    write = await chat_world.chat_service(session_a).send(
+                        chat_id, actor.user_id, PRODUCT, message
+                    )
+                    racer = asyncio.create_task(
+                        _request(
+                            pid,
+                            chat_world,
+                            lambda session: ArtistService(session).delete(
+                                spare, actor.user_id, PRODUCT
+                            ),
+                        )
+                    )
+                    await wait_until_blocked(db_engine, await _pid_of(racer, pid))
+                    assert not racer.done()
+                    await session_a.commit()
+                error = await asyncio.wait_for(racer, 10)
 
-            assert isinstance(error, ArtistBusy)  # it saw the pending row the send committed
-            assert await _artist_exists(chat_world, spare)
-            async with chat_world.factory() as session:
-                await chat_world.chat_service(session).dispatch(write)
-            await chat_world.settle()
-            assert (await chat_world.message(write.artist_message.id)).status == "complete"
-            assert await _completed_replies(chat_world, chat_id) == 1
-            assert await _held(chat_world, actor) == price * 1
-            await _delete(chat_world, actor, spare)  # and once it is done the delete goes through
-            assert not await _artist_exists(chat_world, spare)
-        else:
-            # B (the delete) holds the artist and chat locks and has deleted the chat; A's send
-            # must wait for B and then find no chat.
-            async with chat_world.factory() as session_b:
-                await ArtistService(session_b).delete(spare, actor.user_id, PRODUCT)
-                send = asyncio.create_task(_send_outcome(chat_world, actor, chat_id, message))
-                await _wait_until_blocked_on_a_lock(db_engine)
-                assert not send.done()
-                await session_b.commit()
-            error = await asyncio.wait_for(send, 10)
+                assert isinstance(error, ArtistBusy)  # it saw the pending row the send committed
+                assert await _artist_exists(chat_world, spare)
+                async with chat_world.factory() as session:
+                    await chat_world.chat_service(session).dispatch(write)
+                await chat_world.settle()
+                assert (await chat_world.message(write.artist_message.id)).status == "complete"
+                assert await _completed_replies(chat_world, chat_id) == 1
+                assert await _held(chat_world, actor) == price * 1
+                await _delete(chat_world, actor, spare)  # and once it is done the delete goes on
+                assert not await _artist_exists(chat_world, spare)
+            else:
+                # B (the delete) holds the artist and chat locks and has deleted the chat; A's send
+                # must wait for B and then find no chat.
+                async with chat_world.factory() as session_b:
+                    await ArtistService(session_b).delete(spare, actor.user_id, PRODUCT)
+                    racer = asyncio.create_task(
+                        _request(
+                            pid,
+                            chat_world,
+                            lambda session: chat_world.chat_service(session).send(
+                                chat_id, actor.user_id, PRODUCT, message
+                            ),
+                        )
+                    )
+                    await wait_until_blocked(db_engine, await _pid_of(racer, pid))
+                    assert not racer.done()
+                    await session_b.commit()
+                error = await asyncio.wait_for(racer, 10)
 
-            assert isinstance(error, ChatNotFound)  # 404 chat_not_found
-            assert not await _artist_exists(chat_world, spare)
-            assert await chat_world.refunds_and_debits(actor) == (0, 0)  # nothing was reserved
-            assert await _completed_replies(chat_world, chat_id) == 0
-            assert await _held(chat_world, actor) == price * 0
+                assert isinstance(error, ChatNotFound)  # 404 chat_not_found
+                assert not await _artist_exists(chat_world, spare)
+                assert await chat_world.refunds_and_debits(actor) == (0, 0)  # nothing reserved
+                assert await _completed_replies(chat_world, chat_id) == 0
+                assert await _held(chat_world, actor) == price * 0
+        finally:
+            # The session block above has exited (its transaction is rolled back or committed):
+            # only now is it safe to wait for the task, and it is always waited for.
+            if racer is not None:
+                await asyncio.gather(racer, return_exceptions=True)
 
 
-async def _send_outcome(
-    world: ChatWorld, actor: Actor, chat_id: UUID, message: MessageCreate
+async def _request(
+    pid: asyncio.Future[int],
+    world: ChatWorld,
+    work: Callable[[AsyncSession], Awaitable[object]],
 ) -> StudioError | None:
-    """A send as the route runs it (send, commit): the error, or ``None``."""
+    """One request as the route runs it, in ONE session: report this session's backend pid
+    first, then ``work`` and commit. Returns the error it answered, or ``None``."""
     try:
         async with world.factory() as session:
-            await world.chat_service(session).send(chat_id, actor.user_id, PRODUCT, message)
+            pid.set_result(await backend_pid(session))
+            await work(session)
             await session.commit()
     except StudioError as error:
         return error
     return None
+
+
+async def _pid_of(request: asyncio.Task[StudioError | None], pid: asyncio.Future[int]) -> int:
+    """The backend pid the racing request reported; if the request ended first it never got that
+    far, and what it died of is raised."""
+    either: set[asyncio.Future[Any]] = {pid, request}
+    await asyncio.wait(either, timeout=10, return_when=asyncio.FIRST_COMPLETED)
+    if pid.done():
+        return pid.result()
+    if request.done():
+        request.result()  # re-raises what the request failed with
+    pytest.fail("the racing request never reported its backend pid")
