@@ -130,6 +130,7 @@ async def test_the_cast_tables_have_composite_owner_keys_and_their_uniques(
         references_unique = await _constraints(connection, "studio_cast_references", "u")
         references_check = await _constraints(connection, "studio_cast_references", "c")
         looks_fk = await _constraints(connection, "studio_cast_looks", "f")
+        looks_unique = await _constraints(connection, "studio_cast_looks", "u")
         links = await _constraints(connection, "studio_cast_look_references", "f")
         links_pk = await _constraints(connection, "studio_cast_look_references", "p")
         member_name = await _index(connection, "uq_studio_cast_members_owner_name")
@@ -157,7 +158,23 @@ async def test_the_cast_tables_have_composite_owner_keys_and_their_uniques(
     )
     assert "ck_studio_cast_references_position" in references_check
     assert looks_fk["fk_studio_cast_looks_member_owner"][0] == "c"
+    # a look only links its own member's references: both link keys are composite and carry the
+    # member, onto the (id, cast_member_id) uniques of the looks and the references
+    assert "UNIQUE (id, cast_member_id)" in looks_unique["uq_studio_cast_looks_id_member"][3]
+    assert (
+        "UNIQUE (id, cast_member_id)" in references_unique["uq_studio_cast_references_id_member"][3]
+    )
+    assert set(links) == {
+        "fk_studio_cast_look_references_look_member",
+        "fk_studio_cast_look_references_reference_member",
+    }
     assert {fk[0] for fk in links.values()} == {"c"}
+    look_link = links["fk_studio_cast_look_references_look_member"][3]
+    assert "FOREIGN KEY (look_id, cast_member_id)" in look_link
+    assert "REFERENCES studio_cast_looks(id, cast_member_id)" in look_link
+    reference_link = links["fk_studio_cast_look_references_reference_member"][3]
+    assert "FOREIGN KEY (reference_id, cast_member_id)" in reference_link
+    assert "REFERENCES studio_cast_references(id, cast_member_id)" in reference_link
     assert "PRIMARY KEY (look_id, reference_id)" in next(iter(links_pk.values()))[3]
     assert member_name.startswith("CREATE UNIQUE INDEX")
     assert "(user_id, product_id, lower((name)::text))" in member_name

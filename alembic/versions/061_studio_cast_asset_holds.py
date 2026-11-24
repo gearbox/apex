@@ -24,6 +24,13 @@ Five new tables and one new column (see ``src/db/models/library.py::LibraryAsset
   ``DEFERRABLE INITIALLY DEFERRED`` so a reorder can rewrite many rows in one transaction.
 * ``studio_cast_looks`` and ``studio_cast_look_references`` - a look is a named subset of a
   member's references; deleting a reference removes it from every look (the look may end up empty).
+  A look only links **its own member's** references, in the database: the link row carries
+  ``cast_member_id`` and both of its foreign keys are composite - ``(look_id, cast_member_id)`` ->
+  ``studio_cast_looks (id, cast_member_id)`` and ``(reference_id, cast_member_id)`` ->
+  ``studio_cast_references (id, cast_member_id)`` (targets ``uq_studio_cast_looks_id_member`` /
+  ``uq_studio_cast_references_id_member``) - so a link between a look and another member's reference
+  is unrepresentable. ``CastService`` still checks first (that is what turns it into a ``422`` with
+  paths); the foreign keys are the backstop.
 * ``studio_artists.performer_cast_member_id`` - an optional composite FK to the member
   (``fk_studio_artists_performer``, ``NO ACTION``: deleting a performer is refused, never silently
   unlinked), with a partial index for the "is this member in use" lookup.
@@ -164,6 +171,8 @@ def upgrade() -> None:
         ),
         sa.CheckConstraint("position >= 0", name="ck_studio_cast_references_position"),
         sa.UniqueConstraint("hold_id", name="uq_studio_cast_references_hold_id"),
+        # The target of the look links' composite foreign key: "this reference of this member".
+        sa.UniqueConstraint("id", "cast_member_id", name="uq_studio_cast_references_id_member"),
         sa.UniqueConstraint(
             "cast_member_id",
             "position",
@@ -205,6 +214,8 @@ def upgrade() -> None:
             name="fk_studio_cast_looks_member_owner",
             ondelete="CASCADE",
         ),
+        # The target of the look links' composite foreign key: "this look of this member".
+        sa.UniqueConstraint("id", "cast_member_id", name="uq_studio_cast_looks_id_member"),
     )
     op.create_index("ix_studio_cast_looks_product_id", "studio_cast_looks", ["product_id"])
     op.create_index("ix_studio_cast_looks_user_id", "studio_cast_looks", ["user_id"])
@@ -219,10 +230,21 @@ def upgrade() -> None:
         "studio_cast_look_references",
         sa.Column("look_id", _UUID, nullable=False),
         sa.Column("reference_id", _UUID, nullable=False),
+        sa.Column("cast_member_id", _UUID, nullable=False),
         sa.PrimaryKeyConstraint("look_id", "reference_id"),
-        sa.ForeignKeyConstraint(["look_id"], ["studio_cast_looks.id"], ondelete="CASCADE"),
+        # Both sides are keyed with the member, so the look and the reference are the same
+        # member's (a link across members violates one of them).
         sa.ForeignKeyConstraint(
-            ["reference_id"], ["studio_cast_references.id"], ondelete="CASCADE"
+            ["look_id", "cast_member_id"],
+            ["studio_cast_looks.id", "studio_cast_looks.cast_member_id"],
+            name="fk_studio_cast_look_references_look_member",
+            ondelete="CASCADE",
+        ),
+        sa.ForeignKeyConstraint(
+            ["reference_id", "cast_member_id"],
+            ["studio_cast_references.id", "studio_cast_references.cast_member_id"],
+            name="fk_studio_cast_look_references_reference_member",
+            ondelete="CASCADE",
         ),
     )
     op.create_index(

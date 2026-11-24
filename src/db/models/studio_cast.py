@@ -25,6 +25,11 @@ Design notes (see ``agent_prompts/studio-s1-p3-decisions.md``):
   ``DEFERRABLE INITIALLY DEFERRED`` so a reorder can rewrite many rows in one transaction.
 * Deleting a reference removes it from every look (the link rows cascade); a look may end up empty
   and stays (S4 rejects an empty look when it builds a shot).
+* **A look only links its own member's references, in the database.** A link row carries
+  ``cast_member_id`` and both its foreign keys are composite - ``(look_id, cast_member_id)`` ->
+  ``studio_cast_looks (id, cast_member_id)`` and ``(reference_id, cast_member_id)`` ->
+  ``studio_cast_references (id, cast_member_id)`` - so a link across members is unrepresentable.
+  ``CastService`` checks first (that is what yields a ``422`` with paths); the keys are the backstop.
 * An artist's ``performer_cast_member_id`` is ``NO ACTION``: deleting a performer is refused
   (``409 cast_member_in_use``); silently unlinking would change an artist's look unannounced.
 
@@ -62,6 +67,8 @@ from src.studio.constraints import (
 
 __all__ = [
     "CAST_REFERENCE_HOLDER_KIND",
+    "LOOK_LINK_LOOK_FK",
+    "LOOK_LINK_REFERENCE_FK",
     "LOOK_NAME_UNIQUE",
     "MEMBER_NAME_UNIQUE",
     "REFERENCE_HOLD_FK",
@@ -77,6 +84,12 @@ CAST_REFERENCE_HOLDER_KIND = "studio.cast_reference"
 MEMBER_NAME_UNIQUE = "uq_studio_cast_members_owner_name"
 REFERENCE_LABEL_UNIQUE = "uq_studio_cast_references_member_label"
 LOOK_NAME_UNIQUE = "uq_studio_cast_looks_member_name"
+LOOK_LINK_LOOK_FK = "fk_studio_cast_look_references_look_member"
+LOOK_LINK_REFERENCE_FK = "fk_studio_cast_look_references_reference_member"
+"""The two composite foreign keys of a look link: ``(look_id, cast_member_id)`` and
+``(reference_id, cast_member_id)``. A link between a look and **another member's** reference
+violates one of them (``LOOK_LINK_REFERENCE_FK`` when the link is stamped with the look's member,
+``LOOK_LINK_LOOK_FK`` when stamped with the reference's)."""
 REFERENCE_HOLD_FK = "fk_studio_cast_references_hold"
 """The reference → hold foreign key (``NO ACTION``): a hold cannot be deleted while a reference uses
 it, which is what keeps the reference and its hold paired."""
@@ -163,6 +176,8 @@ class StudioCastReference(Base):
             ondelete="CASCADE",
         ),
         CheckConstraint("position >= 0", name="ck_studio_cast_references_position"),
+        # The target of the look links' composite foreign key.
+        UniqueConstraint("id", "cast_member_id", name="uq_studio_cast_references_id_member"),
         # Deferred: a reorder (and the re-compaction after a delete) rewrites many rows at once.
         UniqueConstraint(
             "cast_member_id",
@@ -213,6 +228,8 @@ class StudioCastLook(Base):
             name="fk_studio_cast_looks_member_owner",
             ondelete="CASCADE",
         ),
+        # The target of the look links' composite foreign key.
+        UniqueConstraint("id", "cast_member_id", name="uq_studio_cast_looks_id_member"),
         Index(
             LOOK_NAME_UNIQUE,
             "cast_member_id",
@@ -226,22 +243,32 @@ class StudioCastLook(Base):
 
 
 class StudioCastLookReference(Base):
-    """Join row: one reference belongs to one look. Both sides cascade."""
+    """Join row: one reference belongs to one look, and both belong to ``cast_member_id``.
+
+    Both foreign keys are composite (they carry the member), so the database refuses a link between
+    a look and another member's reference. Both sides cascade.
+    """
 
     __tablename__ = "studio_cast_look_references"
 
-    look_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("studio_cast_looks.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    reference_id: Mapped[UUID] = mapped_column(
-        PG_UUID(as_uuid=True),
-        ForeignKey("studio_cast_references.id", ondelete="CASCADE"),
-        primary_key=True,
-    )
+    look_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    reference_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True)
+    cast_member_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    """The member both the look and the reference belong to (see the composite keys)."""
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["look_id", "cast_member_id"],
+            ["studio_cast_looks.id", "studio_cast_looks.cast_member_id"],
+            name=LOOK_LINK_LOOK_FK,
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["reference_id", "cast_member_id"],
+            ["studio_cast_references.id", "studio_cast_references.cast_member_id"],
+            name=LOOK_LINK_REFERENCE_FK,
+            ondelete="CASCADE",
+        ),
         # The look side is the primary key's leading column; this serves the reference's cascade.
         Index("ix_studio_cast_look_references_reference", "reference_id"),
     )

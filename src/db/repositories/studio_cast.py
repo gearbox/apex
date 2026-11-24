@@ -619,15 +619,28 @@ class StudioCastLookRepository:
         )
         return result.scalar_one_or_none() is not None
 
-    async def replace_links(self, look_id: UUID, reference_ids: Sequence[UUID]) -> None:
-        """Make the look's reference set exactly ``reference_ids``."""
+    async def replace_links(
+        self, look_id: UUID, member_id: UUID, reference_ids: Sequence[UUID]
+    ) -> None:
+        """Make the look's reference set exactly ``reference_ids``.
+
+        Every link is stamped with ``member_id``: both composite foreign keys then require the look
+        and each reference to belong to that member, so a reference of another member is refused by
+        the database (the service checks first and reports it as a ``422``).
+
+        Raises:
+            sqlalchemy.exc.IntegrityError: A reference (or the look) is not ``member_id``'s.
+        """
         await self._session.execute(
             delete(StudioCastLookReference).where(StudioCastLookReference.look_id == look_id)
         )
         if reference_ids:
             await self._session.execute(
                 pg_insert(StudioCastLookReference).values(
-                    [{"look_id": look_id, "reference_id": rid} for rid in reference_ids]
+                    [
+                        {"look_id": look_id, "reference_id": rid, "cast_member_id": member_id}
+                        for rid in reference_ids
+                    ]
                 )
             )
 

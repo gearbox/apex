@@ -14,7 +14,8 @@ from uuid import uuid4
 import msgspec
 import pytest
 import pytest_asyncio
-from sqlalchemy import func, select
+from sqlalchemy import func, insert, select
+from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.studio import (
     ArtistCreate,
@@ -29,8 +30,15 @@ from src.api.schemas.studio import (
 )
 from src.api.services.library_holds import AssetHolder, AssetHoldService, HolderCount
 from src.core.library_ref import AssetRef, LibraryAssetSource, parse_asset_ref
+from src.db.integrity import violated_constraint
 from src.db.models.storage import GenerationOutput, UserImage
-from src.db.models.studio_cast import CAST_REFERENCE_HOLDER_KIND, StudioCastReference
+from src.db.models.studio_cast import (
+    CAST_REFERENCE_HOLDER_KIND,
+    LOOK_LINK_LOOK_FK,
+    LOOK_LINK_REFERENCE_FK,
+    StudioCastLookReference,
+    StudioCastReference,
+)
 from src.studio.constraints import (
     MAX_CAST_LOOKS,
     MAX_CAST_MEMBERS_PER_OWNER,
@@ -940,6 +948,106 @@ class TestLooks:
             await cast.delete_look(member.id, look.id, user.id, PRODUCT)
         with pytest.raises(CastLookNotFound):
             await cast.change_look(member.id, uuid4(), user.id, PRODUCT, CastLookPatch(name="x"))
+
+
+class TestLookLinkIntegrity:
+    """A look only links its own member's references: a database rule behind the service check.
+
+    ``CastService`` reports a foreign reference as a ``422`` with paths (see
+    ``test_a_look_needs_valid_references``); these tests go around it with a direct Core insert,
+    because the composite foreign keys are what make the rule hold for every writer.
+    """
+
+    LINK_FKS = frozenset({LOOK_LINK_LOOK_FK, LOOK_LINK_REFERENCE_FK})
+
+    async def _link(
+        self, session: AsyncSession, look_id: UUID, reference_id: UUID, member_id: UUID
+    ) -> None:
+        async with session.begin_nested():
+            await session.execute(
+                insert(StudioCastLookReference).values(
+                    look_id=look_id, reference_id=reference_id, cast_member_id=member_id
+                )
+            )
+
+    async def test_a_link_across_members_is_refused_by_the_database(
+        self, cast: CastService, db_session: AsyncSession, user: User
+    ) -> None:
+        mira, _ = await member_with(cast, db_session, user, 2)
+        nova, _ = await member_with(cast, db_session, user, 1, name="Nova")
+        look = await cast.create_look(
+            mira.id,
+            user.id,
+            PRODUCT,
+            CastLookIn(name="Look", reference_ids=[mira.references[0].id]),
+        )
+        nova_reference = nova.references[0].id
+
+        # stamped with the look's member: the reference is not that member's ...
+        with pytest.raises(IntegrityError) as stamped_with_look_member:
+            await self._link(db_session, look.id, nova_reference, mira.id)
+        # ... stamped with the reference's member: the look is not that member's
+        with pytest.raises(IntegrityError) as stamped_with_reference_member:
+            await self._link(db_session, look.id, nova_reference, nova.id)
+
+        assert violated_constraint(stamped_with_look_member.value, self.LINK_FKS) == (
+            LOOK_LINK_REFERENCE_FK
+        )
+        assert violated_constraint(stamped_with_reference_member.value, self.LINK_FKS) == (
+            LOOK_LINK_LOOK_FK
+        )
+        # nothing was written: the look still links exactly its own reference
+        detail = await cast.get(mira.id, user.id, PRODUCT)
+        assert [lk.reference_ids for lk in detail.looks] == [[mira.references[0].id]]
+
+    async def test_a_link_within_one_member_is_accepted(
+        self, cast: CastService, db_session: AsyncSession, user: User
+    ) -> None:
+        mira, _ = await member_with(cast, db_session, user, 2)
+        look = await cast.create_look(
+            mira.id,
+            user.id,
+            PRODUCT,
+            CastLookIn(name="Look", reference_ids=[mira.references[0].id]),
+        )
+
+        await self._link(db_session, look.id, mira.references[1].id, mira.id)
+
+        detail = await cast.get(mira.id, user.id, PRODUCT)
+        assert [lk.reference_ids for lk in detail.looks] == [[r.id for r in mira.references]]
+
+    async def test_a_link_with_a_member_that_matches_neither_side_is_refused(
+        self, cast: CastService, db_session: AsyncSession, user: User
+    ) -> None:
+        mira, _ = await member_with(cast, db_session, user, 2)
+        look = await cast.create_look(
+            mira.id,
+            user.id,
+            PRODUCT,
+            CastLookIn(name="Look", reference_ids=[mira.references[0].id]),
+        )
+
+        with pytest.raises(IntegrityError) as raised:
+            await self._link(db_session, look.id, mira.references[1].id, uuid4())
+
+        assert violated_constraint(raised.value, self.LINK_FKS) in self.LINK_FKS
+
+    async def test_the_cascades_still_remove_the_links(
+        self, cast: CastService, db_session: AsyncSession, user: User
+    ) -> None:
+        mira, _ = await member_with(cast, db_session, user, 2)
+        look = await cast.create_look(
+            mira.id,
+            user.id,
+            PRODUCT,
+            CastLookIn(name="Look", reference_ids=[r.id for r in mira.references]),
+        )
+
+        await cast.delete_reference(mira.id, mira.references[0].id, user.id, PRODUCT)
+        assert await count(db_session, "studio_cast_look_references", look_id=look.id) == 1
+
+        await cast.delete_look(mira.id, look.id, user.id, PRODUCT)
+        assert await count(db_session, "studio_cast_look_references") == 0
 
 
 class TestOwnership:

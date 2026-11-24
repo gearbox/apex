@@ -545,7 +545,7 @@ class CastService:
                 look = await self._looks.insert(
                     member_id=member_id, user_id=user_id, product_id=product_id, name=name
                 )
-                await self._looks.replace_links(look.id, data.reference_ids)
+                await self._looks.replace_links(look.id, member_id, data.reference_ids)
         except IntegrityError as exc:
             conflict = _name_conflict(exc)
             if conflict is None:
@@ -598,7 +598,7 @@ class CastService:
                         name=str(changes["name"]),
                     )
                 if reference_ids is not None:
-                    await self._looks.replace_links(look_id, reference_ids)
+                    await self._looks.replace_links(look_id, member_id, reference_ids)
                 await self._looks.touch(look_id)
         except IntegrityError as exc:
             conflict = _name_conflict(exc)
