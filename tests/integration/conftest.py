@@ -39,6 +39,7 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.push_subscription import PushSubscriptionRepository
 from src.db.repositories.user import UserRepository
 from src.db.repositories.user_image import UserImageRepository
+from tests.library_holds_support import HoldWorld
 from tests.studio_chat_support import ChatWorld, make_chat_settings
 from tests.studio_runs_support import RunWorld, make_settings
 from tests.studio_world import StudioWorld
@@ -514,6 +515,22 @@ async def make_gpu_session(db_session: AsyncSession, make_user: UserFactory) -> 
         return session
 
     return _factory
+
+
+@pytest_asyncio.fixture
+async def hold_world(db_engine: AsyncEngine) -> AsyncGenerator[HoldWorld]:
+    """Committed users and library assets for the hold / cast tests; removed afterwards.
+
+    The teardown hard-deletes the users, so every test using it also proves that the cascade
+    (users → holds + assets + cast, one statement) succeeds with ``NO ACTION`` foreign keys.
+    """
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    world = HoldWorld(factory=async_sessionmaker(bind=db_engine, expire_on_commit=False))
+    try:
+        yield world
+    finally:
+        await world.cleanup()
 
 
 @pytest_asyncio.fixture

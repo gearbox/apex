@@ -62,6 +62,7 @@ from src.api.routes.push import PushController
 from src.api.routes.sse import SSEController
 from src.api.routes.storage import StorageController
 from src.api.routes.studio_artists import StudioArtistController
+from src.api.routes.studio_cast import StudioCastController
 from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.routes.studio_projects import StudioProjectController
@@ -93,6 +94,7 @@ from src.api.services.legal.errors import (
     LegalVersionStaleError,
 )
 from src.api.services.library import LibraryBulkTagCapError
+from src.api.services.library_holds import AssetHeldError
 from src.api.services.library_project import (
     LibraryProjectInUseError,
     LibraryProjectNameConflictError,
@@ -330,6 +332,13 @@ def library_project_in_use_handler(
         "library.project_in_use", request, HTTP_409_CONFLICT, blockers=[b["code"] for b in blockers]
     )
     return _error("project_in_use", str(exc), HTTP_409_CONFLICT, {"blockers": blockers})
+
+
+def asset_held_handler(request: Request[Any, Any, Any], exc: AssetHeldError) -> Response[Any]:
+    # Kinds and counts only: never ids or names of the holding context's objects.
+    holders = [{"kind": h.kind, "count": h.count} for h in exc.holders]
+    _log_handler_event("library.asset_held", request, HTTP_409_CONFLICT, holders=holders)
+    return _error("asset_held", str(exc), HTTP_409_CONFLICT, {"holders": holders})
 
 
 def studio_error_handler(request: Request[Any, Any, Any], exc: StudioError) -> Response[Any]:
@@ -612,6 +621,7 @@ def create_app() -> Litestar:
             LibraryTagController,
             # Media Project Studio (404 unless STUDIO_ENABLED and the product has "studio")
             StudioArtistController,
+            StudioCastController,
             StudioChatController,
             StudioMemoryController,
             StudioProjectController,
@@ -642,6 +652,7 @@ def create_app() -> Litestar:
             OrganizationBalanceError: organization_balance_handler,
             LibraryProjectNameConflictError: library_project_name_conflict_handler,
             LibraryProjectInUseError: library_project_in_use_handler,
+            AssetHeldError: asset_held_handler,
             LibraryTagNameConflictError: library_tag_name_conflict_handler,
             LibraryBulkTagCapError: library_bulk_tag_cap_handler,
             JobInProgressError: job_in_progress_handler,

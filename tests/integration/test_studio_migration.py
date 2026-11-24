@@ -29,6 +29,9 @@ _MIGRATION_059_PATH = (
 _MIGRATION_060_PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "060_studio_artist_chat.py"
 )
+_MIGRATION_061_PATH = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "061_studio_cast_asset_holds.py"
+)
 _TABLES = (
     "studio_artists",
     "studio_project_profiles",
@@ -41,6 +44,12 @@ _TABLES = (
     "studio_artist_chat_messages",
     "studio_memory_drafts",
     "studio_llm_usage",  # also added by 060: the hourly-limit ledger (its only FK is to users)
+    # added by 061 (with library_asset_holds, which is not a studio_ table): the artists carry an
+    # FK to the cast members, so 061 must be undone before 055's artists can be
+    "studio_cast_members",
+    "studio_cast_references",
+    "studio_cast_looks",
+    "studio_cast_look_references",
 )
 
 
@@ -59,6 +68,7 @@ def _run(connection: Connection, action: str, *, revision: str = "055") -> None:
         "057": lambda: _load_migration(_MIGRATION_057_PATH, "revision_057"),
         "059": lambda: _load_migration(_MIGRATION_059_PATH, "revision_059"),
         "060": lambda: _load_migration(_MIGRATION_060_PATH, "revision_060"),
+        "061": lambda: _load_migration(_MIGRATION_061_PATH, "revision_061"),
     }[revision]()
     with Operations.context(MigrationContext.configure(connection)):
         getattr(migration, action)()
@@ -93,8 +103,10 @@ async def test_upgrade_downgrade_upgrade_round_trip(db_engine: AsyncEngine) -> N
         transaction = await connection.begin()
         assert await _tables(connection) == set(_TABLES)
 
-        # newest first: 060's tables reference 055's artists (and 059's unique key on them),
-        # 059's table references 055's artists, 057's references 055's tracks
+        # newest first: 061's column and FK sit on 055's artists, 060's tables reference 055's
+        # artists (and 059's unique key on them), 059's table references 055's artists, 057's
+        # references 055's tracks
+        await connection.run_sync(_run, "downgrade", revision="061")
         await connection.run_sync(_run, "downgrade", revision="060")
         await connection.run_sync(_run, "downgrade", revision="059")
         await connection.run_sync(_run, "downgrade", revision="057")
@@ -105,6 +117,7 @@ async def test_upgrade_downgrade_upgrade_round_trip(db_engine: AsyncEngine) -> N
         await connection.run_sync(_run, "upgrade", revision="057")
         await connection.run_sync(_run, "upgrade", revision="059")
         await connection.run_sync(_run, "upgrade", revision="060")
+        await connection.run_sync(_run, "upgrade", revision="061")
         assert await _tables(connection) == set(_TABLES)
         await transaction.rollback()
 

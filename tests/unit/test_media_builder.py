@@ -7,7 +7,7 @@ from uuid import uuid4
 
 import pytest
 
-from src.api.services.library import _build_media_object
+from src.api.services.library_media import build_media_object
 from src.api.services.media import (
     OUTPUT_PREFIX,
     UPLOAD_PREFIX,
@@ -228,7 +228,7 @@ class TestOriginalDurationMs:
     def test_library_builder_threads_duration(
         self, source: LibraryAssetSource, duration_ms: int | None
     ) -> None:
-        media = _build_media_object(
+        media = build_media_object(
             source=source,
             asset_id=uuid4(),
             width=1,

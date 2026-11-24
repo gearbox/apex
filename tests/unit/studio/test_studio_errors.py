@@ -64,6 +64,18 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.MemoryDraftInProgress, 409, "memory_draft_in_progress"),
     (e.MessageNotComplete, 422, "message_not_complete"),
     (e.ChatRateLimited, 429, "chat_rate_limited"),
+    (e.CastMemberNotFound, 404, "cast_member_not_found"),
+    (e.CastReferenceNotFound, 404, "cast_reference_not_found"),
+    (e.CastLookNotFound, 404, "cast_look_not_found"),
+    (e.AssetNotFound, 404, "asset_not_found"),
+    (lambda: e.AssetNotEligible("derivative"), 422, "asset_not_eligible"),
+    (e.InvalidAssetRef, 400, "invalid_asset_ref"),
+    (e.InvalidReferenceOrder, 422, "invalid_order"),
+    (e.CastNameTaken, 409, "cast_name_taken"),
+    (e.CastLabelTaken, 409, "cast_label_taken"),
+    (e.CastLookNameTaken, 409, "cast_look_name_taken"),
+    (lambda: e.CastLimitReached("references", 12), 409, "cast_limit_reached"),
+    (lambda: e.CastMemberInUse(2), 409, "cast_member_in_use"),
 ]
 
 

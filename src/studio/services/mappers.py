@@ -72,6 +72,7 @@ def artist_out(artist: StudioArtist) -> ArtistOut:
         aesthetic_references=list(artist.aesthetic_references),
         style_tags=list(artist.style_tags),
         global_avoid=list(artist.global_avoid),
+        performer_cast_member_id=artist.performer_cast_member_id,
         created_at=artist.created_at,
         updated_at=artist.updated_at,
     )

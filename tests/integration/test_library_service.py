@@ -26,6 +26,7 @@ from src.api.services.library import (
     LibraryValidationError,
 )
 from src.api.services.library_project import LibraryProjectService
+from src.core.enums import AssetDeleteOutcome
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.core.product_registry import VEX_CONFIG
 from src.db.repositories.library import LibraryRepository
@@ -498,7 +499,7 @@ class TestDeleteAsset:
         deleted = await library_service.delete_asset(
             ref, user.id, "vex", session=db_session, content_proxy=content_proxy
         )
-        assert deleted is True
+        assert deleted is AssetDeleteOutcome.DELETED
 
         # Underlying row gone
         from src.db.repositories.user_image import UserImageRepository
@@ -529,8 +530,8 @@ class TestDeleteAsset:
         second = await library_service.delete_asset(
             ref, user.id, "vex", session=db_session, content_proxy=content_proxy
         )
-        assert first is True
-        assert second is False
+        assert first is AssetDeleteOutcome.DELETED
+        assert second is AssetDeleteOutcome.NOT_FOUND
 
     async def test_delete_cross_user_returns_false(
         self,
@@ -548,7 +549,7 @@ class TestDeleteAsset:
         result = await library_service.delete_asset(
             ref, other.id, "vex", session=db_session, content_proxy=content_proxy
         )
-        assert result is False
+        assert result is AssetDeleteOutcome.NOT_FOUND
 
     async def test_delete_type_mismatch_treated_as_not_found(
         self,
@@ -568,7 +569,7 @@ class TestDeleteAsset:
         result = await library_service.delete_asset(
             wrong_ref, user.id, "vex", session=db_session, content_proxy=content_proxy
         )
-        assert result is False
+        assert result is AssetDeleteOutcome.NOT_FOUND
 
         from src.db.repositories.user_image import UserImageRepository
 
@@ -615,7 +616,7 @@ class TestDeleteAsset:
                 result = await service.delete_asset(
                     ref, user.id, "vex", session=work_session, content_proxy=content_proxy
                 )
-            assert result is False
+            assert result is AssetDeleteOutcome.NOT_FOUND
 
         async with session_factory() as verify_session:
             from src.db.repositories.user_image import UserImageRepository

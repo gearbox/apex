@@ -37,7 +37,14 @@ class LibraryAssetItem(msgspec.Struct, kw_only=True):
     created_at: datetime
 
     expires_at: datetime
-    """UTC timestamp when this asset's content is deleted by retention cleanup."""
+    """UTC timestamp when this asset's content is deleted by retention cleanup.
+
+    While ``held`` is true the asset is exempt from cleanup (and cannot be deleted): clients hide
+    the countdown. ``expires_at`` keeps its meaning and is restarted when the last hold goes."""
+
+    held: bool
+    """Another part of the product (e.g. a Studio cast member) holds this asset, so it is not
+    swept and ``DELETE`` answers ``409 asset_held``."""
 
     display_title: str | None = None
     """User-set display name, if any (see PATCH /assets/{asset_ref})."""
@@ -290,6 +297,9 @@ class BulkOperationItemResult(msgspec.Struct, kw_only=True):
 
     asset_ref: str
     success: bool
+    error: str | None = None
+    """Why the item failed, when the client can act on it: ``"asset_held"`` (a delete of an asset
+    some other context holds). ``null`` for success and for every other failure."""
 
 
 class BulkOperationResult(msgspec.Struct, kw_only=True):
@@ -324,7 +334,10 @@ class LibraryOutputItem(msgspec.Struct, kw_only=True):
     created_at: datetime
 
     expires_at: datetime
-    """UTC timestamp when this output is deleted by retention cleanup."""
+    """UTC timestamp when this output is deleted by retention cleanup (hidden while ``held``)."""
+
+    held: bool
+    """Another part of the product holds this output: it is not swept and cannot be deleted."""
 
     media: MediaObject
 

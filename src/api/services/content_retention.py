@@ -14,10 +14,12 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import delete, exists, func, or_, select, update
+from sqlalchemy.exc import IntegrityError
 
 from src.api.services.storage.exceptions import StorageDeleteError
 from src.core.library_ref import LibraryAssetSource
-from src.db.models.library import LibraryAssetMetadata
+from src.db.integrity import violated_constraint
+from src.db.models.library import HOLD_ASSET_FKS, LibraryAssetMetadata
 from src.db.models.storage import (
     GenerationJob,
     GenerationMaterializationAttempt,
@@ -287,9 +289,20 @@ class ContentRetentionService:
 
                 touched_job_ids = {o.job_id for o in expired}
 
-                delete_result = await session.execute(
-                    delete(GenerationOutput).where(GenerationOutput.id.in_(expired_ids))
-                )
+                try:
+                    delete_result = await session.execute(
+                        delete(GenerationOutput).where(GenerationOutput.id.in_(expired_ids))
+                    )
+                except IntegrityError as exc:
+                    if violated_constraint(exc, HOLD_ASSET_FKS) is None:
+                        raise
+                    # A hold committed after get_expired's snapshot but before its row lock
+                    # (the one window the NOT EXISTS + SKIP LOCKED cannot close): the foreign key
+                    # refused. Nothing of this batch was deleted, so none of its R2 objects may be.
+                    await session.rollback()
+                    batches -= 1
+                    self._log_hold_conflict("output", len(expired_ids))
+                    break
                 batch_rows_deleted = delete_result.rowcount or 0  # type: ignore[attr-defined]
 
                 # Only finished jobs reach here (their outputs just expired); an in-flight
@@ -375,9 +388,17 @@ class ContentRetentionService:
 
                 # Derivative rows cascade via user_images.parent_image_id ON
                 # DELETE CASCADE — no job linkage to soft-delete for uploads.
-                delete_result = await session.execute(
-                    delete(UserImage).where(UserImage.id.in_(expired_ids))
-                )
+                try:
+                    delete_result = await session.execute(
+                        delete(UserImage).where(UserImage.id.in_(expired_ids))
+                    )
+                except IntegrityError as exc:
+                    if violated_constraint(exc, HOLD_ASSET_FKS) is None:
+                        raise
+                    await session.rollback()  # see _sweep_outputs
+                    batches -= 1
+                    self._log_hold_conflict("upload", len(expired_ids))
+                    break
                 batch_rows_deleted = delete_result.rowcount or 0  # type: ignore[attr-defined]
 
                 metadata_purged = await self._purge_metadata(
@@ -416,6 +437,11 @@ class ContentRetentionService:
             r2_delete_failed=r2_delete_failed,
             batches=batches,
         )
+
+    @staticmethod
+    def _log_hold_conflict(content_type: str, rows: int) -> None:
+        """Log a batch the foreign key refused: counts only, the next tick retries."""
+        logger.warning("content_retention.hold_conflict", content_type=content_type, rows=rows)
 
     async def _purge_metadata(
         self,

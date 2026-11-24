@@ -122,12 +122,14 @@ class StudioArtistRepository:
         aesthetic_references: Sequence[str],
         style_tags: Sequence[str],
         global_avoid: Sequence[str],
+        performer_cast_member_id: UUID | None = None,
     ) -> StudioArtist:
         """Insert an artist.
 
         Raises:
-            sqlalchemy.exc.IntegrityError: ``name`` collides case-insensitively for this owner;
-                call inside ``session.begin_nested()``.
+            sqlalchemy.exc.IntegrityError: ``name`` collides case-insensitively for this owner,
+                or the performer is not a cast member of this owner
+                (``fk_studio_artists_performer``); call inside ``session.begin_nested()``.
         """
         result = await self._session.execute(
             pg_insert(StudioArtist)
@@ -142,6 +144,7 @@ class StudioArtistRepository:
                 aesthetic_references=list(aesthetic_references),
                 style_tags=list(style_tags),
                 global_avoid=list(global_avoid),
+                performer_cast_member_id=performer_cast_member_id,
             )
             .returning(StudioArtist)
         )

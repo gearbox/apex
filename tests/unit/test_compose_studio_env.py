@@ -21,8 +21,8 @@ from pathlib import Path
 import pytest
 from pydantic import ValidationError
 
-from src.core.config import Settings
 from src.core.enums import StudioRunKind
+from tests.unit.helpers import hermetic_settings
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
 
@@ -162,10 +162,10 @@ def test_compose_defaults_load_and_keep_the_chat_on_grok(
     for name in _STUDIO_VARS:
         monkeypatch.setenv(name, _resolve(defaults[name], defaults))
 
-    settings = Settings(_env_file=None)
+    settings = hermetic_settings()
 
     assert settings.llm_models == {}
-    assert dict(settings.studio_llm_model_by_kind) == {}
+    assert not dict(settings.studio_llm_model_by_kind)
     assert settings.studio_chat_model_by_product == {}
     assert settings.studio_chat_model_key_default == "grok"
     assert settings.studio_memory_draft_model == "grok"
@@ -199,7 +199,7 @@ def test_a_blank_json_setting_means_its_default(
 ) -> None:
     monkeypatch.setenv(name, blank)
 
-    settings = Settings(_env_file=None)
+    settings = hermetic_settings()
 
     assert getattr(settings, name.lower()) == {}
 
@@ -208,7 +208,7 @@ def test_json_settings_still_decode(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("STUDIO_LLM_MODEL_BY_KIND", '{"plan":"qwen"}')
     monkeypatch.setenv("STUDIO_CHAT_MODEL_BY_PRODUCT", '{"synthara":"qwen"}')
 
-    settings = Settings(_env_file=None)
+    settings = hermetic_settings()
 
     assert dict(settings.studio_llm_model_by_kind) == {StudioRunKind.PLAN: "qwen"}
     assert settings.studio_chat_model_by_product == {"synthara": "qwen"}
@@ -221,7 +221,7 @@ def test_malformed_json_names_the_setting_not_the_value(
     monkeypatch.setenv("STUDIO_LLM_MODEL_BY_KIND", value)
 
     with pytest.raises(ValidationError) as caught:
-        Settings(_env_file=None)
+        hermetic_settings()
 
     message = str(caught.value)
     assert "studio_llm_model_by_kind" in message
@@ -230,7 +230,7 @@ def test_malformed_json_names_the_setting_not_the_value(
 
 
 def test_init_kwargs_bypass_the_env_decoding() -> None:
-    settings = Settings(_env_file=None, studio_llm_model_by_kind={StudioRunKind.PLAN: "qwen"})
+    settings = hermetic_settings(studio_llm_model_by_kind={StudioRunKind.PLAN: "qwen"})
 
     assert dict(settings.studio_llm_model_by_kind) == {StudioRunKind.PLAN: "qwen"}
 

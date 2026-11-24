@@ -28,6 +28,7 @@ from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.jobs import UnifiedJobResponse
 from src.api.schemas.pagination import CursorPage
 from src.api.security import auth_guard
+from src.api.services.library_holds import AssetHeldError, holder_counts_for_job
 from src.api.services.unified_jobs import JobInProgressError, UnifiedJobService
 from src.core.enums import GenerationType, JobStatus, Provider, SoftDeleteOutcome
 
@@ -107,6 +108,8 @@ class UnifiedJobController(Controller):
         required for MVP).
 
         Returns 404 if the job does not exist or is not owned by the caller.
+        Raises ``AssetHeldError`` (409 ``asset_held``, holder counts summed over the job's
+        outputs) while any of its outputs is held by another context.
         """
         job = await unified_job_service.get_job(job_id, current_user_id, session=session)
 
@@ -153,6 +156,10 @@ class UnifiedJobController(Controller):
             from litestar.exceptions import NotFoundException
 
             raise NotFoundException(detail=f"Job {job_id} not found")
+
+        if outcome is SoftDeleteOutcome.HELD:
+            # An output of the job is pinned by another context: nothing was changed.
+            raise AssetHeldError(await holder_counts_for_job(session, job_id))
 
         if outcome is SoftDeleteOutcome.IN_FLIGHT:
             job = await repo.get(job_id, user_id=current_user_id)

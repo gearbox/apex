@@ -34,7 +34,8 @@ from src.api.services.library import (
     LibraryTagNotFoundError,
     LibraryValidationError,
 )
-from src.core.enums import OutputMediaType
+from src.api.services.library_holds import AssetHeldError, HolderCount
+from src.core.enums import AssetDeleteOutcome, OutputMediaType
 from src.core.library_ref import LibraryAssetSource
 from src.core.product_registry import VEX_CONFIG
 
@@ -61,6 +62,7 @@ def _detail(**overrides: object) -> LibraryAssetDetail:
         ),
         "created_at": MagicMock(),
         "expires_at": MagicMock(),
+        "held": False,
         "display_title": None,
         "original_filename": "photo.png",
         "is_favorite": False,
@@ -469,7 +471,7 @@ class TestFavoriteIdempotency:
 class TestDeleteAsset:
     async def test_found_deletes(self) -> None:
         service = AsyncMock()
-        service.delete_asset.return_value = True
+        service.delete_asset.return_value = AssetDeleteOutcome.DELETED
 
         await LibraryController.delete_asset.fn(
             MagicMock(),
@@ -484,7 +486,7 @@ class TestDeleteAsset:
 
     async def test_not_found_raises_404(self) -> None:
         service = AsyncMock()
-        service.delete_asset.return_value = False
+        service.delete_asset.return_value = AssetDeleteOutcome.NOT_FOUND
 
         with pytest.raises(NotFoundException):
             await LibraryController.delete_asset.fn(
@@ -496,3 +498,21 @@ class TestDeleteAsset:
                 library_service=service,
                 content_proxy=MagicMock(),
             )
+
+    async def test_held_raises_asset_held_with_the_holder_counts(self) -> None:
+        service = AsyncMock()
+        service.delete_asset.return_value = AssetDeleteOutcome.HELD
+        service.holders_of.return_value = (HolderCount(kind="studio.cast_reference", count=2),)
+
+        with pytest.raises(AssetHeldError) as raised:
+            await LibraryController.delete_asset.fn(
+                MagicMock(),
+                current_user_id=uuid4(),
+                product_id="vex",
+                asset_ref="upload:x",
+                session=MagicMock(),
+                library_service=service,
+                content_proxy=MagicMock(),
+            )
+
+        assert raised.value.holders == (HolderCount(kind="studio.cast_reference", count=2),)

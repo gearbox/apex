@@ -26,6 +26,11 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "CAST_APPEARANCE_MAX",
+    "CAST_DESCRIPTION_MAX",
+    "CAST_LABEL_MAX",
+    "CAST_LOOK_NAME_MAX",
+    "CAST_NAME_MAX",
     "CHAT_MESSAGE_MAX",
     "CHAT_REFUSAL_SENTINEL",
     "CHAT_SENTINEL_BUFFER",
@@ -35,6 +40,9 @@ __all__ = [
     "DISCOGRAPHY_BUDGET",
     "DISCOGRAPHY_TITLES_MAX",
     "MAX_ACTIVE_MEMORIES_PER_ARTIST",
+    "MAX_CAST_LOOKS",
+    "MAX_CAST_MEMBERS_PER_OWNER",
+    "MAX_CAST_REFERENCES",
     "MAX_CHATS_PER_ARTIST",
     "MAX_MESSAGES_PER_CHAT",
     "MEMORY_BODY_MAX",
@@ -101,6 +109,25 @@ CHAT_REFUSAL_SENTINEL: Final = "⟦declined⟧"
 CHAT_SENTINEL_BUFFER: Final = 32
 """Characters of a reply held back before the first delta is published, so a refusal never
 reaches the client and is then retracted."""
+
+# -- cast (S1-P3) -----------------------------------------------------------------------------
+
+MAX_CAST_MEMBERS_PER_OWNER: Final = 50
+"""Cast members one user holds per product (``409 cast_limit_reached``, a soft cap)."""
+MAX_CAST_REFERENCES: Final = 12
+"""Reference images one cast member holds (a hard cap, counted under the member lock)."""
+MAX_CAST_LOOKS: Final = 12
+"""Named looks one cast member holds (a hard cap, counted under the member lock)."""
+CAST_NAME_MAX: Final = 100
+"""Characters in a cast member's name."""
+CAST_LABEL_MAX: Final = 40
+"""Characters in a reference's label."""
+CAST_LOOK_NAME_MAX: Final = 60
+"""Characters in a look's name."""
+CAST_APPEARANCE_MAX: Final = 320
+"""Characters in a cast member's appearance descriptor (a prompt fragment from S4 on)."""
+CAST_DESCRIPTION_MAX: Final = 2_000
+"""Characters in a cast member's free-form description."""
 
 type _Check = Literal["length", "count", "range"]
 

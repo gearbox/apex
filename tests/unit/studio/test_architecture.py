@@ -28,7 +28,9 @@ STUDIO_FILES = sorted(
     {
         *SRC.glob("studio/**/*.py"),
         SRC / "db/models/studio.py",
+        SRC / "db/models/studio_cast.py",
         SRC / "db/repositories/studio.py",
+        SRC / "db/repositories/studio_cast.py",
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
         SRC / "api/schemas/studio_runs.py",
@@ -86,6 +88,53 @@ def test_the_studio_repository_never_flushes_or_commits() -> None:
     assert not re.search(r"session\.(commit|flush)\(", text)
 
 
+@pytest.mark.parametrize(
+    "path",
+    [
+        SRC / "db/repositories/studio_cast.py",
+        SRC / "db/repositories/library_hold.py",
+        SRC / "api/services/library_holds.py",
+        SRC / "studio/services/cast.py",
+    ],
+    ids=lambda p: str(p.relative_to(SRC)),
+)
+def test_the_cast_and_hold_code_never_flushes_or_commits(path: Path) -> None:
+    """The request transaction is the caller's: holds and cast rows commit (or not) together."""
+    assert not re.search(r"session\.(commit|flush|rollback)\(", path.read_text()), path
+
+
+# -- S1-P3: the library owns the holds, any context may use them (D12) ---------------------------
+
+
+def test_the_new_library_modules_are_under_the_import_rule() -> None:
+    """A rename must not silently drop them from the ``library never imports studio`` check."""
+    names = {path.relative_to(SRC).as_posix() for path in LIBRARY_FILES}
+    assert {
+        "api/services/library_holds.py",
+        "api/services/library_media.py",
+        "db/repositories/library_hold.py",
+        "db/models/library.py",
+    } <= names
+
+
+def test_the_library_hold_modules_name_no_holder_by_type() -> None:
+    """A holder is an opaque ``(kind, id)``: no studio model, repository or error is imported."""
+    for name in ("api/services/library_holds.py", "db/repositories/library_hold.py"):
+        imported = _imported_modules(SRC / name)
+        assert not {m for m in imported if "studio" in m}, name
+
+
+def test_only_the_hold_service_writes_the_holds_table() -> None:
+    """The cast reads ``library_asset_holds`` (a join) and writes it only through the service."""
+    allowed = {"db/repositories/library_hold.py"}
+    writers = re.compile(r"(pg_insert|insert|delete|update)\(\s*LibraryAssetHold\b")
+    for path in SRC.rglob("*.py"):
+        name = path.relative_to(SRC).as_posix()
+        if name in allowed:
+            continue
+        assert not writers.search(path.read_text()), name
+
+
 @pytest.mark.parametrize("path", STUDIO_FILES, ids=lambda p: str(p.relative_to(SRC)))
 def test_ids_come_from_new_id_only(path: Path) -> None:
     text = path.read_text()
@@ -104,7 +153,7 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 6
+    assert len(controllers) == 7
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth

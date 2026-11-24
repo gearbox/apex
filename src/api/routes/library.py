@@ -51,7 +51,8 @@ from src.api.services.library import (
     LibraryTagNotFoundError,
     LibraryValidationError,
 )
-from src.core.enums import LibrarySort, MediaKind
+from src.api.services.library_holds import AssetHeldError
+from src.core.enums import AssetDeleteOutcome, LibrarySort, MediaKind
 from src.core.library_ref import LibraryAssetSource
 from src.core.product import ProductConfig
 
@@ -372,13 +373,20 @@ class LibraryController(Controller):
         library_service: LibraryService,
         content_proxy: ContentProxyService,
     ) -> None:
-        """Delete a library asset (output or upload). Cannot be undone."""
-        found = await library_service.delete_asset(
+        """Delete a library asset (output or upload). Cannot be undone.
+
+        Answers 404 when there is no such asset for the caller, and ``409 asset_held`` (with the
+        holder counts by kind) when another context holds it: nothing is changed then, the
+        asset's favorite, title, project and tags included.
+        """
+        outcome = await library_service.delete_asset(
             asset_ref,
             current_user_id,
             product_id,
             session=session,
             content_proxy=content_proxy,
         )
-        if not found:
+        if outcome is AssetDeleteOutcome.NOT_FOUND:
             raise NotFoundException(detail=_ASSET_NOT_FOUND)
+        if outcome is AssetDeleteOutcome.HELD:
+            raise AssetHeldError(await library_service.holders_of(asset_ref, session=session))

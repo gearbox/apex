@@ -752,7 +752,7 @@ class TestExpiringSoonSortPagination:
                 break
             last = page[-1]
             cursor = encode_library_cursor(
-                last.expires_at, last.source.value, last.id, sort="expiring_soon"
+                last.expiry_key, last.source.value, last.id, sort="expiring_soon"
             )
 
         assert len(seen) == len(set(seen)), "pagination produced duplicate rows"
