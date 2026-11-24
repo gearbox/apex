@@ -3,10 +3,12 @@
 from __future__ import annotations
 
 __all__ = [
+    "ALLOWED_AUDIO_CONTENT_TYPES",
     "ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES",
     "ALLOWED_IMAGE_CONTENT_TYPES",
     "ALLOWED_UPLOAD_CONTENT_TYPES",
     "ALLOWED_VIDEO_CONTENT_TYPES",
+    "AUDIO_CLIENT_CONTENT_TYPE_ALIASES",
     "DownloadResult",
     "MaxFileSize",
     "MediaFormat",
@@ -45,15 +47,35 @@ ALLOWED_IMAGE_CONTENT_TYPES: frozenset[str] = frozenset({"image/png", "image/jpe
 ALLOWED_VIDEO_CONTENT_TYPES: frozenset[str] = frozenset(
     {"video/mp4", "video/webm", "video/quicktime"}
 )
-ALLOWED_UPLOAD_CONTENT_TYPES: frozenset[str] = ALLOWED_IMAGE_CONTENT_TYPES | (
-    ALLOWED_VIDEO_CONTENT_TYPES
+# Audio (S2a) is stored as the upload's own container, remuxed without re-encoding (see
+# media_ingest ``prepare_audio``): exactly these four types land in R2.
+ALLOWED_AUDIO_CONTENT_TYPES: frozenset[str] = frozenset(
+    {"audio/mpeg", "audio/mp4", "audio/wav", "audio/flac"}
+)
+ALLOWED_UPLOAD_CONTENT_TYPES: frozenset[str] = (
+    ALLOWED_IMAGE_CONTENT_TYPES | ALLOWED_VIDEO_CONTENT_TYPES | ALLOWED_AUDIO_CONTENT_TYPES
+)
+
+# The aliases clients send for the stored audio types. They are only an early route filter and a
+# size-limit hint: the sniffed container decides what is stored (never the client's MIME).
+AUDIO_CLIENT_CONTENT_TYPE_ALIASES: frozenset[str] = frozenset(
+    {
+        "audio/mp3",
+        "audio/x-m4a",
+        "audio/aac",
+        "audio/x-wav",
+        "audio/wave",
+        "audio/x-flac",
+    }
 )
 
 # ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES is the wider *client-declared* gate used by
 # routes/storage.py: everything above, plus convertible image formats that
 # normalize_image() re-encodes to PNG before they ever reach storage.
-ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES: frozenset[str] = ALLOWED_UPLOAD_CONTENT_TYPES | frozenset(
-    {"image/heic", "image/heif", "image/avif"}
+ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES: frozenset[str] = (
+    ALLOWED_UPLOAD_CONTENT_TYPES
+    | frozenset({"image/heic", "image/heif", "image/avif"})
+    | AUDIO_CLIENT_CONTENT_TYPE_ALIASES
 )
 
 # Validation constraints

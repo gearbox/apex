@@ -46,14 +46,17 @@ from src.api.services.legal.errors import LegalAcceptanceRequiredError
 from src.api.services.library_holds import AssetHeldError, AssetHoldService
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.unified_jobs import JobInProgressError
-from src.core.enums import GenerationType, JobStatus
+from src.core.enums import GenerationType, JobStatus, MediaKind
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.product_registry import VEX_CONFIG
-from src.db.models.library import LibraryAssetHold
+from src.db.models.library import LibraryAssetHold, LibraryAudioProfile
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
 from src.studio.errors import StudioError
 from src.studio.services.cast import CastService
+from src.studio.services.track import TrackService
+from src.studio.services.track_audio import TrackAudioService
+from src.studio.services.version import DocumentVersionService
 from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY
 
 if TYPE_CHECKING:
@@ -84,6 +87,12 @@ def past(hours: int = 1) -> datetime:
 
 def future(days: int = 7) -> datetime:
     return datetime.now(UTC) + timedelta(days=days)
+
+
+IMAGES = frozenset({MediaKind.IMAGE})
+"""What a cast reference accepts: the ``accept`` of most hold tests."""
+AUDIO = frozenset({MediaKind.AUDIO})
+"""What a track audio version accepts."""
 
 
 def upload_ref(image: UserImage) -> AssetRef:
@@ -124,6 +133,66 @@ async def make_upload(
     )
     session.add(image)
     await session.flush()
+    return image
+
+
+AUDIO_FORMATS = {
+    "audio/flac": "flac",
+    "audio/mpeg": "mp3",
+    "audio/mp4": "m4a",
+    "audio/wav": "wav",
+}
+
+
+async def make_audio_upload(
+    session: AsyncSession,
+    user: User,
+    *,
+    expires_at: datetime | None = None,
+    content_type: str = "audio/flac",
+    duration_ms: int | None = 6000,
+    product_id: str | None = None,
+    peaks: bytes | None = None,
+    with_profile: bool = True,
+) -> UserImage:
+    """Insert and flush an audio upload and its ``library_audio_profiles`` row.
+
+    What the upload service writes for audio: a ``user_images`` row with no width / height and a
+    ``duration_ms``, plus the profile (probed facts and the 2,048-byte peaks).
+    """
+    image_id = uuid4()
+    extension = AUDIO_FORMATS[content_type]
+    image = UserImage(
+        id=image_id,
+        user_id=user.id,
+        product_id=product_id or user.product_id,
+        storage_key=f"users/{user.id}/uploads/{image_id}.{extension}",
+        original_filename=f"{image_id}.{extension}",
+        content_type=content_type,
+        size_bytes=1000,
+        format=extension,
+        width=None,
+        height=None,
+        duration_ms=duration_ms,
+        is_thumbnail=False,
+        expires_at=expires_at or future(),
+    )
+    session.add(image)
+    await session.flush()
+    if with_profile:
+        session.add(
+            LibraryAudioProfile(
+                id=uuid4(),
+                upload_id=image_id,
+                codec="flac",
+                sample_rate_hz=44100,
+                channels=2,
+                bit_rate=900000,
+                peaks=peaks if peaks is not None else bytes(range(256)) * 8,
+                peaks_version=1,
+            )
+        )
+        await session.flush()
     return image
 
 
@@ -208,6 +277,13 @@ class HoldWorld:
     async def upload(self, user: User, **kwargs: object) -> UserImage:
         async with self.factory() as session:
             image = await make_upload(session, user, **kwargs)  # type: ignore[arg-type]
+            await session.commit()
+            return image
+
+    async def audio(self, user: User, **kwargs: object) -> UserImage:
+        """A committed audio upload with its profile."""
+        async with self.factory() as session:
+            image = await make_audio_upload(session, user, **kwargs)  # type: ignore[arg-type]
             await session.commit()
             return image
 
@@ -301,9 +377,29 @@ def _scope_for(config: ProductConfig) -> Callable[[ASGIApp], ASGIApp]:
     return factory
 
 
+def make_holds(session: AsyncSession) -> AssetHoldService:
+    """The library's hold service on ``session`` (the studio services take it as a dependency)."""
+    return AssetHoldService(session, retention_days=RETENTION_DAYS)
+
+
 def provide_cast_service(session: AsyncSession) -> CastService:
     """``get_studio_cast_service`` without ``Settings`` (a unit test holds that wiring)."""
-    return CastService(session, AssetHoldService(session, retention_days=RETENTION_DAYS))
+    return CastService(session, make_holds(session))
+
+
+def provide_track_service(session: AsyncSession) -> TrackService:
+    """``get_studio_track_service`` without ``Settings`` (a unit test holds that wiring)."""
+    return TrackService(session, make_holds(session))
+
+
+def provide_version_service(session: AsyncSession) -> DocumentVersionService:
+    """``get_studio_version_service`` (a plain function: Litestar resolves its hints at runtime)."""
+    return DocumentVersionService(session)
+
+
+def provide_track_audio_service(session: AsyncSession) -> TrackAudioService:
+    """``get_studio_track_audio_service`` without ``Settings`` (a unit test holds that wiring)."""
+    return TrackAudioService(session, make_holds(session))
 
 
 def _unused_job_service() -> MagicMock:
@@ -356,6 +452,9 @@ def build_app(
             "unified_job_service": dep(_unused_job_service),
             "studio_artist_service": dep(get_studio_artist_service),
             "studio_cast_service": dep(provide_cast_service),
+            "studio_track_service": dep(provide_track_service),
+            "studio_version_service": dep(provide_version_service),
+            "studio_track_audio_service": dep(provide_track_audio_service),
         },
         exception_handlers={
             HTTPException: http_exception_handler,

@@ -13,6 +13,7 @@ from src.db.repositories.studio import (
     StudioRunRepository,
     StudioTrackRepository,
 )
+from src.db.repositories.studio_track_audio import StudioTrackAudioRepository
 from src.studio.constraints import collect_length_issues
 from src.studio.errors import (
     DocumentIssue,
@@ -28,6 +29,7 @@ from src.studio.services.mappers import (
     require_current_rows,
     track_out,
 )
+from src.studio.services.track_audio import build_audio_outs
 from src.studio.validation import normalize_text
 
 if TYPE_CHECKING:
@@ -35,6 +37,8 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+
+    from src.api.services.library_holds import AssetHoldService
 
 __all__ = ["MAX_TRACKS_PER_PROJECT", "TrackService"]
 
@@ -61,13 +65,15 @@ def _normalize_title(raw: str, request_type: type[TrackCreate] | type[TrackPatch
 
 
 class TrackService:
-    """Create, order, rename and delete tracks; open one with its current documents."""
+    """Create, order, rename and delete tracks; open one with its current documents and audio."""
 
-    def __init__(self, session: AsyncSession) -> None:
+    def __init__(self, session: AsyncSession, holds: AssetHoldService) -> None:
         self._session = session
+        self._holds = holds
         self._profiles = StudioProjectRepository(session)
         self._tracks = StudioTrackRepository(session)
         self._runs = StudioRunRepository(session)
+        self._audio = StudioTrackAudioRepository(session)
 
     async def create(
         self, library_project_id: UUID, user_id: UUID, product_id: str, title: str
@@ -160,6 +166,14 @@ class TrackService:
         current_lyrics = (
             lyrics_version_detail(lyrics_row, track) if lyrics_row is not None else None
         )
+        # The current audio is read through the track's pointer in ONE statement (its own
+        # snapshot): the pointer reported below is the one whose row was read, never a dangling one.
+        audio_row = await self._audio.get_current(track_id, user_id=user_id, product_id=product_id)
+        current_audio = (
+            (await build_audio_outs(self._session, [audio_row], user_id))[0]
+            if audio_row is not None
+            else None
+        )
         base = track_out(track)
         return TrackDetail(
             id=base.id,
@@ -168,10 +182,12 @@ class TrackService:
             title=base.title,
             current_plan_version_id=base.current_plan_version_id,
             current_lyrics_version_id=base.current_lyrics_version_id,
+            current_audio_version_id=current_audio.id if current_audio is not None else None,
             created_at=base.created_at,
             updated_at=base.updated_at,
             current_plan=current_plan,
             current_lyrics=current_lyrics,
+            current_audio=current_audio,
         )
 
     async def patch(
@@ -194,9 +210,12 @@ class TrackService:
         return track_out(updated)
 
     async def delete(self, track_id: UUID, user_id: UUID, product_id: str) -> None:
-        """Delete a track and (by cascade) all its versions and finished runs.
+        """Delete a track and (by cascade) all its versions, audio versions and finished runs.
 
-        Positions of the others are kept.
+        Positions of the others are kept. The holds the audio versions took are opaque to the
+        database (no foreign key from a hold to the studio), so they are released explicitly,
+        in the same transaction: collected under the track lock, released once the cascade has
+        removed the rows that referenced them (a hold cannot be deleted under its audio version).
 
         Raises:
             StudioNotFound: No such track for the caller.
@@ -214,7 +233,13 @@ class TrackService:
         # Submit needs this track's lock too, so no run can become active after this check.
         if await self._runs.has_active_for_track(track_id):
             raise RunInProgress
+        # Taken under the track lock, which every attach needs too: no hold can appear after this.
+        hold_ids = await self._audio.hold_ids_of_track(track_id)
         await self._tracks.delete(track_id, user_id=user_id, product_id=product_id)
+        await self._holds.release(hold_ids)
         logger.info(
-            "studio.track_deleted", track_id=str(track_id), project_id=str(track.library_project_id)
+            "studio.track_deleted",
+            track_id=str(track_id),
+            project_id=str(track.library_project_id),
+            audio_version_count=len(hold_ids),
         )

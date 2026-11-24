@@ -52,3 +52,18 @@ async def test_unknown_format_is_refused_rather_than_defaulted(media_format: obj
     with pytest.raises(ValueError, match="unknown media format for ledger row"):
         await MediaHashLedger(session).register_upload(_row(media_format), _hash_set())
     session.add_all.assert_not_called()
+
+
+@pytest.mark.parametrize("media_format", ["mp3", "m4a", "wav", "flac"])
+async def test_audio_has_no_ledger_row_and_a_writer_that_tries_is_refused(
+    media_format: str,
+) -> None:
+    """S2a: audio gets no perceptual hash. ``MediaHashMediaType`` has no audio value, so a writer
+    that handed an audio row to the ledger has a bug and must fail loudly, never be hashed as an
+    image."""
+    session = MagicMock()
+    with pytest.raises(ValueError, match="audio has no perceptual hash"):
+        await MediaHashLedger(session).register_upload(_row(media_format), _hash_set())
+    with pytest.raises(ValueError, match="audio has no perceptual hash"):
+        await MediaHashLedger(session).register_output(_row(media_format), _hash_set())
+    session.add_all.assert_not_called()

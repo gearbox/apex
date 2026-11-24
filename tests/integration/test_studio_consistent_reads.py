@@ -29,6 +29,7 @@ from src.studio.services.importer import SunoImportService
 from src.studio.services.run_context import MemoryArtistContextProvider
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
+from tests.library_holds_support import make_holds
 from tests.llm_support import FakeLlm
 from tests.studio_race_support import after_first_track_read
 from tests.studio_runs_support import PRODUCT
@@ -241,7 +242,9 @@ class TestRequestsUnderTheSameRace:
 
         async with run_world.factory() as session:
             after_first_track_read(session, lambda: run_world.replace_current_plan(actor, track_id))
-            detail = await TrackService(session).get_detail(track_id, actor.user_id, PRODUCT)
+            detail = await TrackService(session, make_holds(session)).get_detail(
+                track_id, actor.user_id, PRODUCT
+            )
 
         assert (detail.current_plan_version_id, detail.current_lyrics_version_id) == (
             plan_id,

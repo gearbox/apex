@@ -1408,10 +1408,21 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 #### `POST /v1/storage/upload`
 
 ```
-Request:  multipart/form-data, field "data" (max 20MB)
+Request:  multipart/form-data, field "data" (max 20MB; audio max 80MB — see below)
           Images:  PNG, JPEG, WebP, HEIC/HEIF, AVIF — non-PNG/JPEG/WebP inputs
                     are converted to PNG.
           Videos:  MP4, WebM, QuickTime (.mov) — stored as-is, never re-encoded.
+          Audio:   MP3 (audio/mpeg), M4A/AAC (audio/mp4), WAV PCM (audio/wav), FLAC
+                   (audio/flac); the client may also declare audio/mp3, audio/x-m4a,
+                   audio/aac, audio/x-wav, audio/wave or audio/x-flac. 5 s – 15 min.
+                   Probed from the bytes (never the declared type) and remuxed WITHOUT
+                   re-encoding: the stored file is the upload's own audio stream with every
+                   tag, cover picture and chapter removed. Probed facts + waveform peaks are
+                   stored (`GET /v1/library/assets/{ref}/peaks`). No thumbnail, no poster, no
+                   perceptual hash.
+          Size:     images and videos ≤ MAX_UPLOAD_SIZE_MB (20); audio ≤ AUDIO_UPLOAD_MAX_MB
+                    (80, max 95). The limit is the one of the DECLARED kind and is checked
+                    before any media work; a body over the largest limit is 413 at the ASGI level.
           Optional frame lineage (a frame the client captured from a video it has;
           both fields or neither — see docs/contracts/video-frame-extraction-fe-contract.md):
             source_asset_ref:    "upload:<uuid>" | "output:<uuid>"  (the source VIDEO)
@@ -1425,8 +1436,13 @@ Response: {
 }
 Status:   201 Created
 Errors:   400 (invalid_file_type | file_too_large | empty_file | validation_error |
-               invalid_frame_lineage)
-          413 (file_too_large — decoded image exceeds the pixel cap)
+               invalid_frame_lineage)   — `file_too_large` names the declared kind's limit
+                                           ("Maximum size: 20MB" / "Maximum size: 80MB")
+          422 (audio only, `detail` carries numbers only:
+               audio_format_not_supported | audio_has_video | invalid_audio |
+               audio_codec_not_supported | audio_duration_out_of_range {min_seconds, max_seconds})
+          413 (file_too_large — decoded image exceeds the pixel cap, or a body over the
+               largest per-kind limit)
           502 (upstream_error — object storage failed; message "Storage backend unavailable")
           503 (service_unavailable — media processing out of capacity or failed
                operationally; retryable; message "Media processing is temporarily unavailable")
@@ -1489,7 +1505,7 @@ Requests here accept either a Bearer access token or the `apex_content` cookie (
 ### Response Headers
 
 All successful (200/206) responses include:
-- `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`, `video/webm`, `video/quicktime`); otherwise `application/octet-stream`
+- `Content-Type` — the stored R2 `ContentType` **only if it's on the inline-safe allowlist** (`image/png`, `image/jpeg`, `image/webp`, `video/mp4`, `video/webm`, `video/quicktime`, `audio/mpeg`, `audio/mp4`, `audio/wav`, `audio/flac`); otherwise `application/octet-stream`
 - `Content-Length` — bytes in *this* response body (the full object size on 200, the served range's length on 206)
 - `Cache-Control: private, max-age=10800, immutable` — 3-hour client cache (default; configurable via `CONTENT_URL_TTL`)
 - `ETag: "<content_id>"` — the output/upload UUID, for conditional requests
@@ -1598,7 +1614,8 @@ never silently truncated.
 Query:    limit? (1–50, default 30),
           cursor? (opaque token),
           source? ("upload" | "output"),
-          media_type? ("image" | "video"),
+          media_type? ("image" | "video" | "audio" — a positive match on the stored content
+                       type; audio is never listed under `image` or `video`),
           model? (string — model key; implies output-only),
           favorite? (bool),
           project_id? (UUID),
@@ -1622,6 +1639,22 @@ Path:     asset_ref (string, e.g. "upload:<uuid>" or "output:<uuid>")
 Response: LibraryAssetDetail
 Errors:   404 not_found (malformed ref, not owned, or wrong product)
 ```
+
+#### `GET /v1/library/assets/{asset_ref}/peaks`
+
+```
+Path:     asset_ref (string, an AUDIO asset: "upload:<uuid>" | "output:<uuid>")
+Response: { version: 1, buckets: 1024, peaks: int[2048] }   // each in [-128, 127]
+Errors:   404 asset_not_found (malformed ref, missing, not owned, wrong product — one answer)
+          422 media_kind_not_supported (the asset is not audio)
+Note:     Interleaved [min0, max0, min1, max1, …] over 1,024 equal slices of the mono
+          11,025 Hz decode, computed once at upload. 0 is silence, ±127 full scale.
+          One SELECT; free; needs no studio.
+```
+
+Audio library items: `media.media_type = "audio"`, `duration_ms` set, `width`/`height` `null`,
+no `variants`; `available_actions` is only `favorite`, `rename`, `download`, `delete` (audio is
+never a generation input: `422 media_kind_not_supported` as a `source_media` item).
 
 #### `GET /v1/library/assets/{asset_ref}/lineage`
 

@@ -27,6 +27,7 @@ from src.api.services.user_content import (
 )
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet, PdqHash
+from tests.unit.helpers import hermetic_settings
 
 pytestmark = pytest.mark.unit
 
@@ -336,6 +337,7 @@ class TestUploadVideoRoute:
                 MagicMock(),
                 current_user_id=uuid4(),
                 user_content=service,
+                settings=hermetic_settings(),
                 data=form,
             )
 

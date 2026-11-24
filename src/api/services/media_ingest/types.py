@@ -6,6 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
+from src.api.services.media_ingest.audio import PEAKS_BYTES
 from src.core.enums import MediaFormat  # noqa: TC001 - used for runtime validation
 from src.core.media_hash import HashSet  # noqa: TC001 - carried by runtime values
 
@@ -30,7 +31,7 @@ class PreparedImage:
     converted: bool
 
     def __post_init__(self) -> None:
-        if self.format.is_video:
+        if not self.format.is_image:
             raise ValueError("PreparedImage requires an image format")
         if self.width <= 0 or self.height <= 0:
             raise ValueError("prepared image dimensions must be positive")
@@ -93,6 +94,46 @@ class PreparedVideo:
         return self.format.content_type
 
 
+@dataclass(frozen=True, slots=True)
+class PreparedAudio:
+    """Remuxed audio bytes (the upload's own stream, no tags) and the facts probed from them.
+
+    The facts describe the **stored** bytes: they come from a second probe of the remuxed file.
+    """
+
+    data: bytes
+    format: MediaFormat
+    codec: str
+    sample_rate_hz: int
+    channels: int
+    bit_rate: int | None
+    duration_ms: int
+    peaks: bytes
+    peaks_version: int
+
+    def __post_init__(self) -> None:
+        if not self.format.is_audio:
+            raise ValueError("PreparedAudio requires an audio format")
+        if len(self.peaks) != PEAKS_BYTES:
+            raise ValueError(f"prepared audio peaks must be {PEAKS_BYTES} bytes")
+        if not self.codec:
+            raise ValueError("prepared audio requires a codec")
+        if (
+            self.sample_rate_hz <= 0
+            or self.channels <= 0
+            or self.duration_ms <= 0
+            or self.peaks_version <= 0
+            or not self.data
+        ):
+            raise ValueError("prepared audio numbers must be positive")
+        if self.bit_rate is not None and self.bit_rate <= 0:
+            raise ValueError("prepared audio bit rate must be positive when present")
+
+    @property
+    def content_type(self) -> str:
+        return self.format.content_type
+
+
 class MediaIngestor(Protocol):
     """Small dependency used by writers; it owns no storage or database work."""
 
@@ -101,3 +142,5 @@ class MediaIngestor(Protocol):
     async def prepare_video(
         self, data: bytes, *, max_duration_seconds: float | None = None
     ) -> PreparedVideo: ...
+
+    async def prepare_audio(self, data: bytes) -> PreparedAudio: ...

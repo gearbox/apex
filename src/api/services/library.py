@@ -15,6 +15,7 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.library import (
+    AudioPeaksResponse,
     BulkAddTags,
     BulkDelete,
     BulkOperationItemResult,
@@ -50,6 +51,7 @@ from src.core.enums import (
     LibraryGroupSourceType,
     LibrarySort,
     MediaKind,
+    media_kind_from_content_type,
 )
 from src.core.library_limits import MAX_TAGS_PER_ASSET as _MAX_TAGS_PER_ASSET
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
@@ -59,6 +61,7 @@ from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.generation_job_source import GenerationJobSourceRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.library import UNSET_UPDATE, LibraryRepository, _UnsetUpdate
+from src.db.repositories.library_audio import LibraryAudioProfileRepository
 from src.db.repositories.library_hold import LibraryHoldRepository
 from src.db.repositories.library_project import LibraryProjectRepository
 from src.db.repositories.library_tag import LibraryTagRepository, TagRef
@@ -141,6 +144,10 @@ class LibraryBulkValidationError(Exception):
     def __init__(self, invalid_refs: Sequence[str]) -> None:
         self.invalid_refs = list(invalid_refs)
         super().__init__(f"{len(self.invalid_refs)} invalid asset_ref(s): {self.invalid_refs}")
+
+
+class LibraryMediaKindNotSupportedError(Exception):
+    """The asset exists but is not of the kind the endpoint serves (peaks of a non-audio asset). → 422"""
 
 
 class LibraryBulkTagCapError(Exception):
@@ -904,6 +911,44 @@ class LibraryService:
             source=ref.source.value,
         )
         return AssetDeleteOutcome.DELETED
+
+    async def get_audio_peaks(
+        self,
+        asset_ref: str,
+        user_id: UUID,
+        product_id: str,
+        *,
+        session: AsyncSession,
+    ) -> AudioPeaksResponse | None:
+        """The stored waveform peaks of an audio asset, in one SELECT.
+
+        Returns:
+            ``None`` for a malformed reference and for a missing, foreign or cross-product asset
+            (one answer: no existence oracle).
+
+        Raises:
+            LibraryMediaKindNotSupportedError: The asset is not audio.
+        """
+        try:
+            ref = parse_asset_ref(asset_ref)
+        except ValueError:
+            return None
+        row = await LibraryAudioProfileRepository(session).get_peaks(
+            ref, user_id=user_id, product_id=product_id
+        )
+        if row is None:
+            return None
+        if media_kind_from_content_type(row.content_type) is not MediaKind.AUDIO:
+            raise LibraryMediaKindNotSupportedError
+        if row.peaks is None or row.peaks_version is None:
+            # Every audio row is written with its profile in one transaction: a missing profile
+            # is a broken invariant, never a client error.
+            raise RuntimeError("An audio asset has no audio profile.")
+        return AudioPeaksResponse(
+            version=row.peaks_version,
+            buckets=len(row.peaks) // 2,
+            peaks=[b - 256 if b > 127 else b for b in row.peaks],
+        )
 
     async def holders_of(self, asset_ref: str, *, session: AsyncSession) -> tuple[HolderCount, ...]:
         """The holders of an asset by kind (for the ``409 asset_held`` detail); empty if none.

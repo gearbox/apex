@@ -29,6 +29,7 @@ from src.db.models.storage import GenerationJob
 from src.db.repositories.job import JobRepository
 from src.db.repositories.library import LibraryRepository
 from tests.library_holds_support import (
+    IMAGES,
     RETENTION_DAYS,
     HoldWorld,
     bearer,
@@ -76,6 +77,7 @@ async def _hold(
             holder=AssetHolder(kind=kind, id=uuid4()),
             user_id=user.id,
             product_id=product_id,
+            accept=IMAGES,
         )
         await session.commit()
 
@@ -181,7 +183,11 @@ class TestLibrarySingleDelete:
         async with hold_world.factory() as session:
             service = AssetHoldService(session, retention_days=RETENTION_DAYS)
             hold_id = await service.hold(
-                ref, holder=AssetHolder(KIND, uuid4()), user_id=user.id, product_id="vex"
+                ref,
+                holder=AssetHolder(KIND, uuid4()),
+                user_id=user.id,
+                product_id="vex",
+                accept=IMAGES,
             )
             await session.commit()
         assert await _delete(hold_world, content_proxy, user, ref) is AssetDeleteOutcome.HELD
@@ -393,6 +399,7 @@ class TestJobSoftDelete:
                 holder=AssetHolder(KIND, uuid4()),
                 user_id=user.id,
                 product_id="vex",
+                accept=IMAGES,
             )
             await session.commit()
         assert await self._soft_delete(hold_world, job, user) is SoftDeleteOutcome.HELD

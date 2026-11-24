@@ -67,6 +67,7 @@ from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.routes.studio_projects import StudioProjectController
 from src.api.routes.studio_runs import StudioRunController
+from src.api.routes.studio_track_audio import StudioTrackAudioController
 from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
@@ -626,6 +627,7 @@ def create_app() -> Litestar:
             StudioMemoryController,
             StudioProjectController,
             StudioRunController,
+            StudioTrackAudioController,
             StudioTrackController,
             # Content proxy
             ContentProxyController,
@@ -679,7 +681,7 @@ def create_app() -> Litestar:
         openapi_config=openapi_config,
         debug=settings.debug,
         signature_types=[UploadFile],
-        request_max_body_size=settings.max_upload_size_bytes,
+        request_max_body_size=settings.max_request_body_bytes,
     )
 
 

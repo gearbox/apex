@@ -11,6 +11,7 @@ import pytest
 os.environ.setdefault("LEGAL_DOCUMENTS_DIR", str(Path(__file__).parent / "fixtures" / "legal"))
 
 from src.api.services.media_ingest import MediaIngestService
+from tests.audio_support import audio_files  # noqa: F401 - session fixture of the audio tests
 from tests.media_ingest_support import make_media_ingestor
 
 

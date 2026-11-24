@@ -23,8 +23,10 @@ from src.core.enums import (
     StudioMemoryOrigin,
     StudioMemoryStatus,
     StudioReleaseKind,
+    StudioTrackAudioOrigin,
 )
 from src.studio.constraints import (
+    AUDIO_LABEL_MAX,
     CAST_APPEARANCE_MAX,
     CAST_DESCRIPTION_MAX,
     CAST_LABEL_MAX,
@@ -77,6 +79,9 @@ __all__ = [
     "SunoExportOut",
     "SunoImportOut",
     "SunoImportRequest",
+    "TrackAudioCreate",
+    "TrackAudioOut",
+    "TrackAudioPatch",
     "TrackCreate",
     "TrackDetail",
     "TrackOrderPut",
@@ -111,6 +116,7 @@ _CastDescription = Annotated[str, Meta(max_length=CAST_DESCRIPTION_MAX)]
 _CastAppearance = Annotated[str, Meta(max_length=CAST_APPEARANCE_MAX)]
 _CastLabel = Annotated[str, Meta(min_length=1, max_length=CAST_LABEL_MAX)]
 _CastLookName = Annotated[str, Meta(min_length=1, max_length=CAST_LOOK_NAME_MAX)]
+_AudioLabel = Annotated[str, Meta(min_length=1, max_length=AUDIO_LABEL_MAX)]
 _AssetRefText = Annotated[str, Meta(min_length=1, max_length=100)]
 """A wire asset ref (``"upload:<uuid>"`` / ``"output:<uuid>"``): parsed by ``parse_asset_ref``."""
 
@@ -354,6 +360,50 @@ class TrackOut(msgspec.Struct, kw_only=True):
     title: str
     current_plan_version_id: UUID | None
     current_lyrics_version_id: UUID | None
+    current_audio_version_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Track audio (S2a)
+# ---------------------------------------------------------------------------
+
+
+class TrackAudioCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Attach an already-uploaded library audio file to a track as its next audio version."""
+
+    asset: _AssetRefText
+    """Wire asset ref, ``"upload:<uuid>"`` / ``"output:<uuid>"``; an audio asset of the caller's."""
+    label: _AudioLabel | None = None
+    plan_version_id: UUID | None = None
+    """The plan version this audio realizes (a plan version of **this** track)."""
+    lyrics_version_id: UUID | None = None
+    """The lyrics version this audio realizes (a lyrics version of **this** track)."""
+
+
+class TrackAudioPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Tri-state update: omitted keeps the stored value, ``null`` clears. The asset is immutable
+    (there is no ``asset`` field: a new file is a new version)."""
+
+    label: _AudioLabel | msgspec.UnsetType | None = msgspec.UNSET
+    plan_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
+    lyrics_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
+
+
+class TrackAudioOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    track_id: UUID
+    version_number: int
+    label: str | None
+    origin: StudioTrackAudioOrigin
+    asset: MediaObject
+    """The pinned library asset (built by the library's one builder; ``asset.asset_ref`` is its
+    wire ref). Audio has no thumbnail variants: the client draws the peaks."""
+    duration_ms: int
+    plan_version_id: UUID | None
+    lyrics_version_id: UUID | None
+    is_current: bool
     created_at: datetime
     updated_at: datetime
 
@@ -440,18 +490,22 @@ class VersionCreateOut(msgspec.Struct, kw_only=True):
 
 
 class CurrentPut(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
-    """Set the track's current pair. Omitted fields are left alone; ``lyrics_version_id: null``
-    clears the lyrics pointer."""
+    """Set the track's current plan / lyrics pair and its current audio. Omitted fields are left
+    alone; ``lyrics_version_id: null`` clears the lyrics pointer, ``audio_version_id: null`` the
+    audio pointer."""
 
     plan_version_id: UUID | msgspec.UnsetType = msgspec.UNSET
     lyrics_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
+    audio_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
+    """Omitted: unchanged. ``null``: no current audio. A version of **this** track otherwise."""
 
 
 class TrackDetail(TrackOut, kw_only=True):
-    """A track with its current documents — one call opens a track."""
+    """A track with its current documents and audio — one call opens a track."""
 
     current_plan: PlanVersionDetail | None
     current_lyrics: LyricsVersionDetail | None
+    current_audio: TrackAudioOut | None
 
 
 # ---------------------------------------------------------------------------

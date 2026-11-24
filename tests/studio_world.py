@@ -26,7 +26,9 @@ from src.studio.services.export import ExportService
 from src.studio.services.importer import SunoImportService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.track import TrackService
+from src.studio.services.track_audio import TrackAudioService
 from src.studio.services.version import DocumentVersionService
+from tests.library_holds_support import make_holds
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -52,11 +54,13 @@ class StudioWorld:
     versions: DocumentVersionService = field(init=False)
     exports: ExportService = field(init=False)
     imports: SunoImportService = field(init=False)
+    audio: TrackAudioService = field(init=False)
 
     def __post_init__(self) -> None:
         self.artists = ArtistService(self.session)
         self.projects = StudioProjectService(self.session)
-        self.tracks = TrackService(self.session)
+        self.tracks = TrackService(self.session, make_holds(self.session))
+        self.audio = TrackAudioService(self.session, make_holds(self.session))
         self.versions = DocumentVersionService(self.session)
         self.exports = ExportService(self.session)
         self.imports = SunoImportService(self.session, versions=self.versions)

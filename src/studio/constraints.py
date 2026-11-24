@@ -26,6 +26,7 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "AUDIO_LABEL_MAX",
     "CAST_APPEARANCE_MAX",
     "CAST_DESCRIPTION_MAX",
     "CAST_LABEL_MAX",
@@ -40,6 +41,7 @@ __all__ = [
     "DISCOGRAPHY_BUDGET",
     "DISCOGRAPHY_TITLES_MAX",
     "MAX_ACTIVE_MEMORIES_PER_ARTIST",
+    "MAX_AUDIO_VERSIONS_PER_TRACK",
     "MAX_CAST_LOOKS",
     "MAX_CAST_MEMBERS_PER_OWNER",
     "MAX_CAST_REFERENCES",
@@ -114,6 +116,10 @@ reaches the client and is then retracted."""
 
 MAX_CAST_MEMBERS_PER_OWNER: Final = 50
 """Cast members one user holds per product (``409 cast_limit_reached``, a soft cap)."""
+MAX_AUDIO_VERSIONS_PER_TRACK: Final = 20
+"""Audio versions one track holds (a hard cap, counted under the track lock; S2a-8)."""
+AUDIO_LABEL_MAX: Final = 60
+"""Characters in an audio version's label."""
 MAX_CAST_REFERENCES: Final = 12
 """Reference images one cast member holds (a hard cap, counted under the member lock)."""
 MAX_CAST_LOOKS: Final = 12

@@ -24,8 +24,8 @@ privacy = [
   # Adds Alibaba Cloud (Model Studio: Wan video, Studio text models) and Studio content. synthara
   # requires no legal acceptance, so no re-acceptance is forced.
   { version = 2026-12-01, requires_reacceptance = false, sha256 = "b623406a33a5026ed2a750617b498427324f854dd63e878cc29df8145c72ef7f" },
-  # Adds the Studio references retention row (section 9); synthara requires no acceptance, so none is forced.
-  { version = 2026-12-02, requires_reacceptance = false, sha256 = "beb61671612e12fde15cdd0f5a6ba853a87e4cb4f46cdf5a373c28585e9843a9" },
+  # Adds the Studio references retention row (section 9) and audio uploads; synthara requires no acceptance, so none is forced.
+  { version = 2026-12-02, requires_reacceptance = false, sha256 = "834f7429976f05af49222909e957072116e78bc219194a4080aa7c15e80f1d92" },
 ]
 sensitive_data_consent = [
   { version = 2026-09-25, requires_reacceptance = true, sha256 = "30f1d9e06c70891fdf5b57bff274116f1e7b57ee785830971f41d5bfdd48c864" },

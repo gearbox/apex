@@ -33,22 +33,35 @@ from src.api.services.image_thumbnail import make_image_thumbnails
 from src.api.services.media import build_upload_media
 from src.api.services.media_hash_ledger import MediaHashLedger
 from src.api.services.media_ingest import (
+    AudioCode,
     ImageIngestPolicy,
+    InvalidAudioError,
     InvalidMediaError,
     MediaIngestor,
     MediaProcessingError,
+    UnsupportedAudioError,
 )
-from src.api.services.media_ingest.profile_log import VideoProfileOrigin, log_video_profile
+from src.api.services.media_ingest.profile_log import (
+    AudioProfileOrigin,
+    VideoProfileOrigin,
+    log_audio_profile,
+    log_video_profile,
+)
 from src.api.services.storage import (
     R2StorageService,
     StorageError,
     StorageType,
     StorageValidationError,
 )
-from src.api.services.storage.schemas import ALLOWED_VIDEO_CONTENT_TYPES
+from src.api.services.storage.schemas import (
+    ALLOWED_AUDIO_CONTENT_TYPES,
+    ALLOWED_VIDEO_CONTENT_TYPES,
+    AUDIO_CLIENT_CONTENT_TYPE_ALIASES,
+)
 from src.api.services.thumbnail import extract_video_thumbnail
 from src.core.enums import MediaKind
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
+from src.db.repositories.library_audio import LibraryAudioProfileRepository
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 
@@ -61,6 +74,7 @@ if TYPE_CHECKING:
 
 logger = structlog.get_logger(__name__)
 
+_AUDIO_CLIENT_CONTENT_TYPES = ALLOWED_AUDIO_CONTENT_TYPES | AUDIO_CLIENT_CONTENT_TYPE_ALIASES
 _CONTROL_CHAR_RUNS = re.compile(r"[\x00-\x1f\x7f]+")
 _DISPLAY_FILENAME_MAX_LEN = 255
 
@@ -90,6 +104,16 @@ class UserContentError(Exception):
 
 class UserContentValidationError(UserContentError):
     """Raised when content validation fails."""
+
+
+class UserContentAudioError(UserContentValidationError):
+    """An audio upload ingest refused: a typed ``422`` (``code``, numeric ``detail`` only)."""
+
+    def __init__(self, code: AudioCode, message: str, detail: dict[str, int] | None = None) -> None:
+        super().__init__(message)
+        self.code = code.value
+        self.message = message
+        self.detail = detail
 
 
 class UserContentTooLargeError(UserContentValidationError):
@@ -165,10 +189,13 @@ class UserContentService:
         content_type: str,
         lineage: FrameLineage | None = None,
     ) -> UploadedImage:
-        """Upload an image or video for use in generation, optionally as a captured frame.
+        """Upload an image, video or audio file, optionally as a captured frame.
 
         Despite the name, this also accepts uploaded videos (``content_type``
-        in ``ALLOWED_VIDEO_CONTENT_TYPES``) — routed to ``_upload_video``.
+        in ``ALLOWED_VIDEO_CONTENT_TYPES``) — routed to ``_upload_video`` — and
+        audio (the stored types and their client aliases) — routed to
+        ``_upload_audio``, which probes the actual container (never the client
+        MIME) and stores the upload's own audio stream without tags.
         Video bytes are prepared from their actual container and selected
         streams (never the client MIME) before storage. A JPEG poster frame
         plus WEBP thumbnail derivatives are generated from those stored bytes.
@@ -206,7 +233,12 @@ class UserContentService:
         if lineage is not None:
             if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
                 raise UserContentFrameLineageError(FrameLineageReason.VIDEO_FILE)
+            if content_type in _AUDIO_CLIENT_CONTENT_TYPES:
+                raise UserContentFrameLineageError(FrameLineageReason.AUDIO_FILE)
             await self._validate_frame_lineage(user_id, lineage)
+
+        if content_type in _AUDIO_CLIENT_CONTENT_TYPES:
+            return await self._upload_audio(user_id=user_id, data=data, filename=filename)
 
         if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
             return await self._upload_video(
@@ -542,6 +574,112 @@ class UserContentService:
             expires_at=db_image.expires_at,
             media=media,
         )
+
+    async def _upload_audio(
+        self,
+        *,
+        user_id: UUID,
+        data: bytes,
+        filename: str,
+    ) -> UploadedImage:
+        """Upload an audio file: prepare, store in R2, then the row and its profile in one go.
+
+        The ingestor sniffs the actual container and remuxes the first audio stream without
+        re-encoding, dropping every tag and picture; its facts are authoritative. A refusal is a
+        typed ``422`` (no row, no object); there is no thumbnail and no poster, and no perceptual
+        hash (audio has none). If the database step fails after the object is stored, the object
+        is deleted best-effort so a failure leaves no orphan.
+        """
+        try:
+            prepared = await self._media_ingestor.prepare_audio(data)
+        except (InvalidAudioError, UnsupportedAudioError) as e:
+            raise UserContentAudioError(e.code, str(e), e.detail) from e
+        except InvalidMediaError as e:
+            # The only other refusal is a body over the audio budget the route already enforced.
+            raise UserContentValidationError(str(e)) from e
+        except MediaProcessingError as e:
+            raise UserContentUnavailableError("audio preparation is temporarily unavailable") from e
+
+        try:
+            result = await self._storage.upload(
+                user_id=user_id,
+                data=prepared.data,
+                content_type=prepared.content_type,
+                storage_type=StorageType.UPLOAD,
+            )
+        except StorageValidationError as e:
+            raise UserContentValidationError(str(e)) from e
+        except StorageError as e:
+            logger.exception("user_content.storage_upload_failed", user_id=str(user_id))
+            raise UserContentStorageError(
+                f"Storage backend unavailable ({type(e).__name__})"
+            ) from e
+
+        expires_at = datetime.now(UTC) + timedelta(days=self._retention_days)
+        try:
+            db_audio = await self._image_repo.create(
+                id=result.id,
+                user_id=user_id,
+                storage_key=result.storage_key,
+                original_filename=f"{result.id}.{prepared.format.value}",
+                display_filename=sanitize_display_filename(filename),
+                content_type=prepared.content_type,
+                size_bytes=len(prepared.data),
+                format=prepared.format.value,
+                expires_at=expires_at,
+                product_id=self._product_id,
+                duration_ms=prepared.duration_ms,
+            )
+            await LibraryAudioProfileRepository(self._session).insert(
+                upload_id=db_audio.id,
+                codec=prepared.codec,
+                sample_rate_hz=prepared.sample_rate_hz,
+                channels=prepared.channels,
+                bit_rate=prepared.bit_rate,
+                peaks=prepared.peaks,
+                peaks_version=prepared.peaks_version,
+            )
+            await self._session.flush()
+        except Exception:
+            await self._discard_orphan_object(result.storage_key)
+            raise
+
+        asset_ref = format_asset_ref(LibraryAssetSource.UPLOAD, db_audio.id)
+        logger.info(
+            "user_content.audio_uploaded",
+            audio_id=str(db_audio.id),
+            user_id=str(user_id),
+            size_bytes=len(prepared.data),
+            duration_ms=prepared.duration_ms,
+        )
+        log_audio_profile(
+            origin=AudioProfileOrigin.UPLOAD,
+            asset_ref=asset_ref,
+            audio_format=prepared.format.value,
+            codec=prepared.codec,
+            sample_rate_hz=prepared.sample_rate_hz,
+            channels=prepared.channels,
+            size_bytes=len(prepared.data),
+            duration_ms=prepared.duration_ms,
+        )
+
+        return UploadedImage(
+            id=db_audio.id,
+            storage_key=db_audio.storage_key,
+            filename=db_audio.original_filename,
+            content_type=db_audio.content_type,
+            size_bytes=db_audio.size_bytes,
+            created_at=db_audio.created_at,
+            expires_at=db_audio.expires_at,
+            media=build_upload_media(db_audio, []),
+        )
+
+    async def _discard_orphan_object(self, storage_key: str) -> None:
+        """Best-effort removal of an R2 object whose database row could not be written."""
+        try:
+            await self._storage.delete(storage_key)
+        except Exception:
+            logger.warning("user_content.orphan_cleanup_failed")
 
     # -------------------------------------------------------------------------
     # Statistics

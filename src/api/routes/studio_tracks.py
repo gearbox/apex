@@ -8,7 +8,7 @@ Endpoints:
   POST   /v1/studio/tracks/{id}/versions           — create a version (201) or replay it (200)
   GET    /v1/studio/versions/{id}                  — one version with its content
   DELETE /v1/studio/versions/{id}                  — delete a non-current, childless version
-  PUT    /v1/studio/tracks/{id}/current            — switch the current plan / lyrics
+  PUT    /v1/studio/tracks/{id}/current            — switch the current plan / lyrics / audio
   GET    /v1/studio/tracks/{id}/exports/suno       — deterministic Suno rendering (pure GET)
   POST   /v1/studio/tracks/{id}/imports/suno       — paste Suno's boxes back: 201 written, 200 not
 """
@@ -59,7 +59,7 @@ _ERRORS = {
         description=(
             "version_unchanged, plan_required, lyrics_incompatible_with_plan, "
             "version_limit_reached, version_is_current, version_has_children, "
-            "version_is_lyrics_base or version_in_use_by_run."
+            "version_is_lyrics_base, version_has_audio or version_in_use_by_run."
         ),
     ),
     422: ResponseSpec(
@@ -184,13 +184,14 @@ class StudioTrackController(Controller):
         data: CurrentPut,
         studio_version_service: DocumentVersionService,
     ) -> TrackOut:
-        """Switch the current plan and/or lyrics; the resulting pair must be compatible."""
+        """Switch the current plan, lyrics and/or audio; the resulting pair must be compatible."""
         return await studio_version_service.set_current(
             track_id,
             current_user_id,
             product_id,
             plan_version_id=data.plan_version_id,
             lyrics_version_id=data.lyrics_version_id,
+            audio_version_id=data.audio_version_id,
         )
 
     # -- export ------------------------------------------------------------------------------

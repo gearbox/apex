@@ -4,6 +4,7 @@ Endpoints:
   GET    /v1/library                          — paginated library grid
   GET    /v1/library/assets/{asset_ref}        — asset detail
   GET    /v1/library/assets/{asset_ref}/lineage — bounded ancestor/descendant lineage graph
+  GET    /v1/library/assets/{asset_ref}/peaks   — waveform peaks of an audio asset
   GET    /v1/library/groups/{job_id}           — generation group detail
   PATCH  /v1/library/assets/{asset_ref}        — update mutable metadata
   PUT    /v1/library/assets/{asset_ref}/favorite    — mark favorite
@@ -27,12 +28,14 @@ from litestar.status_codes import (
     HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
+    HTTP_422_UNPROCESSABLE_ENTITY,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.library import (
+    AudioPeaksResponse,
     BulkOperation,
     BulkOperationResult,
     LibraryAssetDetail,
@@ -46,6 +49,7 @@ from src.api.security import auth_guard
 from src.api.services.content_proxy import ContentProxyService
 from src.api.services.library import (
     LibraryBulkValidationError,
+    LibraryMediaKindNotSupportedError,
     LibraryProjectNotFoundError,
     LibraryService,
     LibraryTagNotFoundError,
@@ -190,6 +194,44 @@ class LibraryController(Controller):
                 status_code=HTTP_404_NOT_FOUND,
             )
         return Response(content=graph)
+
+    @get("/assets/{asset_ref:str}/peaks")
+    async def get_audio_peaks(
+        self,
+        current_user_id: UUID,
+        product_id: str,
+        asset_ref: str,
+        session: AsyncSession,
+        library_service: LibraryService,
+    ) -> Response[AudioPeaksResponse | ErrorEnvelope]:
+        """Waveform peaks of an audio asset: ``1,024`` buckets of signed ``int8`` min/max.
+
+        ``404 asset_not_found`` for a missing, foreign or other-product asset (one answer);
+        ``422 media_kind_not_supported`` for an asset that is not audio.
+        """
+        try:
+            peaks = await library_service.get_audio_peaks(
+                asset_ref, current_user_id, product_id, session=session
+            )
+        except LibraryMediaKindNotSupportedError:
+            return Response(
+                content=ErrorEnvelope(
+                    error="media_kind_not_supported",
+                    message="Peaks are only available for audio assets",
+                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+                ),
+                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        if peaks is None:
+            return Response(
+                content=ErrorEnvelope(
+                    error="asset_not_found",
+                    message=_ASSET_NOT_FOUND,
+                    status_code=HTTP_404_NOT_FOUND,
+                ),
+                status_code=HTTP_404_NOT_FOUND,
+            )
+        return Response(content=peaks)
 
     @get("/groups/{job_id:uuid}")
     async def get_group_detail(

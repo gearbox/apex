@@ -30,6 +30,7 @@ from src.db.repositories.studio import (
     StudioRunRepository,
     StudioTrackRepository,
 )
+from src.db.repositories.studio_track_audio import StudioTrackAudioRepository
 from src.studio.documents import (
     CURRENT_SCHEMA_VERSION,
     LyricsDocument,
@@ -37,6 +38,7 @@ from src.studio.documents import (
     decode_stored,
 )
 from src.studio.errors import (
+    AudioVersionNotFound,
     DocumentIssue,
     InvalidCursor,
     LyricsIncompatibleWithPlan,
@@ -46,6 +48,7 @@ from src.studio.errors import (
     StudioDocumentInvalid,
     StudioError,
     StudioNotFound,
+    VersionHasAudio,
     VersionHasChildren,
     VersionInUseByRun,
     VersionIsCurrent,
@@ -93,6 +96,7 @@ class DocumentVersionService:
         self._tracks = StudioTrackRepository(session)
         self._versions = StudioDocumentVersionRepository(session)
         self._runs = StudioRunRepository(session)
+        self._audio = StudioTrackAudioRepository(session)
 
     # -- helpers -----------------------------------------------------------------------------
 
@@ -428,16 +432,19 @@ class DocumentVersionService:
         *,
         plan_version_id: UUID | msgspec.UnsetType,
         lyrics_version_id: UUID | msgspec.UnsetType | None,
+        audio_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET,
     ) -> TrackOut:
-        """Switch the track's current plan and/or lyrics.
+        """Switch the track's current plan, lyrics and/or audio.
 
-        Omitted arguments keep their pointer; ``lyrics_version_id=None`` detaches the lyrics.
-        The resulting pair must be compatible.
+        Omitted arguments keep their pointer; ``lyrics_version_id=None`` detaches the lyrics and
+        ``audio_version_id=None`` clears the current audio. The resulting (plan, lyrics) pair must
+        be compatible; the audio pointer is independent of it.
 
         Raises:
             StudioNotFound: The track, or a given version of the matching kind, is not found.
             PlanRequired: Lyrics would be current without a plan.
             LyricsIncompatibleWithPlan: The resulting pair is incompatible.
+            AudioVersionNotFound: ``audio_version_id`` is not an audio version of this track.
         """
         track = await self._lock_track(track_id, user_id, product_id)
 
@@ -470,6 +477,20 @@ class DocumentVersionService:
                 )
                 lyrics_id = lyrics_row.id
 
+        audio_id = track.current_audio_version_id
+        if not isinstance(audio_version_id, msgspec.UnsetType):
+            if audio_version_id is None:
+                audio_id = None
+            else:
+                # Another track's audio version is simply "not found"; the composite foreign key
+                # ``(current_audio_version_id, id)`` is the backstop.
+                audio_row = await self._audio.get_on_track(
+                    audio_version_id, track_id, user_id=user_id, product_id=product_id
+                )
+                if audio_row is None:
+                    raise AudioVersionNotFound
+                audio_id = audio_row.id
+
         if lyrics_id is not None:
             if plan_id is None:
                 raise PlanRequired
@@ -490,7 +511,11 @@ class DocumentVersionService:
             if issues:
                 raise LyricsIncompatibleWithPlan(issues)
 
-        if plan_id != track.current_plan_version_id or lyrics_id != track.current_lyrics_version_id:
+        if (
+            plan_id != track.current_plan_version_id
+            or lyrics_id != track.current_lyrics_version_id
+            or audio_id != track.current_audio_version_id
+        ):
             track = await self._tracks.set_current(
                 track_id,
                 plan_version_id=msgspec.UNSET
@@ -499,12 +524,16 @@ class DocumentVersionService:
                 lyrics_version_id=msgspec.UNSET
                 if lyrics_id == track.current_lyrics_version_id
                 else lyrics_id,
+                audio_version_id=msgspec.UNSET
+                if audio_id == track.current_audio_version_id
+                else audio_id,
             )
             logger.info(
                 "studio.current_set",
                 track_id=str(track_id),
                 plan_version_id=str(plan_id) if plan_id else None,
                 lyrics_version_id=str(lyrics_id) if lyrics_id else None,
+                audio_version_id=str(audio_id) if audio_id else None,
             )
         return track_out(track)
 
@@ -519,6 +548,7 @@ class DocumentVersionService:
             VersionIsCurrent: It is the track's current plan or lyrics.
             VersionHasChildren: Other versions list it as their parent.
             VersionIsLyricsBase: Lyrics versions are based on this plan version.
+            VersionHasAudio: Audio versions realize it (their plan / lyrics link names it).
             VersionInUseByRun: A queued or running run takes it as its plan or lyrics input.
         """
         version = await self._versions.get(version_id, user_id=user_id, product_id=product_id)
@@ -558,6 +588,8 @@ class DocumentVersionService:
             raise VersionHasChildren(blockers.child_count)
         if blockers.lyrics_base_count:
             raise VersionIsLyricsBase(blockers.lyrics_base_count)
+        if blockers.audio_count:
+            raise VersionHasAudio(blockers.audio_count)
         # A lyrics result is tied to its plan's section ids, so a run cannot fall back if its
         # input disappears mid-run (P2a-41). The caller holds the track lock, and so does ``submit``:
         # no run can start between this answer and the delete.

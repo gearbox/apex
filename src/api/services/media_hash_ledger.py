@@ -2,9 +2,9 @@
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
-from src.core.enums import MediaFormat, MediaHashMediaType, MediaHashSourceKind
+from src.core.enums import MediaFormat, MediaHashMediaType, MediaHashSourceKind, MediaKind
 from src.core.media_hash import HashSet  # noqa: TC001 - validated at runtime by callers
 from src.core.uid import new_id
 from src.db.models.media_hash import MediaHash
@@ -58,7 +58,16 @@ class MediaHashLedger:
             parsed = MediaFormat(media_format)
         except (TypeError, ValueError) as exc:
             raise ValueError("unknown media format for ledger row") from exc
-        return MediaHashMediaType.VIDEO if parsed.is_video else MediaHashMediaType.IMAGE
+        match parsed.kind:
+            case MediaKind.IMAGE:
+                return MediaHashMediaType.IMAGE
+            case MediaKind.VIDEO:
+                return MediaHashMediaType.VIDEO
+            case MediaKind.AUDIO:
+                # Audio has no perceptual hash (S2a-7): a writer that gets here has a bug.
+                raise ValueError("audio has no perceptual hash ledger row")
+            case _:
+                assert_never(parsed.kind)
 
     def _stage(
         self,

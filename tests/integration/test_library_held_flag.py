@@ -19,7 +19,7 @@ from src.api.services.library_holds import AssetHolder, AssetHoldService
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.product_registry import VEX_CONFIG
 from src.db.repositories.library import LibraryRepository
-from tests.library_holds_support import RETENTION_DAYS, HoldWorld, output_ref, upload_ref
+from tests.library_holds_support import IMAGES, RETENTION_DAYS, HoldWorld, output_ref, upload_ref
 
 if TYPE_CHECKING:
     from contextlib import AbstractContextManager
@@ -58,6 +58,7 @@ async def _hold(world: HoldWorld, ref: AssetRef, user: User) -> UUID:
             holder=AssetHolder(kind="studio.cast_reference", id=uuid4()),
             user_id=user.id,
             product_id="vex",
+            accept=IMAGES,
         )
         await session.commit()
         return hold_id

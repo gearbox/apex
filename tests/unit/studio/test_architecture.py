@@ -31,6 +31,7 @@ STUDIO_FILES = sorted(
         SRC / "db/models/studio_cast.py",
         SRC / "db/repositories/studio.py",
         SRC / "db/repositories/studio_cast.py",
+        SRC / "db/repositories/studio_track_audio.py",
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
         SRC / "api/schemas/studio_runs.py",
@@ -55,15 +56,47 @@ def _imported_modules(path: Path) -> set[str]:
     return modules
 
 
+MEDIA_INGEST_FILES = sorted(SRC.glob("api/services/media_ingest/*.py"))
+
+
 def test_the_file_sets_are_not_empty() -> None:
     assert len(LIBRARY_FILES) >= 8
     assert len(STUDIO_FILES) >= 20
+    assert len(MEDIA_INGEST_FILES) >= 8
 
 
 @pytest.mark.parametrize("path", LIBRARY_FILES, ids=lambda p: str(p.relative_to(SRC)))
 def test_the_library_never_imports_the_studio(path: Path) -> None:
     offending = {
         m for m in _imported_modules(path) if m == "src.studio" or m.startswith("src.studio.")
+    }
+    assert not offending, f"{path.relative_to(ROOT)} imports {offending}"
+
+
+@pytest.mark.parametrize("path", MEDIA_INGEST_FILES, ids=lambda p: str(p.relative_to(SRC)))
+def test_media_ingest_never_imports_the_studio(path: Path) -> None:
+    """Ingest belongs to the library's side (D12): it knows no bounded context above it."""
+    offending = {
+        m for m in _imported_modules(path) if m == "src.studio" or m.startswith("src.studio.")
+    }
+    assert not offending, f"{path.relative_to(ROOT)} imports {offending}"
+
+
+_STUDIO_FORBIDDEN_IMPORTS = (
+    "src.api.services.media_ingest",
+    "src.api.services.storage",
+    "src.api.services.user_content",
+)
+
+
+@pytest.mark.parametrize("path", STUDIO_FILES, ids=lambda p: str(p.relative_to(SRC)))
+def test_the_studio_never_calls_ingest_storage_or_the_upload_service(path: Path) -> None:
+    """The studio reaches assets only through ``AssetHoldService`` and the library's builders:
+    a file is uploaded first (``POST /v1/storage/upload``) and attached by its ref."""
+    offending = {
+        m
+        for m in _imported_modules(path)
+        if any(m == name or m.startswith(f"{name}.") for name in _STUDIO_FORBIDDEN_IMPORTS)
     }
     assert not offending, f"{path.relative_to(ROOT)} imports {offending}"
 
@@ -153,7 +186,7 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 7
+    assert len(controllers) == 8
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth

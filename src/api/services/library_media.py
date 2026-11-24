@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import TYPE_CHECKING
 
 from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
-from src.api.services.media import OUTPUT_PREFIX, UPLOAD_PREFIX
+from src.api.services.media import OUTPUT_PREFIX, UPLOAD_PREFIX, variant_sources
 from src.core.enums import media_kind_from_content_type
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.core.thumbnails import label_for_max_edge
@@ -57,7 +57,7 @@ def build_media_object(
     )
 
     variants: list[ImageVariant] = []
-    for d in derivatives:
+    for d in variant_sources(media_type, derivatives):
         label = label_for_max_edge(d.thumbnail_max_edge)
         if label is None or d.width is None or d.height is None:
             continue

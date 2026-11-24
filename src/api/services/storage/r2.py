@@ -14,6 +14,7 @@ from botocore.config import Config
 from botocore.exceptions import ClientError
 
 from src.core.uid import new_id
+from src.core.upload_limits import upload_size_limit_bytes
 
 from .exceptions import (
     StorageConnectionError,
@@ -52,10 +53,13 @@ def _get_error_message(e: ClientError) -> str:
 
 
 # Constants
-MAX_FILE_SIZE = 20 * 1024 * 1024  # 20MB
 # Re-exported for backward compatibility — routes/content.py imports this name.
 ALLOWED_CONTENT_TYPES = ALLOWED_UPLOAD_CONTENT_TYPES
 DEFAULT_RETENTION_DAYS = 7
+# The Settings defaults, for callers that build R2StorageSettings without them (public-assets
+# bucket, CLIs): the storage layer never reads Settings itself.
+DEFAULT_MAX_UPLOAD_SIZE_MB = 20
+DEFAULT_AUDIO_UPLOAD_MAX_MB = 80
 
 
 @dataclass(frozen=True, slots=True)
@@ -86,12 +90,17 @@ class R2StorageSettings:
         secret_access_key: str,
         bucket_name: str,
         retention_days: int = DEFAULT_RETENTION_DAYS,
+        max_upload_size_mb: int = DEFAULT_MAX_UPLOAD_SIZE_MB,
+        audio_upload_max_mb: int = DEFAULT_AUDIO_UPLOAD_MAX_MB,
     ) -> None:
         self.account_id = account_id
         self.access_key_id = access_key_id
         self.secret_access_key = secret_access_key
         self.bucket_name = bucket_name
         self.retention_days = retention_days
+        # Read by ``upload_size_limit_bytes``: the per-kind byte limits (images/videos, audio).
+        self.max_upload_size_mb = max_upload_size_mb
+        self.audio_upload_max_mb = audio_upload_max_mb
 
     @property
     def endpoint_url(self) -> str:
@@ -155,13 +164,7 @@ class R2StorageService:
         Raises:
             StorageValidationError: If validation fails.
         """
-        # Check file size
         size = len(data)
-        if size > MAX_FILE_SIZE:
-            raise StorageValidationError(
-                f"File size {size} bytes exceeds maximum {MAX_FILE_SIZE} bytes"
-            )
-
         if size == 0:
             raise StorageValidationError("File is empty")
 
@@ -174,9 +177,15 @@ class R2StorageService:
 
         # Determine format
         try:
-            return MediaFormat.from_content_type(content_type)
+            media_format = MediaFormat.from_content_type(content_type)
         except ValueError as e:
             raise StorageValidationError(str(e)) from e
+
+        # The limit depends on the stored kind (audio is allowed more than an image).
+        limit = upload_size_limit_bytes(media_format.kind, self._settings)
+        if size > limit:
+            raise StorageValidationError(f"File size {size} bytes exceeds maximum {limit} bytes")
+        return media_format
 
     def build_storage_key(
         self,

@@ -65,7 +65,46 @@ def test_synthara_privacy_keeps_assets_that_studio_items_use_from_2026_12_02() -
     assert after.requires_reacceptance is False  # synthara requires no acceptance
 
 
-def test_the_new_version_differs_from_the_previous_one_by_that_row_only() -> None:
+_INPUTS_BEFORE = "- **Inputs:** text prompts, and images or videos you upload."
+_INPUTS_AFTER = "- **Inputs:** text prompts, and images, videos or audio files you upload."
+_NO_AUDIO_FINGERPRINTS = (
+    "We do not compute perceptual hashes or other fingerprints from audio files."
+)
+
+
+def test_synthara_privacy_names_audio_uploads_from_2026_12_02() -> None:
+    """S2a-12: ``2026-12-02`` is amended in place (it is dormant until its date, so no one can
+    have accepted it); the earlier version keeps the old text."""
+    before = _load(date(2026, 12, 1)).current(
+        Product.SYNTHARA, LegalDocumentType.PRIVACY, today=date(2026, 12, 1)
+    )
+    after = _load(date(2026, 12, 2)).current(
+        Product.SYNTHARA, LegalDocumentType.PRIVACY, today=date(2026, 12, 2)
+    )
+
+    assert before.version == date(2026, 12, 1)
+    assert _INPUTS_BEFORE in before.content_md
+    assert _INPUTS_AFTER not in before.content_md
+    assert _NO_AUDIO_FINGERPRINTS not in before.content_md
+    assert after.version == date(2026, 12, 2)
+    assert _INPUTS_AFTER in after.content_md
+    assert _INPUTS_BEFORE not in after.content_md
+    assert _NO_AUDIO_FINGERPRINTS in after.content_md
+
+
+def test_the_audio_sentence_is_its_own_paragraph_after_the_fingerprints_paragraph() -> None:
+    after = _load(date(2026, 12, 2)).current(
+        Product.SYNTHARA, LegalDocumentType.PRIVACY, today=date(2026, 12, 2)
+    )
+    paragraphs = after.content_md.split("\n\n")
+    fingerprints = next(
+        i for i, text in enumerate(paragraphs) if text.startswith("### 2.3. Content fingerprints")
+    )
+    assert "Perceptual hashes of uploaded files and Outputs." in paragraphs[fingerprints]
+    assert paragraphs[fingerprints + 1] == _NO_AUDIO_FINGERPRINTS
+
+
+def test_the_new_version_differs_from_the_previous_one_by_the_documented_changes_only() -> None:
     previous = _load(date(2026, 12, 1)).current(
         Product.SYNTHARA, LegalDocumentType.PRIVACY, today=date(2026, 12, 1)
     )
@@ -76,8 +115,13 @@ def test_the_new_version_differs_from_the_previous_one_by_that_row_only() -> Non
     previous_lines = previous.content_md.splitlines()
     current_lines = current.content_md.splitlines()
 
-    assert [line for line in current_lines if line not in previous_lines] == [_REFERENCES_ROW]
-    assert [line for line in previous_lines if line not in current_lines] == []
+    # The retention row (S1-P3) and the audio wording (S2a): nothing else changed.
+    assert [line for line in current_lines if line not in previous_lines] == [
+        _INPUTS_AFTER,
+        _NO_AUDIO_FINGERPRINTS,
+        _REFERENCES_ROW,
+    ]
+    assert [line for line in previous_lines if line not in current_lines] == [_INPUTS_BEFORE]
     outputs = next(i for i, line in enumerate(current_lines) if line.startswith("| Outputs |"))
     assert current_lines[outputs + 1] == _REFERENCES_ROW  # directly after the Outputs row
 

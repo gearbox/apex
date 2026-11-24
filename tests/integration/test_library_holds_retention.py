@@ -30,6 +30,8 @@ from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 from tests.library_holds_support import (
+    AUDIO,
+    IMAGES,
     HoldWorld,
     make_output,
     output_ref,
@@ -70,7 +72,11 @@ async def hold(
 ) -> UUID:
     async with world.factory() as session:
         hold_id = await AssetHoldService(session, retention_days=RETENTION_DAYS).hold(
-            ref, holder=AssetHolder(kind=kind, id=uuid4()), user_id=user_id, product_id="vex"
+            ref,
+            holder=AssetHolder(kind=kind, id=uuid4()),
+            user_id=user_id,
+            product_id="vex",
+            accept=IMAGES | AUDIO,  # eligibility is not what these tests are about
         )
         await session.commit()
         return hold_id
@@ -283,7 +289,9 @@ class TestHoldConflictBackstop:
 # The property: whatever happens, no held asset is swept and every unheld expired one is.
 # ---------------------------------------------------------------------------------------------
 
-_ASSETS = 4  # 2 uploads + 2 outputs of one completed job
+_ASSETS = (
+    6  # 2 image uploads + 2 image outputs of one completed job + an audio upload + an audio output
+)
 _HOLDERS = 3
 
 _operation = st.one_of(
@@ -332,6 +340,10 @@ async def _run_property(url: str, operations: list[tuple[str, int, int]]) -> Non
             await world.upload(user),
             await world.output(user, job, output_index=0),
             await world.output(user, job, output_index=1),
+            # audio is in the random pool too: a held one is never swept, an unheld expired one is
+            # (and its audio profile goes with it)
+            await world.audio(user),
+            await world.output(user, job, output_index=2, content_type="audio/mpeg"),
         ]
         refs = [
             upload_ref(asset) if isinstance(asset, UserImage) else output_ref(asset)

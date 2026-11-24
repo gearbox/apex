@@ -36,6 +36,7 @@ from src.core.product_registry import VEX_CONFIG
 from src.db.models.storage import UserImage
 from src.db.models.user import User
 from tests.legal_support import make_legal_registry
+from tests.unit.helpers import hermetic_settings
 
 if TYPE_CHECKING:
     from collections.abc import AsyncGenerator
@@ -100,6 +101,7 @@ def _app(engine: AsyncEngine, media_ingestor: MediaIngestService) -> Litestar:
         dependencies={
             "session": Provide(provide_session),
             "user_content": Provide(provide_user_content, sync_to_thread=False),
+            "settings": Provide(hermetic_settings, sync_to_thread=False),
         },
     )
     app.state["jwt_service"] = JWTService(JWTConfig(secret_key=_SECRET))

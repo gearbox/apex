@@ -48,6 +48,7 @@ def _track(*, plan: UUID | None = None, lyrics: UUID | None = None) -> SimpleNam
         title="Track",
         current_plan_version_id=plan,
         current_lyrics_version_id=lyrics,
+        current_audio_version_id=None,
         created_at=now,
         updated_at=now,
     )
@@ -76,7 +77,7 @@ def _version_service(track: SimpleNamespace, rows: dict[UUID, Any]) -> DocumentV
 
 def _track_service(rows: dict[UUID, Any], track: SimpleNamespace) -> tuple[TrackService, AsyncMock]:
     """A service whose single-statement read answers from ``rows`` (a missing row reads ``None``)."""
-    service = TrackService(MagicMock())
+    service = TrackService(MagicMock(), MagicMock())
 
     async def get_with_current_versions(_track_id: UUID, **_: object) -> Any:
         return (
@@ -87,6 +88,7 @@ def _track_service(rows: dict[UUID, Any], track: SimpleNamespace) -> tuple[Track
 
     lookup = AsyncMock(side_effect=get_with_current_versions)
     service._tracks = MagicMock(get_with_current_versions=lookup)
+    service._audio = MagicMock(get_current=AsyncMock(return_value=None))
     return service, lookup
 
 

@@ -1,7 +1,9 @@
 # Media ingest and PDQ ledger
 
 Every newly stored original passes through `MediaIngestService` before R2. The
-service prepares immutable `PreparedImage` or `PreparedVideo` values; it does
+service prepares immutable `PreparedImage`, `PreparedVideo` or (uploads only)
+`PreparedAudio` values. **Only images and videos get a perceptual hash and a
+ledger row: audio has none** (see "Audio" below). The service does
 not own an R2 write, database session, transaction, billing action, or job
 transition. Composition creates one bounded service per process, so replica
 counts multiply its image/video concurrency limits.
@@ -102,4 +104,52 @@ exhaustion or an operational processing failure is `503 service_unavailable`
 validation_error`.
 
 The ledger derives `source_media_type` from the row's persisted `format`; an
-unknown or missing format raises instead of defaulting to image.
+unknown or missing format raises instead of defaulting to image — and an audio
+format raises too (`MediaFormat.kind` is an exhaustive `match`): no writer may
+register a hash for audio.
+
+## Audio (S2a)
+
+`prepare_audio(data)` is user uploads only (the provider materializers never
+call it until generated audio exists). It shares the **video** admission slots
+and deadline (`video_slots`, `video_deadline_seconds`, `stage_timeout_seconds`):
+it is ffmpeg work of the same weight, and `MediaProcessingError` carries the
+same operational meaning. Its own byte budget is `AUDIO_UPLOAD_MAX_MB`
+(`max_audio_bytes`); the route enforces it from the *declared* type before
+ingest runs and ingest re-checks it.
+
+Pipeline: write a temp file → `ffprobe` (never the client MIME) → remux →
+`ffprobe` of the **remuxed** file (the stored bytes are what is described and
+gated) → peaks pass → read the remuxed bytes.
+
+* **Policy** (`media_ingest/audio.py::parse_audio_probe`, pure), in this order:
+  format not mp3 / ISO-BMFF / wav / flac → `audio_format_not_supported`; any
+  video stream other than an attached picture → `audio_has_video`; no audio
+  stream → `invalid_audio`; a codec other than mp3 (mp3), aac (m4a),
+  pcm_s16le / pcm_s24le (wav) or flac (flac), or more than 8 channels →
+  `audio_codec_not_supported`; duration (the audio stream's, else the
+  container's, positive) outside 5 s – 900 s → `audio_duration_out_of_range`
+  (`detail: {min_seconds, max_seconds}`). The attached-picture flag is read from
+  ffprobe's `stream_disposition` *section*: `disposition` listed inside
+  `stream=` prints nothing, which would make cover art look like a video stream.
+* **Remux, never re-encode:** `-map 0:a:0 -c:a copy -map_metadata -1
+  -map_metadata:s:a -1 -map_chapters -1 -fflags +bitexact -flags:a +bitexact`,
+  plus per container: mp3 `-write_id3v1 0 -id3v2_version 0 -write_xing 1 -f mp3`;
+  m4a `-movflags +faststart -f ipod`; wav `-rf64 auto -f wav`; flac `-f flac`.
+  The output container equals the input's, and attached pictures are dropped
+  because only the first audio stream is mapped. Every ffmpeg / ffprobe run adds
+  `-protocol_whitelist file`.
+* **Peaks:** a second ffmpeg pass on the remuxed bytes (`-ac 1 -ar 11025 -f s16le -`),
+  read into a numpy `int16` array, split by `np.array_split` into exactly 1,024
+  buckets; per bucket min and max `>> 8`, clipped to `[-128, 127]`, stored as
+  interleaved `int8` (2,048 bytes, `PEAKS_VERSION = 1`).
+* **Nothing private is logged:** the audio stages log the stage name only (never
+  stderr: decoder warnings can quote tag values), and `media.audio_profile`
+  (`profile_log.log_audio_profile`) carries format, codec, sample rate, channels,
+  size and duration. Tag values are what ingest strips; they are never read,
+  logged or returned.
+* **Persistence** (`UserContentService._upload_audio`): the object is stored, then
+  the `user_images` row (`width`/`height` `NULL`, `duration_ms`) and its
+  `library_audio_profiles` row are written in one transaction; if the database
+  step fails the object is deleted best-effort, so a failure leaves no orphan.
+  No thumbnail, no poster and no ledger row.

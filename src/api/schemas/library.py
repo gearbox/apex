@@ -467,3 +467,16 @@ class LibraryLineageGraph(msgspec.Struct, kw_only=True):
 
     descendants_truncated: bool
     """True if either descendant relation was clipped by its per-relation cap."""
+
+
+class AudioPeaksResponse(msgspec.Struct, kw_only=True):
+    """Waveform peaks of an audio asset (``GET /v1/library/assets/{asset_ref}/peaks``).
+
+    ``peaks`` is ``2 * buckets`` signed integers in ``[-128, 127]``, interleaved
+    ``[min0, max0, min1, max1, ...]`` over equal slices of the mono decode; ``0`` is silence and
+    ``±127`` is full scale. ``version`` names the layout, so a finer zoom can be added later.
+    """
+
+    version: int
+    buckets: int
+    peaks: list[int]

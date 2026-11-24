@@ -56,6 +56,7 @@ from src.db.models.studio import (
     StudioProjectProfile,
     StudioRun,
     StudioTrack,
+    StudioTrackAudio,
 )
 
 if TYPE_CHECKING:
@@ -908,6 +909,7 @@ class StudioTrackRepository:
         *,
         plan_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET,
         lyrics_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET,
+        audio_version_id: UUID | msgspec.UnsetType | None = msgspec.UNSET,
     ) -> StudioTrack:
         """Update the current pointers in one statement (unset arguments are left alone).
 
@@ -919,6 +921,8 @@ class StudioTrackRepository:
             values["current_plan_version_id"] = plan_version_id
         if not isinstance(lyrics_version_id, msgspec.UnsetType):
             values["current_lyrics_version_id"] = lyrics_version_id
+        if not isinstance(audio_version_id, msgspec.UnsetType):
+            values["current_audio_version_id"] = audio_version_id
         result = await self._session.execute(
             update(StudioTrack)
             .where(StudioTrack.id == track_id)
@@ -935,6 +939,8 @@ class VersionDeletionBlockers:
 
     child_count: int
     lyrics_base_count: int
+    audio_count: int
+    """Audio versions that realize this plan / lyrics version (``studio_track_audio`` links)."""
 
 
 class StudioDocumentVersionRepository:
@@ -1083,7 +1089,7 @@ class StudioDocumentVersionRepository:
     async def deletion_blockers(
         self, version_id: UUID, *, track_id: UUID, kind: StudioDocumentKind
     ) -> VersionDeletionBlockers:
-        """Children (versions derived from it) and lyrics versions based on it — one query."""
+        """Children, lyrics versions based on it and audio versions realizing it — one query."""
         children = (
             select(func.count())
             .select_from(StudioDocumentVersion)
@@ -1103,8 +1109,22 @@ class StudioDocumentVersionRepository:
             )
             .scalar_subquery()
         )
-        row = (await self._session.execute(select(children, lyrics_based))).one()
-        return VersionDeletionBlockers(child_count=row[0], lyrics_base_count=row[1])
+        audio = (
+            select(func.count())
+            .select_from(StudioTrackAudio)
+            .where(
+                StudioTrackAudio.track_id == track_id,
+                or_(
+                    StudioTrackAudio.plan_version_id == version_id,
+                    StudioTrackAudio.lyrics_version_id == version_id,
+                ),
+            )
+            .scalar_subquery()
+        )
+        row = (await self._session.execute(select(children, lyrics_based, audio))).one()
+        return VersionDeletionBlockers(
+            child_count=row[0], lyrics_base_count=row[1], audio_count=row[2]
+        )
 
     async def delete(self, version_id: UUID, *, user_id: UUID, product_id: str) -> bool:
         """Delete a version.

@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 from src.core.enums import MediaKind
 
@@ -55,6 +55,9 @@ _VIDEO_ACTIONS: tuple[LibraryAction, ...] = (
     LibraryAction.EXTRACT_FRAME,
 )
 
+# Audio is a library kind but never a generation input (S2a-7): it only has the always-on actions.
+_AUDIO_ACTIONS: tuple[LibraryAction, ...] = ()
+
 _GENERATION_METADATA_ACTIONS: tuple[LibraryAction, ...] = (
     LibraryAction.VIEW_SETTINGS,
     LibraryAction.REPRODUCE,
@@ -73,7 +76,7 @@ def resolve_library_actions(
     Pure function: no I/O, no DB session, safe to unit-test exhaustively.
 
     Args:
-        media_type: IMAGE or VIDEO — selects the media-specific action group.
+        media_type: IMAGE, VIDEO or AUDIO — selects the media-specific action group.
         source: Which table the asset lives in. Accepted for API symmetry
             with the rest of the library module; the MVP table derives
             everything it needs from ``has_generation_metadata`` instead
@@ -91,7 +94,15 @@ def resolve_library_actions(
     del source, product_config  # see docstring — accepted for future/API-symmetry use only
 
     actions: list[LibraryAction] = list(_ALWAYS_ACTIONS)
-    actions.extend(_VIDEO_ACTIONS if media_type == MediaKind.VIDEO else _IMAGE_ACTIONS)
+    match media_type:
+        case MediaKind.IMAGE:
+            actions.extend(_IMAGE_ACTIONS)
+        case MediaKind.VIDEO:
+            actions.extend(_VIDEO_ACTIONS)
+        case MediaKind.AUDIO:
+            actions.extend(_AUDIO_ACTIONS)
+        case _:
+            assert_never(media_type)
     if has_generation_metadata:
         actions.extend(_GENERATION_METADATA_ACTIONS)
 

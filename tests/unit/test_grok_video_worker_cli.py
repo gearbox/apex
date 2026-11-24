@@ -42,6 +42,9 @@ def settings() -> MagicMock:
     s.redis_operational_max_connections = 20
     s.max_upload_size_mb = 20
     s.max_upload_size_bytes = 20 * 1024 * 1024
+    s.audio_upload_max_bytes = 80 * 1024 * 1024
+    s.max_upload_size_mb = 20
+    s.audio_upload_max_mb = 80
     s.media_ingest_provider_video_max_bytes = 200 * 1024 * 1024
     s.image_max_input_megapixels = 100.0
     s.media_ingest_image_concurrency = 4
@@ -193,6 +196,9 @@ class TestGrokVideoPollerCLIRun:
             secret_access_key=settings.r2_secret_access_key,
             bucket_name=settings.r2_bucket_name,
             retention_days=settings.retention_days,
+            # the storage layer's per-kind upload limits (images and videos / audio)
+            max_upload_size_mb=settings.max_upload_size_mb,
+            audio_upload_max_mb=settings.audio_upload_max_mb,
         )
         mock_r2_cls.assert_called_once_with(mock_r2_settings_cls.return_value)
 

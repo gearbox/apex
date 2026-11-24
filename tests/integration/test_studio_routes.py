@@ -36,7 +36,6 @@ from src.api.dependencies.common import (
     get_studio_artist_service,
     get_studio_export_service,
     get_studio_project_service,
-    get_studio_track_service,
     get_studio_version_service,
     get_suno_import_service,
 )
@@ -55,6 +54,7 @@ from src.db.models.studio import StudioDocumentVersion
 from src.db.models.user import User
 from src.studio.errors import StudioError
 from tests.legal_support import TEST_LEGAL_DIGEST, TEST_LEGAL_REGISTRY
+from tests.library_holds_support import provide_track_service
 from tests.studio_support import make_lyrics, make_plan, make_section, to_json
 
 if TYPE_CHECKING:
@@ -111,7 +111,7 @@ def _build_app(
             "product_id": dep(get_product_id),
             "studio_artist_service": dep(get_studio_artist_service),
             "studio_project_service": dep(get_studio_project_service),
-            "studio_track_service": dep(get_studio_track_service),
+            "studio_track_service": dep(provide_track_service),
             "studio_version_service": dep(get_studio_version_service),
             "studio_export_service": dep(get_studio_export_service),
             "studio_suno_import_service": dep(get_suno_import_service),

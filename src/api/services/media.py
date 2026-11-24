@@ -7,12 +7,12 @@ only assembles the DTO.
 
 from __future__ import annotations
 
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import structlog
 
 from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
-from src.core.enums import media_kind_from_content_type
+from src.core.enums import MediaKind, media_kind_from_content_type
 from src.core.library_ref import LibraryAssetSource, format_asset_ref
 from src.core.thumbnails import label_for_max_edge
 from src.db.models.storage import GenerationOutput, UserImage
@@ -27,6 +27,18 @@ UPLOAD_PREFIX = "/v1/content/uploads"
 FEEDBACK_ASSET_PATH = "/v1/content/feedback"
 
 _MediaRow = GenerationOutput | UserImage
+
+
+def variant_sources(kind: MediaKind, derivatives: Sequence[_MediaRow]) -> Sequence[_MediaRow]:
+    """The derivative rows that become preview variants: none for audio, which has no thumbnail
+    (the client draws the stored peaks). Exhaustive, so a new kind has to decide."""
+    match kind:
+        case MediaKind.IMAGE | MediaKind.VIDEO:
+            return derivatives
+        case MediaKind.AUDIO:
+            return ()
+        case _:
+            assert_never(kind)
 
 
 def _build_media(
@@ -47,7 +59,7 @@ def _build_media(
     )
 
     variants: list[ImageVariant] = []
-    for d in derivatives:
+    for d in variant_sources(media_type, derivatives):
         label = label_for_max_edge(d.thumbnail_max_edge)
         if label is None:
             continue

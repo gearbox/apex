@@ -1570,7 +1570,16 @@ class Settings(BaseSettings):
         default=20,
         ge=1,
         le=100,
-        description="Maximum upload file size in MB",
+        description="Maximum upload file size in MB (images and videos)",
+    )
+    audio_upload_max_mb: int = Field(
+        default=80,
+        ge=1,
+        le=95,
+        description=(
+            "Maximum audio upload size in MB. At most 95 so the multipart body (file + form "
+            "overhead) stays under Cloudflare's 100 MB request cap."
+        ),
     )
     media_ingest_provider_video_max_mb: int = Field(
         default=200,
@@ -2469,6 +2478,20 @@ class Settings(BaseSettings):
     def max_upload_size_bytes(self) -> int:
         """Maximum upload size in bytes."""
         return self.max_upload_size_mb * 1024 * 1024
+
+    @property
+    def audio_upload_max_bytes(self) -> int:
+        """Maximum audio upload size in bytes."""
+        return self.audio_upload_max_mb * 1024 * 1024
+
+    @property
+    def max_request_body_bytes(self) -> int:
+        """The largest request body the app accepts: the biggest per-kind upload limit.
+
+        ``request_max_body_size`` is one number for the whole app, so it has to admit the
+        largest kind; the route then enforces each kind's own limit before ingest runs.
+        """
+        return max(self.max_upload_size_mb, self.audio_upload_max_mb) * 1024 * 1024
 
     @property
     def media_ingest_provider_video_max_bytes(self) -> int:

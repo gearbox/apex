@@ -61,3 +61,38 @@ def log_video_profile(
         height=height,
         duration_ms=duration_ms,
     )
+
+
+class AudioProfileOrigin(StrEnum):
+    """Which writer stored the audio."""
+
+    UPLOAD = "upload"
+
+
+def log_audio_profile(
+    *,
+    origin: AudioProfileOrigin,
+    asset_ref: str,
+    audio_format: str,
+    codec: str,
+    sample_rate_hz: int,
+    channels: int,
+    size_bytes: int,
+    duration_ms: int,
+) -> None:
+    """Emit one ``media.audio_profile`` event for a stored audio original.
+
+    Format, codec, sample rate, channels, size and duration only: never a tag value or a file
+    name (the tags are what ingest strips, so they are never read here and never logged).
+    """
+    logger.info(
+        "media.audio_profile",
+        origin=origin.value,
+        asset_ref=asset_ref,
+        format=audio_format,
+        codec=codec,
+        sample_rate_hz=sample_rate_hz,
+        channels=channels,
+        size_bytes=size_bytes,
+        duration_ms=duration_ms,
+    )

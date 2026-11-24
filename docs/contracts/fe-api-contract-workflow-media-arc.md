@@ -258,15 +258,16 @@ media type — `media_type` on `MediaObject` is the discriminator.
 
 ### 4.4 `media_type`
 
-The wire values are unchanged (`"image"`, `"video"`). The backing enum was renamed server-side;
-no client change is required.
+The wire values are `"image"` and `"video"`, and — since S2a — `"audio"` (an uploaded track: no
+`width`/`height`, no thumbnail variants, `duration_ms` set; see `docs/contracts/studio-contract.md` §15).
+The backing enum was renamed server-side; no client change is required for the first two.
 
 ---
 
 ## 5. TypeScript
 
 ```ts
-type MediaKind = 'image' | 'video';   // 'audio' is reserved; do not switch exhaustively
+type MediaKind = 'image' | 'video' | 'audio';   // audio arrived with the studio's track audio (S2a); do not switch exhaustively
 
 interface SourceMediaModeConstraints {
   min: number;

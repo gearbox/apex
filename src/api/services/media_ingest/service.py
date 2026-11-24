@@ -13,6 +13,7 @@ import tempfile
 from dataclasses import dataclass
 from enum import StrEnum
 from pathlib import Path
+from typing import TYPE_CHECKING, Any
 
 import structlog
 from PIL import Image, ImageOps, JpegImagePlugin
@@ -25,7 +26,18 @@ from src.api.services.image_normalization import (
     normalize_image,
     sniff_format,
 )
+from src.api.services.media_ingest.audio import (
+    PEAKS_SAMPLE_RATE_HZ,
+    PEAKS_VERSION,
+    PROBE_SHOW_ENTRIES,
+    AudioProbe,
+    compute_peaks,
+    parse_audio_probe,
+    remux_arguments,
+)
 from src.api.services.media_ingest.errors import (
+    AudioCode,
+    InvalidAudioError,
     InvalidMediaError,
     MediaProcessingError,
     UnsupportedMediaError,
@@ -34,6 +46,7 @@ from src.api.services.media_ingest.image_strip import strip_image_metadata
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
 from src.api.services.media_ingest.types import (
     ImageIngestPolicy,
+    PreparedAudio,
     PreparedImage,
     PreparedVideo,
     VideoStreamProfile,
@@ -58,6 +71,9 @@ _MP4_BRANDS = {b"isom", b"mp41", b"mp42", b"avc1", b"dash", b"M4V ", b"MSNV"} | 
     f"iso{n}".encode() for n in range(2, 10)
 }
 logger = structlog.get_logger(__name__)
+
+if TYPE_CHECKING:
+    from collections.abc import Coroutine
 
 
 class DurationSource(StrEnum):
@@ -131,8 +147,11 @@ class MediaIngestService:
         max_animation_frames: int = 100,
         video_slots: asyncio.Semaphore | None = None,
         image_slots: asyncio.Semaphore | None = None,
+        max_audio_bytes: int | None = None,
     ) -> None:
         if max_image_megapixels <= 0 or max_input_bytes <= 0:
+            raise ValueError("media byte and pixel limits must be positive")
+        if max_audio_bytes is not None and max_audio_bytes <= 0:
             raise ValueError("media byte and pixel limits must be positive")
         if not 1 <= video_max_frames <= 60 or not 1 <= video_max_edge <= 512:
             raise ValueError("video sample settings are outside their supported bounds")
@@ -142,6 +161,8 @@ class MediaIngestService:
             raise ValueError("media timeouts must be positive")
         self._max_image_megapixels = max_image_megapixels
         self._max_input_bytes = max_input_bytes
+        # Audio has its own byte budget (``AUDIO_UPLOAD_MAX_MB``); unset, it follows the general one.
+        self._max_audio_bytes = max_audio_bytes if max_audio_bytes is not None else max_input_bytes
         self._video_max_frames = video_max_frames
         self._video_max_edge = video_max_edge
         self._admission_wait_seconds = admission_wait_seconds
@@ -232,6 +253,49 @@ class MediaIngestService:
         else:
             self._video_slots.release()
             return result
+
+    async def prepare_audio(self, data: bytes) -> PreparedAudio:
+        """Probe, remux (never re-encode) and compute waveform peaks of an audio upload.
+
+        Shares the **video** admission slots and deadline: it is ffmpeg work of the same weight.
+        The container is sniffed by ffprobe, never taken from the client's MIME; the byte limit
+        is re-checked here against the audio budget, because the route only knows the declared
+        type.
+
+        Raises:
+            InvalidMediaError: Over the audio byte budget (``UnsupportedAudioError`` /
+                ``InvalidAudioError`` carry the typed ``422`` code for everything else).
+            MediaProcessingError: Out of capacity, or a local failure (never the client's fault).
+        """
+        if len(data) > self._max_audio_bytes:
+            raise InvalidMediaError("audio input exceeds the configured byte limit")
+        return await self._in_video_slot(
+            self._prepare_audio(data), busy_message="audio preparation capacity is exhausted"
+        )
+
+    async def _in_video_slot[T](self, work: Coroutine[Any, Any, T], *, busy_message: str) -> T:
+        """Run ``work`` holding one video slot; a cancelled caller keeps it until ffmpeg is reaped."""
+        try:
+            await asyncio.wait_for(self._video_slots.acquire(), self._admission_wait_seconds)
+        except TimeoutError as exc:
+            work.close()
+            raise MediaProcessingError(busy_message) from exc
+        task = asyncio.create_task(work)
+        try:
+            result = await asyncio.shield(task)
+        except asyncio.CancelledError:
+            task.add_done_callback(self._cancelled_slot_done)
+            raise
+        except Exception:
+            self._video_slots.release()
+            raise
+        else:
+            self._video_slots.release()
+            return result
+
+    def _cancelled_slot_done(self, task: asyncio.Task[object]) -> None:
+        self._video_slots.release()
+        self._log_cancelled_task_failure(task)
 
     async def _normalize_for_policy(
         self, data: bytes, policy: ImageIngestPolicy
@@ -434,6 +498,137 @@ class MediaIngestService:
         finally:
             if temp_dir is not None:
                 await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+
+    async def _prepare_audio(self, data: bytes) -> PreparedAudio:
+        deadline = asyncio.get_running_loop().time() + self._video_deadline_seconds
+        temp_dir: Path | None = None
+        try:
+            temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="apex-media-ingest-"))
+            input_path = temp_dir / "input.bin"
+            await asyncio.to_thread(input_path.write_bytes, data)
+            source = await self._probe_audio(input_path, deadline)
+            output_path = temp_dir / f"prepared.{source.format.value}"
+            await self._remux_audio(input_path, output_path, source, deadline)
+            # The stored bytes are what gets described and gated: probe the remuxed file again.
+            prepared = await self._probe_audio(output_path, deadline)
+            self._validate_audio_remux(source, prepared)
+            peaks = await self._audio_peaks(output_path, deadline)
+            prepared_bytes = await asyncio.to_thread(output_path.read_bytes)
+            self._validate_prepared_audio_size(prepared_bytes)
+            return PreparedAudio(
+                data=prepared_bytes,
+                format=prepared.format,
+                codec=prepared.codec,
+                sample_rate_hz=prepared.sample_rate_hz,
+                channels=prepared.channels,
+                bit_rate=prepared.bit_rate,
+                duration_ms=prepared.duration_ms,
+                peaks=peaks,
+                peaks_version=PEAKS_VERSION,
+            )
+        except (InvalidMediaError, UnsupportedMediaError, MediaProcessingError):
+            raise
+        except (MediaToolError, TimeoutError, OSError) as exc:
+            raise MediaProcessingError("audio preparation failed operationally") from exc
+        finally:
+            if temp_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+
+    @staticmethod
+    def _validate_audio_remux(source: AudioProbe, prepared: AudioProbe) -> None:
+        """A stream copy keeps the container: anything else is our fault, not the client's."""
+        if prepared.format is not source.format:
+            raise MediaProcessingError("audio remux changed the container")
+
+    def _validate_prepared_audio_size(self, data: bytes) -> None:
+        if len(data) > self._max_audio_bytes:
+            raise InvalidMediaError("prepared audio exceeds the configured byte limit")
+
+    async def _run_audio_stage(self, stage: str, args: list[str], deadline: float) -> ProcessResult:
+        """Run an audio ffmpeg/ffprobe stage; a non-zero exit is the file's fault, not ours.
+
+        Unlike the video stages this logs **no stderr**: decoder warnings can quote tag values.
+        """
+        try:
+            return await run_media_command(args, timeout_seconds=self._remaining(deadline))
+        except MediaToolExitError as exc:
+            if exc.returncode > 0:
+                logger.warning("media_ingest.audio_not_decodable", stage=stage)
+                raise InvalidAudioError(AudioCode.INVALID, "audio is not decodable") from exc
+            raise
+
+    async def _probe_audio(self, path: Path, deadline: float) -> AudioProbe:
+        result = await self._run_audio_stage(
+            "probe",
+            [
+                _FFPROBE,
+                "-v",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-show_entries",
+                PROBE_SHOW_ENTRIES,
+                "-of",
+                "json",
+                str(path),
+            ],
+            deadline,
+        )
+        try:
+            decoded = json.loads(result.stdout)
+        except json.JSONDecodeError as exc:
+            raise InvalidAudioError(AudioCode.INVALID, "audio is not decodable") from exc
+        return parse_audio_probe(decoded)
+
+    async def _remux_audio(
+        self, source: Path, destination: Path, probe: AudioProbe, deadline: float
+    ) -> None:
+        await self._run_audio_stage(
+            "remux",
+            [
+                _FFMPEG,
+                "-y",
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                str(source),
+                *remux_arguments(probe.format),
+                str(destination),
+            ],
+            deadline,
+        )
+
+    async def _audio_peaks(self, path: Path, deadline: float) -> bytes:
+        """Decode the stored file to mono 11,025 Hz PCM and reduce it to the peaks."""
+        result = await self._run_audio_stage(
+            "peaks",
+            [
+                _FFMPEG,
+                "-hide_banner",
+                "-nostats",
+                "-loglevel",
+                "error",
+                "-protocol_whitelist",
+                "file",
+                "-i",
+                str(path),
+                "-map",
+                "0:a:0",
+                "-ac",
+                "1",
+                "-ar",
+                str(PEAKS_SAMPLE_RATE_HZ),
+                "-f",
+                "s16le",
+                "-",
+            ],
+            deadline,
+        )
+        return await asyncio.to_thread(compute_peaks, result.stdout)
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - asyncio.get_running_loop().time()
