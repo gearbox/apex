@@ -14,7 +14,7 @@ from uuid import UUID, uuid4
 
 import msgspec
 import pytest
-from sqlalchemy import delete, insert, select, text, update
+from sqlalchemy import delete, insert, select, update
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -53,6 +53,7 @@ from src.studio.validation import (
     normalize_plan,
     to_content,
 )
+from tests.db_locks import backend_pid, wait_until_blocked
 from tests.studio_support import make_lyrics, make_plan, make_section
 from tests.studio_world import StudioWorld
 
@@ -255,42 +256,41 @@ class TestConcurrency:
         self, committed_track, db_engine: AsyncEngine
     ) -> None:
         factory, user, track_id = committed_track
-        async with factory() as holder:
-            await holder.execute(
-                select(StudioTrack).where(StudioTrack.id == track_id).with_for_update()
-            )
+        reported: asyncio.Future[int] = asyncio.get_running_loop().create_future()
 
-            async def create() -> int:
-                async with factory() as session:
-                    out, _ = await DocumentVersionService(session).create(
-                        track_id,
-                        PlanVersionCreate(content=make_plan(title="blocked"), make_current=False),
-                        user.id,
-                        "vex",
-                        origin=StudioDocumentOrigin.USER,
-                    )
-                    await session.commit()
-                    return out.version.version_number
+        async def create() -> int:
+            async with factory() as session:
+                # The racer names its own backend, in the session that does its work.
+                reported.set_result(await backend_pid(session))
+                out, _ = await DocumentVersionService(session).create(
+                    track_id,
+                    PlanVersionCreate(content=make_plan(title="blocked"), make_current=False),
+                    user.id,
+                    "vex",
+                    origin=StudioDocumentOrigin.USER,
+                )
+                await session.commit()
+                return out.version.version_number
 
-            task = asyncio.create_task(create())
-            async with db_engine.connect() as probe:
-                for _ in range(500):
-                    waiting = (
-                        await probe.execute(
-                            text(
-                                "SELECT count(*) FROM pg_stat_activity "
-                                "WHERE wait_event_type = 'Lock' AND datname = current_database()"
-                            )
-                        )
-                    ).scalar_one()
-                    if waiting:
-                        break
-                    await asyncio.sleep(0.01)
-                else:
-                    pytest.fail("create never blocked on the track row lock")
-            assert not task.done()
-            await holder.commit()
-        assert await asyncio.wait_for(task, 5) == 1
+        task: asyncio.Task[int] | None = None
+        outcome: int | BaseException | None = None
+        try:
+            async with factory() as holder:
+                await holder.execute(
+                    select(StudioTrack).where(StudioTrack.id == track_id).with_for_update()
+                )
+                task = asyncio.create_task(create())
+                # Exactly that backend waits on a lock (not "some session", not a snapshot cached
+                # for the length of a transaction) ...
+                await wait_until_blocked(db_engine, await asyncio.wait_for(reported, 5))
+                assert not task.done()
+                await holder.commit()
+        finally:
+            # ... and the racer is always awaited, after the lock holder's session has closed, so
+            # a failure above is one clean FAILED and never a live transaction at teardown.
+            if task is not None:
+                [outcome] = await asyncio.gather(task, return_exceptions=True)
+        assert outcome == 1
 
 
 # ---------------------------------------------------------------------------
