@@ -154,7 +154,7 @@ class PushDispatcher:
             with suppress(Exception):
                 await pubsub.punsubscribe(_USER_CHANNEL_PATTERN)
                 await pubsub.unsubscribe(_SYSTEM_CHANNEL)
-                await pubsub.aclose()  # type: ignore[no-untyped-call]
+                await pubsub.aclose()
 
     async def _handle_raw_message(self, *, channel: str, data: str) -> None:
         try:
