@@ -21,6 +21,9 @@ terms = [
 ]
 privacy = [
   { version = 2026-09-25, requires_reacceptance = true, sha256 = "c1ab0f26cbb9a0543b516cde33456047115d583057a1a9d4daee1fe8dd6f2064" },
+  # Adds Alibaba Cloud (Model Studio: Wan video, Studio text models) and Studio content. synthara
+  # requires no legal acceptance, so no re-acceptance is forced.
+  { version = 2026-12-01, requires_reacceptance = false, sha256 = "b623406a33a5026ed2a750617b498427324f854dd63e878cc29df8145c72ef7f" },
 ]
 sensitive_data_consent = [
   { version = 2026-09-25, requires_reacceptance = true, sha256 = "30f1d9e06c70891fdf5b57bff274116f1e7b57ee785830971f41d5bfdd48c864" },
