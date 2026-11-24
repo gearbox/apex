@@ -1007,7 +1007,7 @@ A **cast member** is a person, character or performer you keep reference images 
 
 A reference **pins** the library asset it points at. While at least one thing holds an asset:
 
-- retention **never deletes it**, however old it is (the asset's `expires_at` stays in the past or future as it was; the UI should hide the countdown when the library item says `held: true`, §10 of `BACKEND_API_REFERENCE.md`);
+- retention **never deletes it**, however old it is (the asset's `expires_at` stays in the past or future as it was; the UI should hide the countdown when the library item says `held: true`, §10 of `BACKEND_API_REFERENCE.md`). The library's `expiring` filter and `expiring_soon` sort agree: a held asset never expires while it is held, so `GET /v1/library?expiring=true` never lists it and `sort=expiring_soon` puts it last;
 - it **cannot be deleted**: `DELETE /v1/library/assets/{ref}` and a bulk delete answer `409 asset_held` (bulk: that item is `{success: false, error: "asset_held"}`), and so does `DELETE /v1/jobs/{id}` for a job that has a held output. The library item keeps its favorite, title, project and tags: a refused delete changes nothing;
 - when the **last** reference to it goes (the reference is deleted, its asset is swapped for another, or the member is deleted) its **retention clock restarts**: `expires_at` becomes `max(expires_at, now + RETENTION_DAYS)`. Releasing one of two references to the same asset changes nothing.
 

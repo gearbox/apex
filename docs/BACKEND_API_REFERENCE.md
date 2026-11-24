@@ -1,6 +1,14 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-11-24 — **Asset holds (additive).** Any part of the product can *hold* a library
+> _Last updated: 2026-11-24 — **Library `expiring` / `expiring_soon` and holds (semantics fix, no schema change).**
+> A held asset never expires while it is held, so the `expiring` filter and the `expiring_soon` sort
+> use the **effective expiry**: `9999-12-31T00:00:00Z` for a held asset, its stored `expires_at`
+> otherwise. `expiring=true` never lists a held asset (and `expiring=false` always does);
+> `sort=expiring_soon` puts held assets last. `expires_at` in every payload is unchanged (still the
+> stored value) and so is `held`. A cursor issued before this change may repeat or skip around held
+> rows on that one next page._
+>
+> _Prior (2026-11-24): **Asset holds (additive).** Any part of the product can *hold* a library
 > asset (today: Studio cast references, `docs/contracts/studio-contract.md` §14). A held asset is
 > never swept by retention, cannot be deleted, and gets its retention clock restarted when its last
 > hold goes. (1) `LibraryAssetItem` / `LibraryAssetDetail` / `LibraryOutputItem` gain a required
@@ -1392,7 +1400,8 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 > reference) is skipped by the sweeper however old it is, and cannot be deleted
 > (`409 asset_held`, §10). `LibraryAssetItem.held` is `true` for it: hide the countdown. When the
 > **last** hold is released the retention clock restarts: `expires_at` becomes
-> `max(expires_at, now + RETENTION_DAYS)`.
+> `max(expires_at, now + RETENTION_DAYS)`. `expiring` / `expiring_soon` (§10) treat a held asset as
+> never expiring (effective expiry `9999-12-31T00:00:00Z`), whatever its stored `expires_at` says.
 
 ### Uploads
 
@@ -1563,8 +1572,12 @@ typed **asset reference**: `"upload:<uuid>"` or `"output:<uuid>"` (`LibraryAsset
 never silently truncated.
 
 - Uses the same **cursor pagination** as all other list endpoints, but with a 3-part cursor
-  (`created_at`/`expires_at`, source rank, id) that gives a strict total order across the
-  upload/output UNION — a cursor encoded under one `sort` is rejected if replayed under another.
+  (`created_at` — or, under `expiring_soon`, the *effective expiry* — source rank, id) that gives a
+  strict total order across the upload/output UNION — a cursor encoded under one `sort` is rejected
+  if replayed under another. A held asset's effective expiry is `9999-12-31T00:00:00Z`, so an
+  `expiring_soon` cursor after a held asset carries that value; a cursor issued before the
+  effective-expiry rule (which carries a held row's stored `expires_at`) may repeat or skip around
+  held rows on its one next page.
 - Every grid item carries a server-resolved `available_actions: LibraryAction[]` — a pure,
   table-driven function of media type, source, and whether the asset has generation metadata (see
   `LibraryAction` below). Do not infer allowed actions from `source`/media type client-side.
@@ -1590,11 +1603,14 @@ Query:    limit? (1–50, default 30),
           favorite? (bool),
           project_id? (UUID),
           tag_id? (UUID),
-          expiring? (bool — true: expires_at within 7 days; false: beyond),
+          expiring? (bool — true: effective expiry within 7 days; false: beyond. A held asset
+                    never expires while it is held, so it is never in `true` and always in `false`,
+                    whatever its stored `expires_at`),
           query? (string, ≤200 chars — case-insensitive substring match over
                   display_title / original_filename / prompt),
           created_from? (datetime), created_to? (datetime),
-          sort? ("newest" | "oldest" | "expiring_soon", default "newest")
+          sort? ("newest" | "oldest" | "expiring_soon", default "newest";
+                 `expiring_soon` = soonest effective expiry first, held assets last)
 Response: CursorPage<LibraryAssetItem>
 Errors:   400 invalid_cursor
 ```
@@ -1762,7 +1778,7 @@ interface LibraryAssetItem {
   source: LibraryAssetSource;
   media: MediaObject;             // original + sm/md variants
   created_at: string;
-  expires_at: string;             // retention-cleanup deletion timestamp (hide the countdown while held)
+  expires_at: string;             // retention-cleanup deletion timestamp, as stored (hide the countdown while held; filter/sort use the effective expiry)
   held: boolean;                  // another part of the product holds it: not swept, not deletable (409 asset_held)
   display_title: string | null;
   original_filename: string | null;  // upload-only
@@ -3538,8 +3554,11 @@ Values: `"open"`, `"in_progress"`, `"resolved"`, `"dismissed"`
 
 Values: `"newest"` (default), `"oldest"`, `"expiring_soon"`
 
-Sort order for `GET /v1/library/`. `expiring_soon` orders ascending by `expires_at` (soonest first)
-and is also the axis the `expiring` filter checks against (7-day fixed window).
+Sort order for `GET /v1/library/`. `expiring_soon` orders ascending by the **effective expiry**
+(soonest first) and is also the axis the `expiring` filter checks against (7-day fixed window). The
+effective expiry is the stored `expires_at`, except that a **held** asset never expires while it is
+held: its effective expiry is `9999-12-31T00:00:00Z`, so it sorts after every unheld asset, is never
+returned by `expiring=true` and always by `expiring=false`. The wire's `expires_at` is unchanged.
 
 ### LibraryAction
 

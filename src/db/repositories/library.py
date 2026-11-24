@@ -14,8 +14,11 @@ from typing import TYPE_CHECKING
 
 import structlog
 from sqlalchemy import (
+    DateTime,
+    SQLColumnExpression,
     String,
     and_,
+    case,
     cast,
     delete,
     exists,
@@ -35,6 +38,7 @@ from sqlalchemy.sql import Select
 from sqlalchemy.sql import union_all as sa_union_all
 
 from src.core.enums import JobStatus, LibrarySort, MediaKind
+from src.core.library_limits import PINNED_EXPIRY
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.uid import new_id
 from src.db.models.library import LibraryAssetHold, LibraryAssetMetadata, LibraryAssetTag
@@ -45,11 +49,32 @@ if TYPE_CHECKING:
     from uuid import UUID
 
     from sqlalchemy.ext.asyncio import AsyncSession
+    from sqlalchemy.sql.elements import ColumnElement
 
 logger = structlog.get_logger(__name__)
 
 # Window used by the ``expiring`` filter / ``expiring_soon`` sort (P6).
 _EXPIRING_SOON_WINDOW = timedelta(days=7)
+
+
+def _effective_expiry(
+    expires_at: SQLColumnExpression[datetime], held: SQLColumnExpression[bool]
+) -> ColumnElement[datetime]:
+    """The *effective expiry*: ``PINNED_EXPIRY`` while the asset is held, else its ``expires_at``.
+
+    The sweep skips held assets, so a held asset's stored ``expires_at`` routinely lies in the
+    past; the ``expiring`` filter, the ``expiring_soon`` sort and that sort's keyset predicate must
+    all read this one expression (a held asset never expires), never the raw column.
+
+    Args:
+        expires_at: The branch's stored ``expires_at`` column.
+        held: The branch's ``EXISTS (hold of this asset)`` - the very expression that is selected
+            as ``held``, so the two can never disagree.
+
+    Returns:
+        A ``timestamptz`` SQL expression.
+    """
+    return case((held, literal(PINNED_EXPIRY, DateTime(timezone=True))), else_=expires_at)
 
 
 def _escape_like_term(term: str) -> str:
@@ -88,6 +113,11 @@ class LibraryAssetRow:
     id: UUID
     created_at: datetime
     expires_at: datetime
+    """The stored ``expires_at`` - what the wire reports."""
+    expiry_key: datetime
+    """The *effective expiry* (``PINNED_EXPIRY`` while held, else ``expires_at``): what the
+    ``expiring`` filter, the ``expiring_soon`` sort and that sort's cursor key off. Selected by the
+    same query as the sort, so the cursor value and the SQL order can never diverge."""
     content_type: str
     size_bytes: int
     width: int | None
@@ -143,11 +173,11 @@ class LibraryRepository:
             user_id: Owner of the assets.
             product_id: Product scope.
             limit: Page size (fetches limit+1 internally).
-            cursor: ``(created_at_or_expires_at, source, id)`` of the last
+            cursor: ``(created_at_or_expiry_key, source, id)`` of the last
                 item on the previous page — see
                 ``schemas.pagination.decode_library_cursor``. The first
-                component is ``expires_at`` when ``sort=EXPIRING_SOON``,
-                otherwise ``created_at``.
+                component is the row's ``expiry_key`` (the effective expiry)
+                when ``sort=EXPIRING_SOON``, otherwise ``created_at``.
             source: Restrict to a single source table.
             media_type: Filter to image or video content types.
             model: Filter to a specific generation model. Implies
@@ -156,15 +186,18 @@ class LibraryRepository:
             favorite: Filter to favorited (True) or non-favorited (False) assets.
             project_id: Filter to assets assigned to this project.
             tag_id: Filter to assets tagged with this tag (T6: single tag only).
-            expiring: Filter to assets expiring within (True) or beyond
-                (False) the ``expiring_soon`` window (P6, 7 days).
+            expiring: Filter to assets whose *effective expiry* is within (True)
+                or beyond (False) the ``expiring_soon`` window (P6, 7 days). A
+                held asset never expires while it is held, so it is never in
+                ``True`` and always in ``False``.
             query: Case-insensitive substring search over display_title,
                 display_filename (falling back to original_filename on
                 pre-030 uploads), and the owning job's prompt (outputs).
                 Escaped before use — never interpolated raw.
             created_from: Lower bound (inclusive) on ``created_at``.
             created_to: Upper bound (inclusive) on ``created_at``.
-            sort: ``newest`` (default), ``oldest``, or ``expiring_soon``.
+            sort: ``newest`` (default), ``oldest``, or ``expiring_soon``
+                (ascending by effective expiry: held assets come last).
 
         Returns:
             Sequence of LibraryAssetRow, ordered per ``sort``.
@@ -236,7 +269,7 @@ class LibraryRepository:
         elif sort == LibrarySort.OLDEST:
             order_cols = (subq.c.created_at.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
         else:
-            order_cols = (subq.c.expires_at.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
+            order_cols = (subq.c.expiry_key.asc(), subq.c.source_rank.asc(), subq.c.id.asc())
         final_query = select(subq).order_by(*order_cols).limit(limit + 1)
 
         result = await self._session.execute(final_query)
@@ -247,6 +280,7 @@ class LibraryRepository:
                 id=row["id"],
                 created_at=row["created_at"],
                 expires_at=row["expires_at"],
+                expiry_key=row["expiry_key"],
                 content_type=row["content_type"],
                 size_bytes=row["size_bytes"],
                 width=row["width"],
@@ -285,6 +319,9 @@ class LibraryRepository:
         sort: LibrarySort,
     ) -> Select:  # type: ignore[type-arg]
         rank = _SOURCE_RANK[LibraryAssetSource.UPLOAD]
+        # Served by uq_library_asset_holds_upload_holder (leading column: upload_id).
+        held = exists().where(LibraryAssetHold.upload_id == UserImage.id)
+        expiry_key = _effective_expiry(UserImage.expires_at, held)
         meta_join_cond = and_(
             LibraryAssetMetadata.user_id == user_id,
             LibraryAssetMetadata.product_id == product_id,
@@ -298,6 +335,7 @@ class LibraryRepository:
                 UserImage.id.label("id"),
                 UserImage.created_at.label("created_at"),
                 UserImage.expires_at.label("expires_at"),
+                expiry_key.label("expiry_key"),
                 UserImage.content_type.label("content_type"),
                 UserImage.size_bytes.label("size_bytes"),
                 UserImage.width.label("width"),
@@ -311,8 +349,7 @@ class LibraryRepository:
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
                 LibraryAssetMetadata.project_id.label("project_id"),
-                # Served by uq_library_asset_holds_upload_holder (leading column: upload_id).
-                exists().where(LibraryAssetHold.upload_id == UserImage.id).label("held"),
+                held.label("held"),
                 literal(rank).label("source_rank"),
             )
             .outerjoin(LibraryAssetMetadata, meta_join_cond)
@@ -350,9 +387,9 @@ class LibraryRepository:
             )
 
         if expiring is True:
-            query = query.where(UserImage.expires_at <= expiring_threshold)
+            query = query.where(expiry_key <= expiring_threshold)
         elif expiring is False:
-            query = query.where(UserImage.expires_at > expiring_threshold)
+            query = query.where(expiry_key > expiring_threshold)
 
         if search_term is not None:
             pattern = f"%{search_term}%"
@@ -377,9 +414,7 @@ class LibraryRepository:
             query = query.where(UserImage.created_at <= created_to)
 
         if cursor_ts is not None and cursor_rank is not None and cursor_id is not None:
-            ts_col = (
-                UserImage.expires_at if sort == LibrarySort.EXPIRING_SOON else UserImage.created_at
-            )
+            ts_col = expiry_key if sort == LibrarySort.EXPIRING_SOON else UserImage.created_at
             ascending = sort in (LibrarySort.OLDEST, LibrarySort.EXPIRING_SOON)
             current = tuple_(ts_col, literal(rank), UserImage.id)
             cursor_tuple = tuple_(literal(cursor_ts), literal(cursor_rank), literal(cursor_id))
@@ -408,6 +443,9 @@ class LibraryRepository:
         sort: LibrarySort,
     ) -> Select:  # type: ignore[type-arg]
         rank = _SOURCE_RANK[LibraryAssetSource.OUTPUT]
+        # Served by uq_library_asset_holds_output_holder (leading column: output_id).
+        held = exists().where(LibraryAssetHold.output_id == GenerationOutput.id)
+        expiry_key = _effective_expiry(GenerationOutput.expires_at, held)
         meta_join_cond = and_(
             LibraryAssetMetadata.user_id == user_id,
             LibraryAssetMetadata.product_id == product_id,
@@ -421,6 +459,7 @@ class LibraryRepository:
                 GenerationOutput.id.label("id"),
                 GenerationOutput.created_at.label("created_at"),
                 GenerationOutput.expires_at.label("expires_at"),
+                expiry_key.label("expiry_key"),
                 GenerationOutput.content_type.label("content_type"),
                 GenerationOutput.size_bytes.label("size_bytes"),
                 GenerationOutput.width.label("width"),
@@ -434,8 +473,7 @@ class LibraryRepository:
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
                 LibraryAssetMetadata.project_id.label("project_id"),
-                # Served by uq_library_asset_holds_output_holder (leading column: output_id).
-                exists().where(LibraryAssetHold.output_id == GenerationOutput.id).label("held"),
+                held.label("held"),
                 literal(rank).label("source_rank"),
             )
             .join(GenerationJob, GenerationJob.id == GenerationOutput.job_id)
@@ -479,9 +517,9 @@ class LibraryRepository:
             )
 
         if expiring is True:
-            query = query.where(GenerationOutput.expires_at <= expiring_threshold)
+            query = query.where(expiry_key <= expiring_threshold)
         elif expiring is False:
-            query = query.where(GenerationOutput.expires_at > expiring_threshold)
+            query = query.where(expiry_key > expiring_threshold)
 
         if search_term is not None:
             pattern = f"%{search_term}%"
@@ -499,9 +537,7 @@ class LibraryRepository:
 
         if cursor_ts is not None and cursor_rank is not None and cursor_id is not None:
             ts_col = (
-                GenerationOutput.expires_at
-                if sort == LibrarySort.EXPIRING_SOON
-                else GenerationOutput.created_at
+                expiry_key if sort == LibrarySort.EXPIRING_SOON else GenerationOutput.created_at
             )
             ascending = sort in (LibrarySort.OLDEST, LibrarySort.EXPIRING_SOON)
             current = tuple_(ts_col, literal(rank), GenerationOutput.id)

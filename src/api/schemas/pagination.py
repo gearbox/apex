@@ -109,9 +109,10 @@ def encode_library_cursor(created_at: datetime, source: str, id: UUID, sort: str
 
     Args:
         created_at: Timestamp of the last item on the current page. For the
-            ``expiring_soon`` sort this is the item's ``expires_at`` value —
-            the field name is generic; it always holds whatever timestamp
-            the requested sort keys off of.
+            ``expiring_soon`` sort this is the item's effective expiry
+            (``LibraryAssetRow.expiry_key``: ``PINNED_EXPIRY`` while the asset is
+            held, else its ``expires_at``) — the field name is generic; it always
+            holds whatever timestamp the requested sort keys off of.
         source: ``"upload"`` or ``"output"`` — the last item's asset source.
         id: Primary key of the last item on the current page.
         sort: The ``LibrarySort`` value this cursor was produced under.

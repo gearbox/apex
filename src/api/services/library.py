@@ -91,6 +91,25 @@ _LINEAGE_DEPTH_CAP = 10
 _LINEAGE_DESCENDANTS_CAP = 50
 
 
+def cursor_timestamp(row: LibraryAssetRow, sort: LibrarySort) -> datetime:
+    """The timestamp a page's last ``row`` contributes to its ``next_cursor`` under ``sort``.
+
+    ``expiring_soon`` orders and pages by the row's ``expiry_key`` (the effective expiry: a held
+    asset is ``PINNED_EXPIRY``), which the same SQL statement selected, so the cursor value is
+    exactly the value the order was computed from - never the stored ``expires_at`` (a held
+    asset's lies in the past and would resume the keyset in the wrong place) and never a value
+    recomputed here.
+
+    Args:
+        row: The last row of the page.
+        sort: The sort the page was listed under.
+
+    Returns:
+        The keyset's first component for ``row``.
+    """
+    return row.expiry_key if sort == LibrarySort.EXPIRING_SOON else row.created_at
+
+
 class LibraryValidationError(Exception):
     """Raised when a library asset patch fails validation."""
 
@@ -193,13 +212,15 @@ class LibraryService:
             project_id: Optional filter to assets assigned to this project.
             tag_id: Optional filter to assets tagged with this tag.
             expiring: Optional filter to assets expiring within (True) or
-                beyond (False) the expiring-soon window.
+                beyond (False) the expiring-soon window, by effective expiry: a
+                held asset never expires, so it is always "beyond".
             query: Optional case-insensitive substring search over
                 display_title, display_filename (falling back to
                 original_filename on pre-030 uploads), and prompt.
             created_from: Optional lower bound on created_at.
             created_to: Optional upper bound on created_at.
-            sort: newest (default), oldest, or expiring_soon.
+            sort: newest (default), oldest, or expiring_soon (soonest effective
+                expiry first, held assets last).
 
         Returns:
             CursorPage of LibraryAssetItem.
@@ -275,9 +296,8 @@ class LibraryService:
         next_cursor: str | None = None
         if has_more and page_rows:
             last = page_rows[-1]
-            last_ts = last.expires_at if sort == LibrarySort.EXPIRING_SOON else last.created_at
             next_cursor = encode_library_cursor(
-                last_ts, last.source.value, last.id, sort=sort.value
+                cursor_timestamp(last, sort), last.source.value, last.id, sort=sort.value
             )
 
         logger.info(
