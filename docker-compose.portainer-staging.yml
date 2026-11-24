@@ -17,6 +17,13 @@
 #   R2_SECRET_ACCESS_KEY    R2 API token secret
 #   CLOUDFLARE_TUNNEL_TOKEN token from Zero Trust → Tunnels
 #   XAI_API_KEY             xAI API key (optional)
+#
+# Optional, Media Project Studio (all off by default; see .env.staging.example):
+#   STUDIO_ENABLED / STUDIO_RUNS_ENABLED / STUDIO_CHAT_ENABLED   true to switch on
+#   LLM_MODELS              JSON model registry (needs a "qwen" entry: plan runs use it)
+#   MODEL_STUDIO_API_KEY    Alibaba Model Studio key (Wan video and the qwen entry)
+#   STUDIO_CHAT_MODEL       grok (default) or qwen; memory drafts follow it unless
+#                           STUDIO_MEMORY_DRAFT_MODEL is set (nested default: Compose v2)
 # =============================================================================
 
 services:
