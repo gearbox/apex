@@ -17,10 +17,17 @@ if TYPE_CHECKING:
     from collections.abc import Mapping
 
 __all__ = [
+    "ArtistBusy",
     "ArtistInUse",
     "ArtistLimitReached",
     "ArtistNameConflict",
     "ArtistNotFound",
+    "ChatBusy",
+    "ChatFull",
+    "ChatLimitReached",
+    "ChatNotFound",
+    "ChatRateLimited",
+    "ChatReplyInProgress",
     "DocumentIssue",
     "IdempotencyConflict",
     "IdempotencyKeyRequired",
@@ -29,8 +36,12 @@ __all__ = [
     "LyricsIncompatibleWithPlan",
     "LyricsRequired",
     "LyricsVersionNotFound",
+    "MemoryDraftInProgress",
+    "MemoryDraftNotFound",
     "MemoryLimitReached",
     "MemoryNotFound",
+    "MessageNotComplete",
+    "MessageNotFound",
     "ParentVersionNotFound",
     "PlanRequired",
     "PlanVersionNotFound",
@@ -326,6 +337,101 @@ class RunRateLimited(StudioError):
     code = "run_rate_limited"
     status_code = 429
     message = "Too many runs were started recently; try again later."
+
+
+# --- artist chat (S1-P2c) ---------------------------------------------------------------------
+
+
+class ChatNotFound(StudioError):
+    """No such chat for the caller (unknown, another user's, another product's)."""
+
+    code = "chat_not_found"
+    status_code = 404
+    message = "Chat not found."
+
+
+class MessageNotFound(StudioError):
+    """No such chat message for the caller."""
+
+    code = "message_not_found"
+    status_code = 404
+    message = "Message not found."
+
+
+class MemoryDraftNotFound(StudioError):
+    """No such memory draft for the caller."""
+
+    code = "memory_draft_not_found"
+    status_code = 404
+    message = "Memory draft not found."
+
+
+class ChatLimitReached(StudioError):
+    """The artist already has the maximum number of chats."""
+
+    code = "chat_limit_reached"
+    status_code = 409
+    message = "The artist has the maximum number of chats."
+
+
+class ChatFull(StudioError):
+    """The chat holds the maximum number of messages: start a new chat."""
+
+    code = "chat_full"
+    status_code = 409
+    message = "This chat is full; start a new chat."
+
+
+class ChatReplyInProgress(StudioError):
+    """One reply at a time per chat: the previous message has not been answered yet."""
+
+    code = "chat_reply_in_progress"
+    status_code = 409
+    message = "The artist is still answering the previous message."
+
+
+class ChatBusy(StudioError):
+    """A chat with a pending reply or memory draft cannot be deleted."""
+
+    code = "chat_busy"
+    status_code = 409
+    message = "The chat has a reply or a memory draft in progress."
+
+
+class ArtistBusy(StudioError):
+    """An artist with a pending chat reply or memory draft cannot be deleted (S1-P2c R1).
+
+    The cascade ``artist → chats → messages / drafts`` would delete a paid, pending row whose
+    reservation then never gets refunded; the user retries in a few seconds, as for ``ChatBusy``.
+    """
+
+    code = "artist_busy"
+    status_code = 409
+    message = "The artist has a chat reply or memory draft in progress."
+
+
+class MemoryDraftInProgress(StudioError):
+    """A draft of this message is already being written."""
+
+    code = "memory_draft_in_progress"
+    status_code = 409
+    message = "A memory draft of this message is already in progress."
+
+
+class MessageNotComplete(StudioError):
+    """Only a ``complete`` message can be the source of a memory draft."""
+
+    code = "message_not_complete"
+    status_code = 422
+    message = "Only a completed message can be turned into a memory draft."
+
+
+class ChatRateLimited(StudioError):
+    """Too many replies and drafts pending, or created in the last hour."""
+
+    code = "chat_rate_limited"
+    status_code = 429
+    message = "Too many chat requests were made recently; try again later."
 
 
 class VersionIsCurrent(StudioError):

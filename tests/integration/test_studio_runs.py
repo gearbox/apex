@@ -303,15 +303,9 @@ class TestLimits:
         world = make_run_world(studio_runs_per_user_per_hour=1)
         actor = await world.add_actor(balance=20)
         track_id = await world.new_track(actor)
-        first = await world.submit(actor, track_id)
+        await world.submit(actor, track_id)
         await world.drive(FakeLlm(make_draft()))
-        async with world.factory() as session, session.begin():
-            await session.execute(
-                text(
-                    "UPDATE studio_runs SET created_at = now() - interval '2 hours' WHERE id = :id"
-                ),
-                {"id": first.run.id},
-            )
+        await world.age_usage(actor)  # the limit counts the usage ledger (R2), not the run rows
         assert (await world.submit(actor, track_id)).changed is True
 
 

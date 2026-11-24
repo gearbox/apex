@@ -32,8 +32,12 @@ STUDIO_FILES = sorted(
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
         SRC / "api/schemas/studio_runs.py",
+        SRC / "api/schemas/studio_chat.py",
         SRC / "api/security/studio.py",
+        SRC / "db/models/studio_chat.py",
+        SRC / "db/repositories/studio_chat.py",
         SRC / "workers/studio_run.py",
+        SRC / "workers/studio_chat.py",
     }
 )
 
@@ -100,11 +104,13 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 5
+    assert len(controllers) == 6
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth
             assert "guards = [studio_feature_guard, studio_runs_guard, auth_guard]" in text, path
+        elif path.name == "studio_chat.py":  # likewise the chat switch
+            assert "guards = [studio_feature_guard, studio_chat_guard, auth_guard]" in text, path
         else:
             assert "guards = [studio_feature_guard, auth_guard]" in text, path
         assert "guards = [auth_guard" not in text, path
@@ -452,6 +458,10 @@ NO_ASSERT_GLOBS = (
     "studio/services/run_kinds/*.py",
     "studio/run_*.py",
     "workers/studio_run.py",
+    # the artist chat (S1-P2c): its task bodies run under broad guards too
+    "studio/chat/**/*.py",
+    "studio/services/chat*.py",
+    "workers/studio_chat.py",
 )
 
 
@@ -485,6 +495,11 @@ def test_the_no_assert_file_set_covers_the_guarded_modules() -> None:
         "studio/run_failures.py",
         "studio/run_requests.py",
         "workers/studio_run.py",
+        "studio/chat/supervisor.py",
+        "studio/chat/sweep.py",
+        "studio/services/chat.py",
+        "studio/services/memory_draft.py",
+        "workers/studio_chat.py",
     } <= names
 
 

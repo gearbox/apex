@@ -156,7 +156,7 @@ class TelegramDispatcher:
         finally:
             with suppress(Exception):
                 await pubsub.unsubscribe(OPS_EVENTS_CHANNEL)
-                await pubsub.aclose()  # type: ignore[no-untyped-call]
+                await pubsub.aclose()
 
     async def _handle_raw_message(self, data: str) -> None:
         try:

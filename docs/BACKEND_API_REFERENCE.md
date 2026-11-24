@@ -2790,6 +2790,9 @@ data: <JSON-encoded inner payload>
 | `gpu_session.credit_warning` | Session balance is low; emitted once per upward level transition (no warning → warning → critical). Cleared on balance recovery or termination. | `GpuSessionCreditWarningPayload` |
 | `balance.updated` | Token balance changed (debit, credit, refund) | `BalanceUpdatedPayload` |
 | `studio.run.updated` | A studio planner run changed status or stage (`revision` strictly increases; apply only when greater). See `docs/contracts/studio-contract.md` §11 | `StudioRunUpdatedPayload` |
+| `studio.chat.delta` | A piece of an artist chat reply being written (`seq` 1, 2, 3 … per message; owner's channel only; carries text, never logged). Contract §13 | `StudioChatDeltaPayload` |
+| `studio.chat.message.updated` | An artist chat message changed status (`pending` → `complete` \| `failed`; apply only when `revision` is greater). Contract §13 | `StudioChatMessageUpdatedPayload` |
+| `studio.memory_draft.updated` | A memory draft of a chat message changed status (ids only). Contract §13 | `StudioMemoryDraftUpdatedPayload` |
 | `system.notification` | Broadcast system message (maintenance, outage) | `SystemNotificationPayload` |
 
 ### Event Payload Schemas
@@ -2871,7 +2874,7 @@ interface SystemNotificationPayload {
 
 | Channel | Subscribers | Events |
 |---------|-------------|--------|
-| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.deployment_status_changed`, `gpu_session.operation_updated`, `gpu_session.credit_warning`, `balance.updated`, `studio.run.updated` |
+| `user:{user_id}` | Per-user | `job.status_changed`, `job.progress`, `gpu_session.status_changed`, `gpu_session.deployment_status_changed`, `gpu_session.operation_updated`, `gpu_session.credit_warning`, `balance.updated`, `studio.run.updated`, `studio.chat.delta`, `studio.chat.message.updated`, `studio.memory_draft.updated` |
 | `system:broadcast` | All connected clients | `system.notification` |
 
 Each SSE connection subscribes to both the per-user channel and `system:broadcast`.

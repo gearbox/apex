@@ -26,7 +26,17 @@ if TYPE_CHECKING:
     from collections.abc import Iterable
 
 __all__ = [
+    "CHAT_MESSAGE_MAX",
+    "CHAT_REFUSAL_SENTINEL",
+    "CHAT_SENTINEL_BUFFER",
+    "CHAT_TITLE_MAX",
+    "CHAT_WINDOW_BUDGET",
+    "CHAT_WINDOW_MESSAGES",
+    "DISCOGRAPHY_BUDGET",
+    "DISCOGRAPHY_TITLES_MAX",
     "MAX_ACTIVE_MEMORIES_PER_ARTIST",
+    "MAX_CHATS_PER_ARTIST",
+    "MAX_MESSAGES_PER_CHAT",
     "MEMORY_BODY_MAX",
     "MEMORY_CONTEXT_BUDGET",
     "MEMORY_IMAGERY_MAX",
@@ -67,6 +77,30 @@ MAX_ACTIVE_MEMORIES_PER_ARTIST: Final = 200
 """Active memories one artist can hold (``409 memory_limit_reached``)."""
 MEMORY_CONTEXT_BUDGET: Final = 12_000
 """Characters of artist memories one run may send to the model, as rendered into the prompt."""
+
+# -- artist chat (S1-P2c) ---------------------------------------------------------------------
+
+CHAT_TITLE_MAX: Final = 120
+"""Characters in a chat's title (a single line)."""
+CHAT_MESSAGE_MAX: Final = 4_000
+"""Characters in one user message."""
+MAX_MESSAGES_PER_CHAT: Final = 200
+"""Messages (both roles) one chat holds; then a new chat is started (``409 chat_full``)."""
+MAX_CHATS_PER_ARTIST: Final = 50
+"""Chats one artist holds (``409 chat_limit_reached``)."""
+CHAT_WINDOW_MESSAGES: Final = 20
+"""Most messages of a chat's history (the new user message included) one reply is given."""
+CHAT_WINDOW_BUDGET: Final = 16_000
+"""Characters of history (the new message included) one reply is given."""
+DISCOGRAPHY_BUDGET: Final = 6_000
+"""Characters of the artist's own tracks a chat reply is given, as rendered into the prompt."""
+DISCOGRAPHY_TITLES_MAX: Final = 30
+"""Track titles listed in the discography block."""
+CHAT_REFUSAL_SENTINEL: Final = "⟦declined⟧"
+"""What the model answers, and nothing else, when answering would break the content rules."""
+CHAT_SENTINEL_BUFFER: Final = 32
+"""Characters of a reply held back before the first delta is published, so a refusal never
+reaches the client and is then retracted."""
 
 type _Check = Literal["length", "count", "range"]
 

@@ -125,10 +125,15 @@ from src.db.repositories import (
     UserRepository,
 )
 from src.llm.registry import LlmModelRegistry
+from src.studio.chat.supervisor import ChatTaskSupervisor
 from src.studio.services.artist import ArtistService
+from src.studio.services.chat import ChatService
+from src.studio.services.chat_context import ArtistChatContextAssembler
+from src.studio.services.chat_events import StudioChatEvents
 from src.studio.services.export import ExportService
 from src.studio.services.importer import SunoImportService
 from src.studio.services.memory import MemoryService
+from src.studio.services.memory_draft import MemoryDraftService
 from src.studio.services.project import StudioProjectService
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
 from src.studio.services.run import StudioRunService
@@ -139,6 +144,7 @@ from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
 from src.workers.payment_currency_sync import PaymentCurrencySyncWorker
 from src.workers.push_dispatcher import PushDispatcher
+from src.workers.studio_chat import StudioChatSweepWorker
 from src.workers.studio_run import StudioRunWorker
 from src.workers.telegram_dispatcher import TelegramDispatcher
 from src.workers.telegram_link_poller import TelegramLinkPoller
@@ -204,6 +210,11 @@ class ServiceContainer:
     llm_registry: LlmModelRegistry | None = None
     llm_http_client: httpx.AsyncClient | None = None
     studio_run_worker: StudioRunWorker | None = None
+    # Studio artist chat (only when STUDIO_ENABLED and STUDIO_CHAT_ENABLED): the supervisor owns
+    # the asyncio tasks that write replies and memory drafts in THIS (API) process; the sweep
+    # worker fails and refunds the ones whose task died with its process.
+    studio_chat_supervisor: ChatTaskSupervisor | None = None
+    studio_chat_sweep_worker: StudioChatSweepWorker | None = None
     content_retention_worker: ContentRetentionWorker | None = None
     media_ingestor: MediaIngestService | None = None
     provider_video_ingestor: MediaIngestService | None = None
@@ -833,6 +844,38 @@ def get_studio_run_service(session: AsyncSession, settings: Settings) -> StudioR
     )
 
 
+def get_studio_chat_supervisor() -> ChatTaskSupervisor:
+    """Provide the chat task supervisor singleton (only reachable behind ``studio_chat_guard``)."""
+    if _services.studio_chat_supervisor is None:
+        raise RuntimeError("studio chat is not enabled")
+    return _services.studio_chat_supervisor
+
+
+def get_studio_chat_service(session: AsyncSession, settings: Settings) -> ChatService:
+    """Provide the studio ChatService per-request (commit-free; the route commits, then dispatches)."""
+    return ChatService(
+        session,
+        billing=get_billing_service(),
+        settings=settings,
+        events=StudioChatEvents(_services.event_bus),
+        assembler=ArtistChatContextAssembler(),
+        supervisor=get_studio_chat_supervisor(),
+    )
+
+
+def get_studio_memory_draft_service(
+    session: AsyncSession, settings: Settings
+) -> MemoryDraftService:
+    """Provide the studio MemoryDraftService per-request (commit-free, like the chat service)."""
+    return MemoryDraftService(
+        session,
+        billing=get_billing_service(),
+        settings=settings,
+        events=StudioChatEvents(_services.event_bus),
+        supervisor=get_studio_chat_supervisor(),
+    )
+
+
 def get_feedback_service(session: AsyncSession) -> FeedbackService:
     """Provide FeedbackService per-request (commit-free; the route commits, then publishes)."""
     return FeedbackService(session=session, ops_event_bus=get_ops_event_bus())
@@ -1030,6 +1073,53 @@ async def _start_studio_run_worker(
     )
     await worker.start()
     logger.info("studio_run_worker.started")
+    return worker
+
+
+def _build_studio_chat_supervisor(
+    settings: Settings, registry: LlmModelRegistry, http_client: httpx.AsyncClient
+) -> ChatTaskSupervisor:
+    """Build the chat task supervisor on the shared LLM registry and HTTP client.
+
+    The supervisor is handed port *builders*, not the registry: it names no model and no vendor.
+    """
+    from src.llm.factory import LlmClientFactory
+
+    if _services.db_manager is None:
+        raise RuntimeError("studio chat needs the database")
+    factory = LlmClientFactory(registry, http_client)
+    return ChatTaskSupervisor(
+        db_manager=_services.db_manager,
+        billing=get_billing_service(),
+        chat_port_for=factory.chat,
+        structured_port_for=factory,
+        events=StudioChatEvents(_services.event_bus),
+        shutdown_grace_seconds=settings.studio_chat_shutdown_grace_seconds,
+    )
+
+
+async def _start_studio_chat_sweep_worker(
+    settings: Settings, *, redis_enabled: bool
+) -> StudioChatSweepWorker:
+    """Build and start the worker that fails and refunds orphaned chat replies and drafts."""
+    from src.core.redis import get_operational_redis_client
+    from src.studio.chat.sweep import ChatSweeper
+
+    if _services.db_manager is None:
+        raise RuntimeError("studio chat sweep needs the database")
+    worker = StudioChatSweepWorker(
+        sweeper=ChatSweeper(
+            db_manager=_services.db_manager,
+            billing=get_billing_service(),
+            events=StudioChatEvents(_services.event_bus),
+            deadline_seconds=settings.studio_chat_reply_deadline_seconds,
+        ),
+        interval_seconds=settings.studio_chat_sweep_interval_seconds,
+        redis_enabled=redis_enabled,
+        redis_client_factory=get_operational_redis_client,
+    )
+    await worker.start()
+    logger.info("studio_chat_sweep_worker.started")
     return worker
 
 
@@ -1775,6 +1865,21 @@ async def init_services(settings: Settings) -> JWTService:
                 redis_enabled=redis_enabled,
             )
 
+    # Studio artist chat. Its own kill switch; the supervisor (the asyncio tasks that write replies)
+    # lives in every API process that serves the chat, whatever WORKER_MODE says, because a reply
+    # is written where the request was accepted. Only the sweep is a worker. No langgraph here, so
+    # no tracing guard: chat prompts reach the model provider and nowhere else by construction.
+    if settings.studio_chat_active:
+        if _services.llm_registry is None or _services.llm_http_client is None:
+            raise RuntimeError("studio chat needs the shared LLM registry")
+        _services.studio_chat_supervisor = _build_studio_chat_supervisor(
+            settings, _services.llm_registry, _services.llm_http_client
+        )
+        if workers_enabled:
+            _services.studio_chat_sweep_worker = await _start_studio_chat_sweep_worker(
+                settings, redis_enabled=redis_enabled
+            )
+
     # Initialize Web Push (requires VAPID keys + Redis — see Settings.push_enabled)
     if settings.push_enabled:
         if settings.vapid_private_key is None or settings.vapid_subject is None:
@@ -2042,6 +2147,14 @@ async def shutdown_services() -> None:
     if _services.studio_run_worker is not None:
         await _services.studio_run_worker.stop()
 
+    # In-flight chat replies are failed and refunded (server_shutdown) while the pool and the HTTP
+    # client are still open; then the sweep worker stops.
+    if _services.studio_chat_supervisor is not None:
+        await _services.studio_chat_supervisor.shutdown()
+        logger.info("studio_chat_supervisor.stopped")
+    if _services.studio_chat_sweep_worker is not None:
+        await _services.studio_chat_sweep_worker.stop()
+
     if _services.llm_http_client is not None:
         await _services.llm_http_client.aclose()
         logger.info("llm_http_client.closed")
@@ -2192,6 +2305,9 @@ dependencies = {
     "studio_export_service": Provide(get_studio_export_service, sync_to_thread=False),
     "studio_suno_import_service": Provide(get_suno_import_service, sync_to_thread=False),
     "studio_run_service": Provide(get_studio_run_service, sync_to_thread=False),
+    # Studio artist chat: reachable only behind STUDIO_CHAT_ENABLED (the supervisor exists then)
+    "studio_chat_service": Provide(get_studio_chat_service, sync_to_thread=False),
+    "studio_memory_draft_service": Provide(get_studio_memory_draft_service, sync_to_thread=False),
     # In-product problem reports
     "feedback_service": Provide(get_feedback_service, sync_to_thread=False),
     # Idempotency

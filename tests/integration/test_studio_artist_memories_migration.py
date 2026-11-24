@@ -33,6 +33,9 @@ if TYPE_CHECKING:
 _PATH = (
     Path(__file__).resolve().parents[2] / "alembic" / "versions" / "059_studio_artist_memories.py"
 )
+_PATH_060 = (
+    Path(__file__).resolve().parents[2] / "alembic" / "versions" / "060_studio_artist_chat.py"
+)
 _TABLE = "studio_artist_memories"
 _CHECKS = {
     "ck_studio_artist_memories_salience",
@@ -49,8 +52,8 @@ _OWNER_FK = "fk_studio_artist_memories_artist_owner"
 _OWNER_UNIQUE = "uq_studio_artists_id_owner"
 
 
-def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("revision_059", _PATH)
+def _load(path: Path = _PATH, name: str = "revision_059") -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -59,8 +62,15 @@ def _load() -> ModuleType:
 
 
 def _run(connection: Connection, action: str) -> None:
+    """059's ``upgrade`` / ``downgrade``, with 060 undone first and redone last: 060's chats
+    reference 059's unique key on the artists, so 059 cannot be undone underneath them."""
     with Operations.context(MigrationContext.configure(connection)):
+        chat = _load(_PATH_060, "revision_060")
+        if action == "downgrade":
+            chat.downgrade()
         getattr(_load(), action)()
+        if action == "upgrade":
+            chat.upgrade()
 
 
 async def _exists(connection: AsyncConnection) -> bool:

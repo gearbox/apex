@@ -1051,3 +1051,49 @@ class StudioRunStage(StrEnum):
     VALIDATING = "validating"
     REVISING = "revising"
     SAVING = "saving"
+
+
+class StudioChatRole(StrEnum):
+    """Who wrote a chat message (artist chat, S1-P2c)."""
+
+    USER = "user"
+    ARTIST = "artist"
+
+
+class StudioChatMessageStatus(StrEnum):
+    """A chat message is written once: a user message is born ``complete``; an artist message is
+    ``pending`` while its reply streams and ends ``complete`` or ``failed`` (terminal once)."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class StudioMemoryDraftStatus(StrEnum):
+    """Lifecycle of a memory draft (an LLM job over a chat message): terminal once."""
+
+    PENDING = "pending"
+    COMPLETE = "complete"
+    FAILED = "failed"
+
+
+class StudioLlmUsageKind(StrEnum):
+    """What one row of the studio's LLM usage ledger accounts for (hourly limits, S1-P2c R2).
+
+    One member per kind of accepted, priced LLM job; the CHECK on ``studio_llm_usage.kind`` is
+    generated from this enum.
+    """
+
+    CHAT_MESSAGE = "chat_message"
+    MEMORY_DRAFT = "memory_draft"
+    RUN = "run"
+
+    @classmethod
+    def chat(cls) -> tuple[StudioLlmUsageKind, ...]:
+        """The kinds that share the chat's hourly budget (``STUDIO_CHAT_JOBS_PER_USER_PER_HOUR``)."""
+        return (cls.CHAT_MESSAGE, cls.MEMORY_DRAFT)
+
+    @classmethod
+    def runs(cls) -> tuple[StudioLlmUsageKind, ...]:
+        """The kinds that count towards ``STUDIO_RUNS_PER_USER_PER_HOUR``."""
+        return (cls.RUN,)

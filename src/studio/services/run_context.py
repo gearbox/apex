@@ -14,25 +14,21 @@ from __future__ import annotations
 
 from typing import TYPE_CHECKING
 
-from src.core.enums import StudioMemoryStatus
 from src.core.product_registry import get_product_config_by_slug
 from src.db.repositories.studio import (
-    StudioArtistMemoryRepository,
     StudioArtistRepository,
     StudioProjectRepository,
     StudioTrackRepository,
 )
-from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST
 from src.studio.planner.context import (
     ArtistContext,
-    ArtistSnapshot,
     PlanSectionSummary,
     PlanSummary,
     RunContextRequest,
     RunContextSnapshot,
 )
-from src.studio.planner.memories import select_memories
-from src.studio.services.mappers import decode_plan, memory_snapshot, require_current_rows
+from src.studio.services.mappers import artist_snapshot, decode_plan, require_current_rows
+from src.studio.services.memory_selection import ArtistMemorySelector
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -73,57 +69,22 @@ class MemoryArtistContextProvider:
                 profile.artist_id, user_id=request.user_id, product_id=request.product_id
             )
             if row is not None:
-                artist = ArtistSnapshot(
-                    id=row.id,
-                    name=row.name,
-                    persona=row.persona,
-                    voice_notes=row.voice_notes,
-                    default_language=row.default_language,
-                    style_tags=tuple(row.style_tags),
-                    global_avoid=tuple(row.global_avoid),
-                    aesthetic_references=tuple(row.aesthetic_references),
-                    updated_at=row.updated_at,
+                artist = artist_snapshot(row)
+                selection = await ArtistMemorySelector().select(
+                    session,
+                    row.id,
+                    user_id=request.user_id,
+                    product_id=request.product_id,
+                    pins=request.memory_ids,
+                    auto_fill=request.auto_fill,
                 )
-                memories, unavailable = await self._select(session, row.id, request)
+                memories, unavailable = selection.memories, selection.unavailable_ids
         return ArtistContext(
             artist=artist,
             concept=profile.concept,
             memories=memories,
             unavailable_memory_ids=unavailable,
         )
-
-    @staticmethod
-    async def _select(
-        session: AsyncSession, artist_id: UUID, request: RunContextRequest
-    ) -> tuple[tuple[MemorySnapshot, ...], tuple[UUID, ...]]:
-        """The selected memories, and the pinned ids that did not make it (request order)."""
-        repo = StudioArtistMemoryRepository(session)
-        active = {
-            memory.id: memory
-            for memory in await repo.get_many_owned(
-                request.memory_ids,
-                artist_id=artist_id,
-                user_id=request.user_id,
-                product_id=request.product_id,
-            )
-            if memory.status == StudioMemoryStatus.ACTIVE.value
-        }
-        pinned = tuple(memory_snapshot(active[i]) for i in request.memory_ids if i in active)
-        candidates: tuple[MemorySnapshot, ...] = ()
-        if request.auto_fill:
-            candidates = tuple(
-                memory_snapshot(memory)
-                for memory in await repo.active_in_selection_order(
-                    artist_id,
-                    user_id=request.user_id,
-                    product_id=request.product_id,
-                    exclude=request.memory_ids,
-                    limit=MAX_ACTIVE_MEMORIES_PER_ARTIST,
-                )
-            )
-        chosen = select_memories(pinned, candidates, auto_fill=request.auto_fill)
-        used = {memory.id for memory in chosen}
-        return chosen, tuple(i for i in request.memory_ids if i not in used)
 
 
 def _summary(plan: PlanDocument) -> PlanSummary:

@@ -147,6 +147,11 @@ class MemoryCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Concrete sensory details the planner may borrow obliquely."""
     salience: _Salience = 3
     """1-5: how readily the planner reaches for this memory when it fills the budget itself."""
+    from_draft_id: UUID | None = None
+    """The memory draft this memory was written from (``POST /v1/studio/chat-messages/{id}/memory-draft``).
+    Set, the server checks the draft is the caller's, ``complete`` and from a chat of **this**
+    artist, and stores the memory with ``origin = chat``; the client still sends the (edited) fields.
+    Omitted, ``origin = user``. Never a way to set ``origin`` directly."""
 
 
 class MemoryPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):

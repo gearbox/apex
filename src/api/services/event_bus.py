@@ -221,5 +221,5 @@ class EventBus:
             # the call that returns the connection to the SSE pool.
             with suppress(RedisError, OSError):
                 await pubsub.unsubscribe(user_channel, self.SYSTEM_CHANNEL)
-            await pubsub.aclose()  # type: ignore[no-untyped-call]
+            await pubsub.aclose()
             logger.info("event_bus.unsubscribed", user_id=str(user_id))

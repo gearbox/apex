@@ -12,8 +12,14 @@ from sqlalchemy.exc import IntegrityError
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.owner_scoped_names import normalize_owner_scoped_name
 from src.db.repositories.studio import StudioArtistRepository
+from src.db.repositories.studio_chat import (
+    StudioChatMessageRepository,
+    StudioChatRepository,
+    StudioMemoryDraftRepository,
+)
 from src.studio.constraints import TOO_LONG, collect_length_issues
 from src.studio.errors import (
+    ArtistBusy,
     ArtistInUse,
     ArtistLimitReached,
     ArtistNameConflict,
@@ -61,6 +67,9 @@ class ArtistService:
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._repo = StudioArtistRepository(session)
+        self._chats = StudioChatRepository(session)
+        self._messages = StudioChatMessageRepository(session)
+        self._drafts = StudioMemoryDraftRepository(session)
 
     async def list_page(
         self, user_id: UUID, product_id: str, *, limit: int, cursor: str | None
@@ -230,9 +239,43 @@ class ArtistService:
         return artist_out(updated)
 
     async def delete(self, artist_id: UUID, user_id: UUID, product_id: str) -> None:
-        artist = await self._repo.get(artist_id, user_id=user_id, product_id=product_id)
+        """Delete an artist; its memories, chats, messages and memory drafts go with it.
+
+        Refused while paid work is in flight (R1): a pending chat reply or memory draft has
+        reserved tokens and a task is about to write it, and the cascade
+        ``artist → chats → messages / drafts`` would delete the row that the supervisor's and the
+        sweep's guarded ``pending → failed`` update (and with it the refund) hang off. The
+        precedents are ``TrackService.delete`` (``RunInProgress``) and ``ChatService.delete``
+        (``ChatBusy``): refuse, and the user retries in a few seconds.
+
+        Lock order is artist → chats (→ messages), as everywhere: the artist row, then every
+        chat of the artist in id order. A send or a draft request holds its chat's lock until it
+        commits, so this waits for it and then sees the pending row; one that arrives later waits
+        for this transaction and finds no chat (``404``). Without the chat locks a send that
+        commits between the pending check and the ``DELETE`` would be cascaded away with its
+        reservation. Pending work is checked **before** the project check, so a busy artist that
+        is also in use reports ``artist_busy``.
+
+        Raises:
+            ArtistNotFound: No such artist for the caller.
+            ArtistBusy: A chat reply or a memory draft of the artist is pending.
+            ArtistInUse: A project uses the artist.
+        """
+        artist = await self._repo.lock(artist_id, user_id=user_id, product_id=product_id)
         if artist is None:
             raise ArtistNotFound
+        chat_ids = await self._chats.lock_for_artist(
+            artist_id, user_id=user_id, product_id=product_id
+        )
+        if chat_ids and (
+            await self._messages.has_pending_reply_for_artist(
+                artist_id, user_id=user_id, product_id=product_id
+            )
+            or await self._drafts.has_pending_for_artist(
+                artist_id, user_id=user_id, product_id=product_id
+            )
+        ):
+            raise ArtistBusy
         in_use = await self._repo.count_profiles_using(
             artist_id, user_id=user_id, product_id=product_id
         )
@@ -251,6 +294,6 @@ class ArtistService:
             if not in_use:
                 raise
             raise ArtistInUse(in_use) from exc
-        if not deleted:
+        if not deleted:  # pragma: no cover - the row lock above rules out a concurrent delete
             raise ArtistNotFound
         logger.info("studio.artist_deleted", artist_id=str(artist_id), user_id=str(user_id))

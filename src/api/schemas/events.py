@@ -53,6 +53,9 @@ class EventType(StrEnum):
     GPU_DEPLOYMENT_STATUS_CHANGED = "gpu_session.deployment_status_changed"
     GPU_SESSION_OPERATION_UPDATED = "gpu_session.operation_updated"
     STUDIO_RUN_UPDATED = "studio.run.updated"
+    STUDIO_CHAT_DELTA = "studio.chat.delta"
+    STUDIO_CHAT_MESSAGE_UPDATED = "studio.chat.message.updated"
+    STUDIO_MEMORY_DRAFT_UPDATED = "studio.memory_draft.updated"
 
 
 # --- Payloads ---
@@ -148,6 +151,44 @@ class StudioRunUpdatedPayload(msgspec.Struct, kw_only=True):
     stage: str | None
     revision: int
     error_code: str | None = None
+
+
+class StudioChatDeltaPayload(msgspec.Struct, kw_only=True):
+    """A piece of an artist reply that is being written (``studio.chat.delta``).
+
+    ``text`` is the artist's words - user-visible content: published on the owner's channel only
+    and never logged. A client appends deltas of one ``message_id`` in ``seq`` order (1, 2, 3 ...,
+    no gaps); on a gap, or when ``studio.chat.message.updated`` reports a newer ``revision``, it
+    reloads the message with ``GET /v1/studio/chat-messages/{id}``. Delivery is lossy.
+    """
+
+    chat_id: UUID
+    message_id: UUID
+    seq: int
+    text: str
+
+
+class StudioChatMessageUpdatedPayload(msgspec.Struct, kw_only=True):
+    """A chat message changed status (``studio.chat.message.updated``): ids and a status only.
+
+    Sent when the artist message is created ``pending`` and when it ends ``complete`` or
+    ``failed``; the text is read with ``GET`` (never carried here).
+    """
+
+    chat_id: UUID
+    message_id: UUID
+    status: str
+    revision: int
+
+
+class StudioMemoryDraftUpdatedPayload(msgspec.Struct, kw_only=True):
+    """A memory draft changed status (``studio.memory_draft.updated``): ids and a status only."""
+
+    draft_id: UUID
+    chat_id: UUID
+    source_message_id: UUID
+    status: str
+    revision: int
 
 
 # --- Envelope ---

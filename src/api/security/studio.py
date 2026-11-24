@@ -18,7 +18,7 @@ if TYPE_CHECKING:
 
     from src.core.product import ProductConfig
 
-__all__ = ["STUDIO_FEATURE", "studio_feature_guard", "studio_runs_guard"]
+__all__ = ["STUDIO_FEATURE", "studio_chat_guard", "studio_feature_guard", "studio_runs_guard"]
 
 STUDIO_FEATURE: Final = "studio"
 
@@ -61,4 +61,23 @@ async def studio_runs_guard(
         NotFoundException: Planner runs are disabled.
     """
     if not get_settings().studio_runs_enabled:
+        raise NotFoundException()
+
+
+async def studio_chat_guard(
+    _connection: ASGIConnection[Any, Any, Any, Any], _handler: BaseRouteHandler
+) -> None:
+    """Raise 404 unless ``STUDIO_CHAT_ENABLED`` is on (the separate switch of the artist chat).
+
+    Runs after :func:`studio_feature_guard` and before ``auth_guard``, so a disabled chat is as
+    invisible as a disabled studio.
+
+    Args:
+        _connection: ASGI connection (unused).
+        _handler: Route handler (unused).
+
+    Raises:
+        NotFoundException: The artist chat is disabled.
+    """
+    if not get_settings().studio_chat_enabled:
         raise NotFoundException()

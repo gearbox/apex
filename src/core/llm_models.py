@@ -23,6 +23,7 @@ __all__ = [
     "parse_model_entries",
     "validate_model_entries",
     "validate_model_keys",
+    "validate_streaming_keys",
 ]
 
 PROTECTED_BODY_KEYS: Final = frozenset({"model", "messages", "response_format"})
@@ -48,6 +49,10 @@ class LlmModelEntry(Struct, frozen=True, kw_only=True, forbid_unknown_fields=Tru
     extra_body: dict[str, Any] = {}
     """Merged into the request body last; may not replace ``model`` / ``messages`` /
     ``response_format``."""
+    supports_streaming: bool = False
+    """Whether the endpoint streams a chat completion (``stream: true``, server-sent events). A
+    consumer that streams its replies needs a model with this set; its startup check refuses one
+    without it (``validate_streaming_keys``)."""
 
 
 def parse_model_entries(raw: Mapping[str, Mapping[str, Any]]) -> dict[str, LlmModelEntry]:
@@ -115,3 +120,21 @@ def validate_model_keys(
     for key in keys:
         if key not in entries:
             raise LlmRegistryError(f"{setting} is not a key of llm_models")
+
+
+def validate_streaming_keys(
+    setting: str, keys: Iterable[str], entries: Mapping[str, LlmModelEntry]
+) -> None:
+    """Every key must be a registry entry **that streams** (``supports_streaming``).
+
+    A consumer that streams its replies checks its routing setting with this, so a model without
+    streaming is a startup error naming the setting, never a failure on the first reply.
+
+    Raises:
+        LlmRegistryError: A key is not one of ``entries``, or its entry does not stream.
+    """
+    keys = list(keys)
+    validate_model_keys(setting, keys, entries)
+    for key in keys:
+        if not entries[key].supports_streaming:
+            raise LlmRegistryError(f"{setting} names a model without supports_streaming")

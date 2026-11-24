@@ -99,7 +99,7 @@ async def _redis_stream() -> AsyncGenerator[dict[str, str]]:
         # returns the connection to the SSE pool.
         with suppress(RedisError, OSError):
             await pubsub.unsubscribe(HEALTH_STREAM_CHANNEL)
-        await pubsub.aclose()  # type: ignore[no-untyped-call]
+        await pubsub.aclose()
 
 
 async def _polling_stream(

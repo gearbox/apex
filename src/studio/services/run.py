@@ -21,10 +21,15 @@ import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
+from src.core.enums import StudioLlmUsageKind
 from src.core.uid import new_id
 from src.db.integrity import violated_constraint
 from src.db.models.studio import RUN_ONE_ACTIVE_PER_TRACK, RUN_USER_IDEMPOTENCY
-from src.db.repositories.studio import StudioRunRepository, StudioTrackRepository
+from src.db.repositories.studio import (
+    StudioLlmUsageRepository,
+    StudioRunRepository,
+    StudioTrackRepository,
+)
 from src.studio.errors import (
     IdempotencyConflict,
     IdempotencyKeyRequired,
@@ -107,6 +112,7 @@ class StudioRunService:
         self._events = events
         self._runs = StudioRunRepository(session)
         self._tracks = StudioTrackRepository(session)
+        self._usage = StudioLlmUsageRepository(session)
 
     # -- submit ------------------------------------------------------------------------------
 
@@ -152,7 +158,8 @@ class StudioRunService:
             PlanVersionNotFound: The named plan is not a plan version of this track.
             LyricsRequired: ``revise_lyrics`` without lyrics to revise.
             LyricsVersionNotFound: The named lyrics are not a lyrics version of this track.
-            RunRateLimited: Too many runs were created in the last hour.
+            RunRateLimited: Too many runs were accepted in the last hour (the usage ledger, so
+                deleting a track does not reset it).
             RunLimitReached: The user has too many active runs.
             RunInProgress: The track already has an active run.
             InsufficientBalanceError: The reservation was refused (``402``).
@@ -180,8 +187,13 @@ class StudioRunService:
         await check_memory_pins(intake_context, track.library_project_id, normalized.memory_ids)
 
         await self._runs.lock_user_quota(user_id)
+        # The hourly count reads the usage ledger, not the run rows: deleting a track cascades its
+        # finished runs and must not reset the limit (R2). Rows that no longer count are purged
+        # first, under the same lock.
+        kinds = StudioLlmUsageKind.runs()
+        await self._usage.purge_older_than_hour(user_id=user_id, product_id=product_id, kinds=kinds)
         if (
-            await self._runs.count_created_in_last_hour(user_id=user_id, product_id=product_id)
+            await self._usage.count_last_hour(user_id=user_id, product_id=product_id, kinds=kinds)
             >= self._settings.studio_runs_per_user_per_hour
         ):
             raise RunRateLimited
@@ -268,6 +280,11 @@ class StudioRunService:
                 )
                 await self._runs.set_billing_account(run.id, account.id)
                 balance_event = reserved.event
+            # Accepted: it counts towards the hourly limit however the run ends (a 402 above
+            # rolls this savepoint back with the run).
+            await self._usage.record(
+                user_id=user_id, product_id=product_id, kind=StudioLlmUsageKind.RUN
+            )
         logger.info(
             "studio.run.submitted",
             run_id=str(run.id),

@@ -147,7 +147,16 @@ def test_no_model_id_or_vendor_literal_in_the_shared_layer(path: Path) -> None:
 
 _LOGGER_METHODS = frozenset({"debug", "info", "warning", "warn", "error", "exception", "critical"})
 _LOG_FIELDS = frozenset(
-    {"model_key", "status_code", "duration_ms", "prompt_tokens", "completion_tokens", "attempt"}
+    {
+        "model_key",
+        "status_code",
+        "duration_ms",
+        "prompt_tokens",
+        "completion_tokens",
+        "attempt",
+        "finish_reason",  # why a stream stopped: a provider's short label, never text
+        "delivered",  # whether any text had been handed on when a stream failed: a flag
+    }
 )
 _PORT_ERRORS = frozenset(
     {"LlmUnavailable", "LlmRejected", "LlmOutputInvalid", "LlmOutputTruncated"}
