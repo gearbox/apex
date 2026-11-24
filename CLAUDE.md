@@ -635,12 +635,12 @@ LLM_MODELS={"grok":{"base_url":"https://api.x.ai/v1","api_key_env":"XAI_API_KEY"
 
 # Studio planner runs — LLM spend, separate kill switch (briefs go to the configured provider; see docs/CONFIGURATION.md)
 STUDIO_RUNS_ENABLED=false
-# STUDIO_LLM_MODEL_BY_KIND={}   # optional run kind -> LLM_MODELS key; otherwise LLM_DEFAULT_MODEL
+STUDIO_LLM_MODEL_BY_KIND={"plan":"qwen"}   # run kind -> LLM_MODELS key (compose default); a kind without an entry uses LLM_DEFAULT_MODEL
 STUDIO_RUN_PRICES={"plan":1,"lyrics":1,"revise_lyrics":1}
 
 # Studio artist chat — LLM spend, its own kill switch (chat text goes to the configured provider + our Redis; see docs/CONFIGURATION.md)
 STUDIO_CHAT_ENABLED=false
-# STUDIO_CHAT_MODEL=grok            # an LLM_MODELS key whose entry has "supports_streaming": true (default LLM_DEFAULT_MODEL)
+STUDIO_CHAT_MODEL=grok              # (compose default; qwen to switch) an LLM_MODELS key whose entry has "supports_streaming": true (default LLM_DEFAULT_MODEL)
 STUDIO_CHAT_MESSAGE_PRICE=1         # + STUDIO_MEMORY_DRAFT_PRICE, STUDIO_CHAT_MAX_OUTPUT_TOKENS, ..._REPLY_DEADLINE_SECONDS, ..._MAX_PENDING_PER_USER, ..._JOBS_PER_USER_PER_HOUR
 
 # Alibaba Model Studio / Wan (empty URL or key = provider disabled; see docs/CONFIGURATION.md)

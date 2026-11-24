@@ -124,6 +124,24 @@ services:
       WAN_MODERATION_BILLING_POLICY: ${WAN_MODERATION_BILLING_POLICY:-refund}
       WAN_UNDELIVERED_OUTPUT_BILLING_POLICY: ${WAN_UNDELIVERED_OUTPUT_BILLING_POLICY:-charge}
 
+      # Media Project Studio + the shared LLM registry (src/llm) — see docs/CONFIGURATION.md.
+      # Every kill switch defaults off. JSON values need a valid JSON default: an empty
+      # string is a startup error for a JSON setting. API keys are NOT set here:
+      # LLM_MODELS names the env vars that hold them (XAI_API_KEY, MODEL_STUDIO_API_KEY).
+      STUDIO_ENABLED: ${STUDIO_ENABLED:-false}
+      STUDIO_RUNS_ENABLED: ${STUDIO_RUNS_ENABLED:-false}
+      STUDIO_CHAT_ENABLED: ${STUDIO_CHAT_ENABLED:-false}
+      LLM_MODELS: ${LLM_MODELS:-{}}
+      LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-grok}
+      # Planner runs: plan → qwen (grok plan runs hit the 180 s deadline); other kinds use
+      # LLM_DEFAULT_MODEL. Set {} to send every kind to the default model.
+      STUDIO_LLM_MODEL_BY_KIND: ${STUDIO_LLM_MODEL_BY_KIND:-{"plan":"qwen"}}
+      # Artist chat: grok by default; set STUDIO_CHAT_MODEL=qwen to switch (both stream).
+      STUDIO_CHAT_MODEL: ${STUDIO_CHAT_MODEL:-grok}
+      STUDIO_CHAT_MODEL_BY_PRODUCT: ${STUDIO_CHAT_MODEL_BY_PRODUCT:-{}}
+      # Memory drafts follow the chat model unless set.
+      STUDIO_MEMORY_DRAFT_MODEL: ${STUDIO_MEMORY_DRAFT_MODEL:-${STUDIO_CHAT_MODEL:-grok}}
+
       # Cloudflare R2 Storage
       R2_ACCOUNT_ID: ${R2_ACCOUNT_ID:-}
       R2_ACCESS_KEY_ID: ${R2_ACCESS_KEY_ID:-}
