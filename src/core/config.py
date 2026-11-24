@@ -2,6 +2,7 @@
 
 import base64
 import binascii
+import json
 from functools import lru_cache
 from pathlib import Path
 from typing import Annotated, Any, Literal
@@ -12,7 +13,8 @@ from cryptography.exceptions import UnsupportedAlgorithm
 from cryptography.hazmat.primitives.asymmetric import rsa
 from cryptography.hazmat.primitives.serialization import load_pem_private_key
 from pydantic import BaseModel, BeforeValidator, Field, SecretStr, computed_field, model_validator
-from pydantic_settings import BaseSettings, SettingsConfigDict
+from pydantic_core import PydanticUseDefault
+from pydantic_settings import BaseSettings, NoDecode, SettingsConfigDict
 
 from src.core.constants import (
     MIN_PROVISIONING_SCRIPT_TAG,
@@ -65,6 +67,32 @@ OptionalNonBlankStr = Annotated[str | None, BeforeValidator(_empty_string_to_non
 # Compose passes unset optionals through as empty strings (`${VAR:-}`); these must read as unset.
 OptionalInt = Annotated[int | None, BeforeValidator(_empty_string_to_none)]
 OptionalSecretStr = Annotated[SecretStr | None, BeforeValidator(_empty_string_to_none)]
+
+
+def _json_object_or_default(value: object) -> object:
+    """Decode a JSON env value; a blank one means "use the field's default".
+
+    Compose cannot carry a JSON default safely: older Compose releases (seen on 2.17;
+    fixed by 2.24) end
+    ``${VAR:-{}}`` at the first ``}``, so a *set* ``VAR`` reaches the process with a
+    stray ``}`` appended. The compose files therefore pass ``${VAR:-}`` and the default
+    lives here. ``NoDecode`` stops pydantic-settings decoding the value first, so a
+    blank value is not a JSON error. Values that are not strings (init kwargs, tests)
+    pass through unchanged.
+    """
+    if not isinstance(value, str):
+        return value
+    if not value.strip():
+        raise PydanticUseDefault
+    try:
+        return json.loads(value)
+    except json.JSONDecodeError as exc:
+        # The message never quotes the value: LLM_MODELS can name secret env vars.
+        raise ValueError("must be a JSON object") from exc
+
+
+# A JSON-object setting that compose may pass as an empty string (see above).
+JsonFromEnv = (NoDecode, BeforeValidator(_json_object_or_default))
 
 
 def parse_github_repo_url(url: str) -> tuple[str, str] | None:
@@ -976,7 +1004,7 @@ class Settings(BaseSettings):
     # -------------------------------------------------------------------------
     # Shared LLM registry (src/llm) - used by every feature that calls a chat model
     # -------------------------------------------------------------------------
-    llm_models: dict[str, dict[str, Any]] = Field(
+    llm_models: Annotated[dict[str, dict[str, Any]], *JsonFromEnv] = Field(
         default_factory=dict,
         description=(
             "Model registry (env LLM_MODELS, a JSON object): key -> {base_url, api_key_env, "
@@ -1012,7 +1040,7 @@ class Settings(BaseSettings):
             "LLM_DEFAULT_MODEL (and STUDIO_LLM_MODEL_BY_KIND, if set) to be valid when true."
         ),
     )
-    studio_llm_model_by_kind: dict[StudioRunKind, str] = Field(
+    studio_llm_model_by_kind: Annotated[dict[StudioRunKind, str], *JsonFromEnv] = Field(
         default_factory=dict,
         description=(
             "Optional run kind -> LLM_MODELS key (env STUDIO_LLM_MODEL_BY_KIND), e.g. "
@@ -1072,7 +1100,7 @@ class Settings(BaseSettings):
             "LLM_DEFAULT_MODEL. The entry must have supports_streaming."
         ),
     )
-    studio_chat_model_by_product: dict[str, str] = Field(
+    studio_chat_model_by_product: Annotated[dict[str, str], *JsonFromEnv] = Field(
         default_factory=dict,
         description=(
             "Optional product slug -> LLM_MODELS key (env STUDIO_CHAT_MODEL_BY_PRODUCT), e.g. "

@@ -20,7 +20,8 @@
 #
 # Optional, Media Project Studio (all off by default; see .env.staging.example):
 #   STUDIO_ENABLED / STUDIO_RUNS_ENABLED / STUDIO_CHAT_ENABLED   true to switch on
-#   LLM_MODELS              JSON model registry (needs a "qwen" entry: plan runs use it)
+#   LLM_MODELS              JSON model registry (with a "qwen" entry for plan runs)
+#   STUDIO_LLM_MODEL_BY_KIND {"plan":"qwen"} to send plan runs to qwen (unset = default model)
 #   MODEL_STUDIO_API_KEY    Alibaba Model Studio key (Wan video and the qwen entry)
 #   STUDIO_CHAT_MODEL       grok (default) or qwen; memory drafts follow it unless
 #                           STUDIO_MEMORY_DRAFT_MODEL is set (nested default: Compose v2)
@@ -201,20 +202,21 @@ services:
       WAN_UNDELIVERED_OUTPUT_BILLING_POLICY: ${WAN_UNDELIVERED_OUTPUT_BILLING_POLICY:-charge}
 
       # Media Project Studio + the shared LLM registry (src/llm) — see docs/CONFIGURATION.md.
-      # Every kill switch defaults off. JSON values need a valid JSON default: an empty
-      # string is a startup error for a JSON setting. API keys are NOT set here:
-      # LLM_MODELS names the env vars that hold them (XAI_API_KEY, MODEL_STUDIO_API_KEY).
+      # Every kill switch defaults off. API keys are NOT set here: LLM_MODELS names the env
+      # vars that hold them (XAI_API_KEY, MODEL_STUDIO_API_KEY).
+      # JSON settings default to EMPTY here, never to JSON: older Compose (2.17) ends ${VAR:-{}} at
+      # the first "}" and appends a stray "}" to a set value. Settings reads blank as "default".
       STUDIO_ENABLED: ${STUDIO_ENABLED:-false}
       STUDIO_RUNS_ENABLED: ${STUDIO_RUNS_ENABLED:-false}
       STUDIO_CHAT_ENABLED: ${STUDIO_CHAT_ENABLED:-false}
-      LLM_MODELS: ${LLM_MODELS:-{}}
+      LLM_MODELS: ${LLM_MODELS:-}
       LLM_DEFAULT_MODEL: ${LLM_DEFAULT_MODEL:-grok}
-      # Planner runs: plan → qwen (grok plan runs hit the 180 s deadline); other kinds use
-      # LLM_DEFAULT_MODEL. Set {} to send every kind to the default model.
-      STUDIO_LLM_MODEL_BY_KIND: ${STUDIO_LLM_MODEL_BY_KIND:-{"plan":"qwen"}}
+      # Planner runs: set STUDIO_LLM_MODEL_BY_KIND={"plan":"qwen"} in the env file / stack
+      # environment (the templates do); unset, every run kind uses LLM_DEFAULT_MODEL.
+      STUDIO_LLM_MODEL_BY_KIND: ${STUDIO_LLM_MODEL_BY_KIND:-}
       # Artist chat: grok by default; set STUDIO_CHAT_MODEL=qwen to switch (both stream).
       STUDIO_CHAT_MODEL: ${STUDIO_CHAT_MODEL:-grok}
-      STUDIO_CHAT_MODEL_BY_PRODUCT: ${STUDIO_CHAT_MODEL_BY_PRODUCT:-{}}
+      STUDIO_CHAT_MODEL_BY_PRODUCT: ${STUDIO_CHAT_MODEL_BY_PRODUCT:-}
       # Memory drafts follow the chat model unless set.
       STUDIO_MEMORY_DRAFT_MODEL: ${STUDIO_MEMORY_DRAFT_MODEL:-${STUDIO_CHAT_MODEL:-grok}}
       COMFYUI_HOST: ${COMFYUI_HOST:-host.docker.internal}

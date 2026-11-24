@@ -635,7 +635,7 @@ LLM_MODELS={"grok":{"base_url":"https://api.x.ai/v1","api_key_env":"XAI_API_KEY"
 
 # Studio planner runs — LLM spend, separate kill switch (briefs go to the configured provider; see docs/CONFIGURATION.md)
 STUDIO_RUNS_ENABLED=false
-STUDIO_LLM_MODEL_BY_KIND={"plan":"qwen"}   # run kind -> LLM_MODELS key (compose default); a kind without an entry uses LLM_DEFAULT_MODEL
+STUDIO_LLM_MODEL_BY_KIND={"plan":"qwen"}   # run kind -> LLM_MODELS key (set per deployment; blank = {}); a kind without an entry uses LLM_DEFAULT_MODEL
 STUDIO_RUN_PRICES={"plan":1,"lyrics":1,"revise_lyrics":1}
 
 # Studio artist chat — LLM spend, its own kill switch (chat text goes to the configured provider + our Redis; see docs/CONFIGURATION.md)
@@ -764,4 +764,5 @@ docker build -t apex-api:latest .
 - Multi-stage Dockerfile: builder (uv + deps) → runtime (slim)
 - Non-root `appuser` in production
 - Health check on `/health/live` (liveness probe)
+- **No JSON (no `{` / `}`) in a compose default.** Older Compose releases (seen on 2.17; fixed by 2.24) end `${VAR:-{}}` at the first `}` and append a stray `}` to a *set* value (staging failed to boot on `LLM_MODELS`). Pass a JSON setting as `${VAR:-}` and annotate its `Settings` field with `JsonFromEnv` (`src/core/config.py`): blank means the field's default. A default that is exactly another reference (`${A:-${B:-x}}`) is fine on 2.17; text around a nested reference is not (2.17 cannot parse `docker-compose.yml`'s `REDIS_URL` default — the Portainer stack, which staging runs, has none). `tests/unit/test_compose_studio_env.py` enforces this for every compose file.
 - `PYTHONPATH=/app` in container
