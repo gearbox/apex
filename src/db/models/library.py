@@ -22,7 +22,29 @@ from sqlalchemy.orm import Mapped, mapped_column
 from src.core.uid import new_id
 from src.db.models.base import Base
 
-__all__ = ["LibraryAssetMetadata", "LibraryAssetTag", "LibraryProject", "LibraryTag"]
+__all__ = [
+    "HOLD_ASSET_FKS",
+    "HOLD_OUTPUT_FK",
+    "HOLD_UNIQUES",
+    "HOLD_UPLOAD_FK",
+    "LibraryAssetHold",
+    "LibraryAssetMetadata",
+    "LibraryAssetTag",
+    "LibraryProject",
+    "LibraryTag",
+]
+
+HOLD_UPLOAD_FK = "fk_library_asset_holds_upload_id"
+HOLD_OUTPUT_FK = "fk_library_asset_holds_output_id"
+HOLD_ASSET_FKS = frozenset({HOLD_UPLOAD_FK, HOLD_OUTPUT_FK})
+"""The two asset foreign keys of ``library_asset_holds`` (upload / output).
+
+A foreign-key violation naming one of these means "a held asset was deleted" (on a delete) or "the
+asset vanished" (on a hold insert): every path maps it to a typed refusal, never a 500."""
+HOLD_UNIQUES = frozenset(
+    {"uq_library_asset_holds_upload_holder", "uq_library_asset_holds_output_holder"}
+)
+"""The two partial unique indexes: a violation means one holder holds one asset twice."""
 
 
 class LibraryAssetMetadata(Base):
@@ -254,3 +276,91 @@ class LibraryAssetTag(Base):
 
     def __repr__(self) -> str:
         return f"<LibraryAssetTag tag={self.tag_id} asset={self.asset_type}:{self.asset_id}>"
+
+
+class LibraryAssetHold(Base):
+    """A pin: some bounded context holds a library asset, so nothing may delete or sweep it.
+
+    The library knows a holder only as an opaque ``(holder_kind, holder_id)``: ``holder_kind`` is a
+    namespaced string (``"studio.cast_reference"``) and the library never imports the context
+    behind it (D12). The two asset columns are typed foreign keys on purpose: **the database
+    refuses to delete a held asset** (``ON DELETE NO ACTION``, checked at the end of the
+    statement), so no delete path has to remember a check, and a hold insert takes ``KEY SHARE``
+    on the asset row, which closes the race with a concurrent delete.
+
+    ``NO ACTION`` and not ``RESTRICT``: a user hard-delete removes the holds and the assets in one
+    cascading statement, and only ``NO ACTION`` lets that statement succeed.
+
+    Exactly one of ``upload_id`` / ``output_id`` is set. The two partial unique indexes make "the
+    same holder holds the same asset twice" unrepresentable and also serve the ``EXISTS (hold)``
+    lookups by asset (the retention sweep, the library ``held`` flag).
+    """
+
+    __tablename__ = "library_asset_holds"
+
+    id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        primary_key=True,
+        default=new_id,
+    )
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    upload_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "user_images.id",
+            name=HOLD_UPLOAD_FK,
+            ondelete="NO ACTION",
+        ),
+        nullable=True,
+    )
+    output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey(
+            "generation_outputs.id",
+            name=HOLD_OUTPUT_FK,
+            ondelete="NO ACTION",
+        ),
+        nullable=True,
+    )
+    holder_kind: Mapped[str] = mapped_column(String(48), nullable=False)
+    holder_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(upload_id, output_id) = 1",
+            name="ck_library_asset_holds_one_asset",
+        ),
+        Index(
+            "uq_library_asset_holds_upload_holder",
+            "upload_id",
+            "holder_kind",
+            "holder_id",
+            unique=True,
+            postgresql_where=text("upload_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_library_asset_holds_output_holder",
+            "output_id",
+            "holder_kind",
+            "holder_id",
+            unique=True,
+            postgresql_where=text("output_id IS NOT NULL"),
+        ),
+        Index("ix_library_asset_holds_holder", "holder_kind", "holder_id"),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LibraryAssetHold {self.id} holder={self.holder_kind}:{self.holder_id}>"

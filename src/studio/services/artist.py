@@ -11,7 +11,10 @@ from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.pagination import CursorPage, decode_cursor, encode_cursor
 from src.api.services.owner_scoped_names import normalize_owner_scoped_name
+from src.db.integrity import violated_constraint
+from src.db.models.studio import CAST_PERFORMER_FK
 from src.db.repositories.studio import StudioArtistRepository
+from src.db.repositories.studio_cast import StudioCastMemberRepository
 from src.db.repositories.studio_chat import (
     StudioChatMessageRepository,
     StudioChatRepository,
@@ -24,6 +27,7 @@ from src.studio.errors import (
     ArtistLimitReached,
     ArtistNameConflict,
     ArtistNotFound,
+    CastMemberNotFound,
     DocumentIssue,
     InvalidCursor,
     StudioDocumentInvalid,
@@ -61,12 +65,25 @@ def _normalize_name(raw: str, issues: list[DocumentIssue]) -> str:
         return ""
 
 
+def _artist_write_error(exc: IntegrityError) -> CastMemberNotFound | ArtistNameConflict:
+    """Which typed error an integrity failure of an artist insert / update is.
+
+    The performer foreign key fails when the cast member vanished between the existence check
+    and the write (it was deleted concurrently); every other failure is the name's unique index.
+    The constraint name is matched, never assumed.
+    """
+    if violated_constraint(exc, frozenset({CAST_PERFORMER_FK})) is not None:
+        return CastMemberNotFound()
+    return ArtistNameConflict()
+
+
 class ArtistService:
     """Business logic for artists. Methods take the owner scope explicitly."""
 
     def __init__(self, session: AsyncSession) -> None:
         self._session = session
         self._repo = StudioArtistRepository(session)
+        self._cast = StudioCastMemberRepository(session)
         self._chats = StudioChatRepository(session)
         self._messages = StudioChatMessageRepository(session)
         self._drafts = StudioMemoryDraftRepository(session)
@@ -134,6 +151,8 @@ class ArtistService:
             >= MAX_ARTISTS_PER_OWNER
         ):
             raise ArtistLimitReached
+        if data.performer_cast_member_id is not None:
+            await self._require_cast_member(data.performer_cast_member_id, user_id, product_id)
         try:
             async with self._session.begin_nested():
                 artist = await self._repo.insert(
@@ -146,9 +165,10 @@ class ArtistService:
                     aesthetic_references=style.aesthetic_references,
                     style_tags=style.style_tags,
                     global_avoid=style.global_avoid,
+                    performer_cast_member_id=data.performer_cast_member_id,
                 )
         except IntegrityError as exc:
-            raise ArtistNameConflict from exc
+            raise _artist_write_error(exc) from exc
         logger.info("studio.artist_created", artist_id=str(artist.id), user_id=str(user_id))
         return artist_out(artist)
 
@@ -188,6 +208,11 @@ class ArtistService:
         if data.default_language is not msgspec.UNSET:
             changes["default_language"] = data.default_language
         sent = dict(changes)  # what the client set, normalized: the RD6 length re-check input
+        performer = data.performer_cast_member_id
+        if performer is not msgspec.UNSET:
+            if performer is not None:
+                await self._require_cast_member(performer, user_id, product_id)
+            changes["performer_cast_member_id"] = performer
 
         # tags / avoid are validated as a pair: a new tag may now clash with the stored avoid list
         if (
@@ -227,7 +252,7 @@ class ArtistService:
                     artist_id, user_id=user_id, product_id=product_id, changes=changes
                 )
         except IntegrityError as exc:
-            raise ArtistNameConflict from exc
+            raise _artist_write_error(exc) from exc
         if updated is None:  # pragma: no cover - the row lock above rules out a concurrent delete
             raise ArtistNotFound
         logger.info(
@@ -237,6 +262,16 @@ class ArtistService:
             fields=[f for f in data.__struct_fields__ if getattr(data, f) is not msgspec.UNSET],
         )
         return artist_out(updated)
+
+    async def _require_cast_member(self, member_id: UUID, user_id: UUID, product_id: str) -> None:
+        """404 ``cast_member_not_found`` unless the caller has this cast member.
+
+        The artist does not lock the cast row: the foreign key's own ``KEY SHARE`` is enough
+        (and keeps the lock order artist → cast member), and a member deleted after this read
+        fails the FK, which ``_artist_write_error`` maps to the same 404.
+        """
+        if not await self._cast.exists_for_owner(member_id, user_id=user_id, product_id=product_id):
+            raise CastMemberNotFound
 
     async def delete(self, artist_id: UUID, user_id: UUID, product_id: str) -> None:
         """Delete an artist; its memories, chats, messages and memory drafts go with it.

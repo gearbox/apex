@@ -6,8 +6,9 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import and_, func, literal, or_, select, tuple_, update
+from sqlalchemy import and_, exists, func, literal, or_, select, tuple_, update
 
+from src.db.models.library import LibraryAssetHold
 from src.db.models.storage import UserImage
 from src.db.repositories.base import BaseRepository
 
@@ -279,16 +280,19 @@ class UserImageRepository(BaseRepository[UserImage]):
         before: datetime | None = None,
         limit: int = 1000,
     ) -> Sequence[UserImage]:
-        """Get full (non-thumbnail) images past their expiration date.
+        """Lock and return the full images the retention sweep may delete.
 
-        Thumbnails are excluded — they cascade-delete with their parent.
+        Thumbnails are excluded - they cascade-delete with their parent. An image is returned when
+        it is past its expiry and **has no hold** (``library_asset_holds``). The rows come back
+        ``FOR UPDATE SKIP LOCKED``: the sweep selects and deletes in one transaction, so the lock
+        lasts until its commit (see ``OutputRepository.get_expired`` for the race table).
 
         Args:
             before: Consider expired if expires_at < before (default: now).
             limit: Maximum results to return.
 
         Returns:
-            List of expired UserImage instances.
+            List of expired, unheld, row-locked UserImage instances.
         """
         if before is None:
             before = datetime.now(UTC)
@@ -298,9 +302,11 @@ class UserImageRepository(BaseRepository[UserImage]):
             .where(
                 UserImage.expires_at < before,
                 UserImage.is_thumbnail.is_(False),
+                ~exists().where(LibraryAssetHold.upload_id == UserImage.id),
             )
             .order_by(UserImage.expires_at)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
         return result.scalars().all()
 

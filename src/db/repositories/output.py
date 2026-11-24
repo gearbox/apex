@@ -6,8 +6,9 @@ from collections import defaultdict
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING
 
-from sqlalchemy import delete, func, literal, select, tuple_
+from sqlalchemy import exists, func, literal, select, tuple_
 
+from src.db.models.library import LibraryAssetHold
 from src.db.models.storage import GenerationOutput
 from src.db.repositories.base import BaseRepository
 
@@ -245,14 +246,22 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         before: datetime | None = None,
         limit: int = 1000,
     ) -> Sequence[GenerationOutput]:
-        """Get outputs past their expiration date.
+        """Lock and return the outputs the retention sweep may delete.
+
+        An output is returned when it is past its expiry, is not a thumbnail and **has no
+        hold** (``library_asset_holds``). The rows come back ``FOR UPDATE SKIP LOCKED``: the
+        sweep selects and deletes in one transaction, so the lock lasts until its commit. A row a
+        concurrent ``hold()`` / release / delete has locked is skipped now and seen next tick; a
+        hold that is committed before this statement starts is excluded by the ``NOT EXISTS``.
+        The one window left (a hold that commits between this snapshot and the row lock) ends in
+        the foreign key refusing the DELETE, which the sweep handles (``hold_conflict``).
 
         Args:
             before: Consider expired if expires_at < before (default: now).
             limit: Maximum results to return.
 
         Returns:
-            List of expired GenerationOutput instances.
+            List of expired, unheld, row-locked GenerationOutput instances.
         """
         if before is None:
             before = datetime.now(UTC)
@@ -262,9 +271,11 @@ class OutputRepository(BaseRepository[GenerationOutput]):
             .where(
                 GenerationOutput.expires_at < before,
                 GenerationOutput.is_thumbnail.is_(False),
+                ~exists().where(LibraryAssetHold.output_id == GenerationOutput.id),
             )
             .order_by(GenerationOutput.expires_at)
             .limit(limit)
+            .with_for_update(skip_locked=True)
         )
         return result.scalars().all()
 
@@ -289,27 +300,6 @@ class OutputRepository(BaseRepository[GenerationOutput]):
         await self._session.delete(output)
         await self._session.flush()
         return True
-
-    async def delete_batch(self, output_ids: list[UUID]) -> int:
-        """Delete multiple output records in a single round-trip.
-
-        Uses the DELETE statement's ``rowcount`` instead of a separate
-        COUNT query — avoids an extra DB round-trip and eliminates
-        drift under concurrent deletes.
-
-        Args:
-            output_ids: List of output IDs to delete.
-
-        Returns:
-            Number of records deleted.
-        """
-        if not output_ids:
-            return 0
-
-        result = await self._session.execute(
-            delete(GenerationOutput).where(GenerationOutput.id.in_(output_ids))
-        )
-        return result.rowcount or 0  # type: ignore[attr-defined]
 
     async def count_and_sum_by_user(self, user_id: UUID) -> tuple[int, int]:
         """Count full outputs and sum their size for a user.

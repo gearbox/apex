@@ -164,30 +164,6 @@ async def test_delete_output_not_found_returns_false(
     assert await output_repo.delete(uuid4()) is False
 
 
-async def test_delete_batch(output_repo: OutputRepository, make_user, make_job) -> None:
-    """delete_batch deletes multiple outputs and returns the count."""
-    user = await make_user(email=f"batchdel-{uuid4().hex[:6]}@example.com")
-    job = await make_job(user=user)
-    output_ids = []
-    for i in range(3):
-        out_id = uuid4()
-        await output_repo.create(
-            id=out_id,
-            user_id=user.id,
-            job_id=job.id,
-            storage_key=f"users/{user.id}/outputs/{job.id}/{out_id}.png",
-            content_type="image/png",
-            size_bytes=100,
-            format="png",
-            output_index=i,
-            expires_at=datetime.now(UTC) + timedelta(days=7),
-            product_id="vex",
-        )
-        output_ids.append(out_id)
-    deleted = await output_repo.delete_batch(output_ids)
-    assert deleted == 3
-
-
 async def test_get_expired(output_repo: OutputRepository, make_user, make_job) -> None:
     """get_expired returns outputs past their expires_at."""
     user = await make_user(email=f"expout-{uuid4().hex[:6]}@example.com")

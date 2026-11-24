@@ -1,6 +1,18 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-10-07 — **Server-side frame extraction and browser presigned-URL routes removed**
+> _Last updated: 2026-11-24 — **Asset holds (additive).** Any part of the product can *hold* a library
+> asset (today: Studio cast references, `docs/contracts/studio-contract.md` §14). A held asset is
+> never swept by retention, cannot be deleted, and gets its retention clock restarted when its last
+> hold goes. (1) `LibraryAssetItem` / `LibraryAssetDetail` / `LibraryOutputItem` gain a required
+> `held: boolean` (hide the expiry countdown while it is `true`; `expires_at` keeps its meaning).
+> (2) `DELETE /v1/library/assets/{asset_ref}` and `DELETE /v1/jobs/{job_id}` answer
+> `409 asset_held` with `detail.holders = [{kind, count}]` when the asset (or any output of the job)
+> is held; nothing is changed. (3) `POST /v1/library/assets/bulk` (`delete`): a held item is
+> `{success: false, error: "asset_held"}` and the rest of the batch continues; `BulkOperationItemResult`
+> gains `error: string | null` (`null` for success and for every other failure). Frontend should
+> regenerate types (`gen:api`)._
+>
+> _Prior (2026-10-07): **Server-side frame extraction and browser presigned-URL routes removed**
 > (Phase B, **breaking**, `0.50.0`; hard cutover — removed routes simply `404`, no `410` stubs).
 > Removed routes: `POST /v1/frames/preview`, `POST /v1/frames/extract`, `GET /v1/frames/jobs/{job_id}`;
 > `GET /v1/storage/uploads/{image_id}` (+ `/download`), `GET /v1/storage/outputs` (list),
@@ -1037,6 +1049,11 @@ Note:     For queued/running Grok video jobs this is poll-on-read. It also enfor
 Response: 204 No Content
 Errors:   404 (not found / not yours)
           409 job_in_progress — the job is still pending, queued or running
+          409 asset_held — an output of the job is held by another part of the product
+            (e.g. a Studio cast reference); detail.holders = [{ kind, count }] summed over the
+            job's outputs. Nothing is changed; release the hold (e.g. remove the cast
+            reference) and delete again. GET /v1/studio/cast?holding=<asset_ref> names the
+            holders of one output.
 Note:     Soft-hide a FINISHED job from history (idempotent). An in-flight job has already
           been charged and its upstream work cannot be stopped, so it cannot be deleted:
           "This job is still running and has already been charged. It can't be stopped.
@@ -1370,6 +1387,12 @@ Errors:   401 unauthorized (missing / empty / invalid Bearer token),
 > of Library list responses, and `GET /v1/content/...` (§9) for that ID returns `404`.
 > `expires_at` is a plain timestamp (not a countdown) so the frontend can derive and tick a
 > "Delete in N days/hours/minutes" badge client-side — see `LibraryAssetItem` (§10).
+>
+> **Held assets are exempt.** An asset that another part of the product holds (e.g. a Studio cast
+> reference) is skipped by the sweeper however old it is, and cannot be deleted
+> (`409 asset_held`, §10). `LibraryAssetItem.held` is `true` for it: hide the countdown. When the
+> **last** hold is released the retention clock restarts: `expires_at` becomes
+> `max(expires_at, now + RETENTION_DAYS)`.
 
 ### Uploads
 
@@ -1643,10 +1666,18 @@ Note:     Idempotent — clears favorite.
 ```
 Response: 204 No Content
 Errors:   404 not_found
+          409 asset_held — another part of the product holds the asset (e.g. a Studio
+            cast reference). detail = { holders: [{ kind: string, count: number }] }, ordered
+            by kind (kinds are namespaced, e.g. "studio.cast_reference"). NOTHING is changed:
+            the file, the favorite / title / project and the tags are all kept. To show the user
+            who holds it, ask the owning area (GET /v1/studio/cast?holding=<asset_ref>).
 Note:     Permanently deletes the file from R2 and the DB record (via the
           same ContentProxyService.delete_content used by the old
           DELETE /v1/content/{id}, §9), purges library_asset_metadata /
           library_asset_tags rows, and SETs NULL any lineage references.
+          The hold check comes BEFORE the purge, and the database refuses to delete
+          a held row (foreign keys), so even a hold that appears mid-request ends in
+          409 asset_held, never a 500.
 ```
 
 #### `POST /v1/library/assets/bulk`
@@ -1667,6 +1698,10 @@ Errors:   400 invalid_asset_refs (detail.invalid_refs lists every offending
             tags; detail.asset_refs lists the offenders, detail.cap = 20)
 Note:     Every ref is validated BEFORE anything executes — a single bad
           ref fails the whole request, never a silent partial skip.
+          `delete` reports each item: a HELD asset (see DELETE above) is
+          { success: false, error: "asset_held" } and the batch continues;
+          any other failure is { success: false, error: null }. `error` is
+          null on success.
           Duplicate refs (including mixed-case UUID duplicates) collapse
           to one occurrence. All ops except delete are naturally
           idempotent; delete is idempotent up to "already gone" — a retry
@@ -1727,7 +1762,8 @@ interface LibraryAssetItem {
   source: LibraryAssetSource;
   media: MediaObject;             // original + sm/md variants
   created_at: string;
-  expires_at: string;             // retention-cleanup deletion timestamp
+  expires_at: string;             // retention-cleanup deletion timestamp (hide the countdown while held)
+  held: boolean;                  // another part of the product holds it: not swept, not deletable (409 asset_held)
   display_title: string | null;
   original_filename: string | null;  // upload-only
   is_favorite: boolean;
@@ -1789,6 +1825,7 @@ interface LibraryOutputItem {
   output_index: number;
   created_at: string;
   expires_at: string;
+  held: boolean;                   // see LibraryAssetItem.held
   media: MediaObject;
 }
 
@@ -1850,7 +1887,7 @@ interface LibraryTagListItem extends LibraryTag {
 
 interface BulkOperationResult {
   op: string;            // "set_favorite" | "set_project" | "add_tags" | "remove_tags" | "delete"
-  results: { asset_ref: string; success: boolean }[];
+  results: { asset_ref: string; success: boolean; error: string | null }[];  // error: "asset_held" | null
   succeeded: number;
   failed: number;
 }

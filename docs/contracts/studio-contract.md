@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b / S1-P2c: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories, Artist chat)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b / S1-P2c / S1-P3: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories, Artist chat, Cast)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
-> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`), `feat/studio-artist-memories` (migration `059_studio_artist_memories`) and `feat/studio-artist-chat` (migration `060_studio_artist_chat`).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`), `feat/studio-artist-memories` (migration `059_studio_artist_memories`) and `feat/studio-artist-chat` (migration `060_studio_artist_chat`) and `feat/studio-cast` (migration `061_studio_cast_asset_holds`).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12) — and, behind its own switch, an **artist chat** (§13): "interview your artist", whose answers you can turn into new memories. **No audio, no Cast, no fan channels** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12) — and, behind its own switch, an **artist chat** (§13): "interview your artist", whose answers you can turn into new memories. and a **cast** (§14): people and characters with labelled reference images that the library keeps for as long as they are used. **No audio, no fan channels** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -18,6 +18,7 @@
 - `POST …/imports/suno` is the inverse: paste Suno's Style / Exclude / Lyrics boxes back and the server turns them into the track's next plan and lyrics versions (`origin: "import"`). Deterministic, no LLM, free; `dry_run` previews without writing (§10).
 - An artist can hold up to 200 **memories** (§12): episodes of its fictional life that planner runs use as *inspiration*. You pin the ones you want on a run and let the server fill the rest by salience, within a fixed budget.
 - You can **interview an artist** (§13): chats, with replies that stream in over the same SSE stream as everything else, a few tokens per message. Nothing said in a chat is canon until you save it: "turn this into a memory" drafts a memory from any message, and you edit and save it (`origin: "chat"`).
+- You can keep a **cast** (§14): up to 50 members per user, each with up to 12 labelled reference images from your library and up to 12 named looks. A reference **pins** its library asset: it is not swept by retention and cannot be deleted while a reference uses it (`409 asset_held`).
 - A plan has a track-level **`instrumental`** flag (independent of its sections and of the lyrics) and may have **no sections** at all (plan **schema v2**, §2.1).
 - Everything sits behind a feature flag: when studio is off for the product (or globally) **every** `/v1/studio/*` route answers `404`, even before authentication.
 
@@ -61,6 +62,7 @@ interface Artist {
   aesthetic_references: string[];    // ≤ 20 × ≤ 200 — planner context only, NEVER exported
   style_tags: string[];              // ≤ 40 × ≤ 60 — EXPORTED (vocal type, delivery …); an item that reads as a tempo ("120 BPM") is refused, see `reserved_tempo_tag` (§4)
   global_avoid: string[];            // ≤ 40 × ≤ 60 — EXPORTED into Suno's Exclude
+  performer_cast_member_id: UUID | null; // the cast member who performs this artist (§14); null = none
   created_at: ISODateTime;
   updated_at: ISODateTime;
 }
@@ -68,8 +70,9 @@ interface ArtistCreate {             // unknown fields → 400
   name: string;
   persona?: string | null; voice_notes?: string | null; default_language?: string | null;
   aesthetic_references?: string[]; style_tags?: string[]; global_avoid?: string[];
+  performer_cast_member_id?: UUID | null;   // must be one of the caller's cast members, else 404 cast_member_not_found
 }
-type ArtistPatch = Partial<ArtistCreate>;   // omitted = keep; null clears persona/voice_notes/default_language
+type ArtistPatch = Partial<ArtistCreate>;   // omitted = keep; null clears persona/voice_notes/default_language/performer_cast_member_id
 
 // ----- artist memories (§12) -----------------------------------------------------------
 type MemoryStatus = "active" | "archived";
@@ -209,6 +212,7 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | POST | `/artists/{id}/memories` | 201 `Memory` | max **200 active** per artist; `409 memory_limit_reached` — see §12 |
 | GET / PATCH | `/memories/{id}` | 200 `Memory` | PATCH also archives / restores (`status`) |
 | DELETE | `/memories/{id}` | 204 | always allowed, even while a run uses it — see §12 |
+| GET / POST / … | `/cast…` | see §14 | the cast: members, references, looks |
 | GET | `/projects` | 200 page of `ProjectProfile` | newest first |
 | GET | `/projects/{id}` | 200 `ProjectProfile` | `404` if studio is not enabled on that project |
 | PUT | `/projects/{id}` | **201** created / **200** replaced | `{id}` must be one of the caller's library projects |
@@ -317,11 +321,15 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid_cursor` | malformed `cursor` |
+| 400 | `invalid_asset_ref` | `?holding=` is not an asset ref (`upload:<uuid>` / `output:<uuid>`), §14 |
 | 404 | `not_found` | missing, someone else's, or another product's resource (never distinguishable) |
 | 404 | `artist_not_found` | `artist_id` is not one of the caller's artists |
 | 404 | `memory_not_found` | the memory is unknown, or belongs to another user, product or artist (never distinguishable, §12) |
 | 404 | `plan_version_not_found` | a `lyrics` run's `plan_version_id` is not a plan version of this track (§11) |
 | 404 | `lyrics_version_not_found` | a `revise_lyrics` run's `lyrics_version_id` is not a lyrics version of this track (§11) |
+| 404 | `cast_member_not_found` | the cast member is unknown, or belongs to another user or product (never distinguishable, §14) — also a `performer_cast_member_id` that is not the caller's |
+| 404 | `cast_reference_not_found` / `cast_look_not_found` | no such reference / look on that member (§14) |
+| 404 | `asset_not_found` | the library asset is missing, or someone else's, or another product's (never distinguishable, §14) |
 | 409 | `artist_name_conflict` | name already used (case-insensitive) |
 | 409 | `artist_limit_reached` | 50 artists |
 | 409 | `artist_busy` | a chat reply or a memory draft of the artist is still `pending` (it has been paid for and is about to be written): retry in a few seconds (§13) |
@@ -332,6 +340,11 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 409 | `plan_required` | lyrics made current without a plan; a `lyrics` run with no plan to write for (§11) |
 | 409 | `lyrics_required` | a `revise_lyrics` run on a track with no lyrics (§11) |
 | 409 | `version_in_use_by_run` | deleting the input of a run in progress (§6) |
+| 409 | `cast_name_taken` / `cast_label_taken` / `cast_look_name_taken` | the name (per owner) / label (per member) / look name (per member) is taken, case-insensitively (§14) |
+| 409 | `cast_limit_reached` | `detail: {kind: "members" \| "references" \| "looks", limit}` (§14) |
+| 409 | `cast_member_in_use` | an artist uses the member as its performer; `detail.blockers = [{code: "artists", count}]` (§14) |
+| 422 | `asset_not_eligible` | `detail.reason`: `derivative` \| `not_an_image` \| `job_not_available` (§14) |
+| 422 | `invalid_order` | `reference_ids` is not exactly the member's references, each once (§14) |
 | 422 | `track_order_mismatch` | `track_ids` is not exactly the project's track set (missing, extra or duplicate id) |
 | 422 | `document_invalid` | §4 — also artist / track / project-profile / memory requests (empty or over-long once normalized, tag conflicts, …), and the pinned `memory_ids` of a run (§11, §12) |
 | 422 | `import_invalid` | §10 — pasted Suno text that cannot become valid documents; issues carry the pasted line they come from |
@@ -982,3 +995,112 @@ A reply you stopped *listening* to is **not** a failure: it completes and is cha
 - "Make this a track idea" is **client-only**: put the excerpt into the brief of a normal run (§11); there is no endpoint.
 - The artist has **no style field**: its voice comes from its voice notes and its own lyrics.
 - You do not need to say the artist is an AI inside the owner's own chat.
+
+
+---
+
+## 14. Cast
+
+A **cast member** is a person, character or performer you keep reference images for. Each member has an optional `description` and a short `appearance` descriptor, up to **12 references** — labelled images from your library — and up to **12 looks**: named subsets of its references ("stage", "1980s", "bald"). Nothing here costs tokens, and **no LLM sees the cast yet** (the planner, chat and runs ignore it; a later phase will use it for video shots).
+
+### What a reference does to its asset (read this before building the UI)
+
+A reference **pins** the library asset it points at. While at least one thing holds an asset:
+
+- retention **never deletes it**, however old it is (the asset's `expires_at` stays in the past or future as it was; the UI should hide the countdown when the library item says `held: true`, §10 of `BACKEND_API_REFERENCE.md`);
+- it **cannot be deleted**: `DELETE /v1/library/assets/{ref}` and a bulk delete answer `409 asset_held` (bulk: that item is `{success: false, error: "asset_held"}`), and so does `DELETE /v1/jobs/{id}` for a job that has a held output. The library item keeps its favorite, title, project and tags: a refused delete changes nothing;
+- when the **last** reference to it goes (the reference is deleted, its asset is swapped for another, or the member is deleted) its **retention clock restarts**: `expires_at` becomes `max(expires_at, now + RETENTION_DAYS)`. Releasing one of two references to the same asset changes nothing.
+
+`409 asset_held` carries `detail.holders = [{kind, count}]` (e.g. `{"kind": "studio.cast_reference", "count": 2}`): kinds and counts, never names. To tell the user *which* members hold an asset, ask the cast: `GET /v1/studio/cast?holding=<asset_ref>`.
+
+An asset can be a reference only if it is **an image of yours**: an upload or the output of a **completed, not-deleted** generation (not a thumbnail or other derivative, not a video). Anything else is `422 asset_not_eligible` with `detail.reason`: `derivative`, `not_an_image` or `job_not_available`. Someone else's asset, another product's asset and an unknown id are the same `404 asset_not_found`. Your library items are still deletable by *you* the moment nothing holds them: removing a reference is how you unpin.
+
+### Types and limits
+
+```ts
+interface CastMemberCreate {            // unknown fields → 400
+  name: string;                         // 1–100 after normalization; unique per owner and product, case-insensitively
+  description?: string | null;          // ≤ 2000 (NFC, trimmed; line breaks kept)
+  appearance?: string | null;           // ≤ 320 — a short descriptor, used verbatim as a prompt fragment from S4 on
+  references?: CastReferenceIn[];       // ≤ 12, created atomically with the member, in this order
+}
+interface CastReferenceIn { label: string; asset: AssetRef }   // label 1–40, unique per member (case-insensitive)
+type AssetRef = string;                 // "upload:<uuid>" | "output:<uuid>", the same refs as the library
+type CastMemberPatch = {                // omitted = keep; null clears description / appearance
+  name?: string; description?: string | null; appearance?: string | null;
+};
+type CastReferencePatch = { label?: string; asset?: AssetRef };  // a new asset moves the pin
+interface CastReferenceOrder { reference_ids: UUID[] }           // exactly the member's references, once each
+interface CastLookIn { name: string; reference_ids: UUID[] }     // name 1–60, unique per member; ≥ 1 reference
+type CastLookPatch = { name?: string; reference_ids?: UUID[] };  // reference_ids replaces the whole set (≥ 1)
+
+interface CastMemberSummary {           // the list item
+  id: UUID; name: string; appearance: string | null;
+  reference_count: number; look_count: number;
+  cover: MediaObject | null;            // the reference at position 0, if any
+  created_at: ISODateTime; updated_at: ISODateTime;
+}
+interface CastMemberOut {
+  id: UUID; name: string; description: string | null; appearance: string | null;
+  references: CastReferenceOut[];       // by position
+  looks: CastLookOut[];                 // by name (case-insensitive)
+  created_at: ISODateTime; updated_at: ISODateTime;
+}
+interface CastReferenceOut {
+  id: UUID; label: string;
+  position: number;                     // dense, 0..n-1 (re-compacted when a reference is deleted)
+  asset: AssetRef;                      // the pinned library asset
+  media: MediaObject;                   // the same envelope as library items (original + variants)
+}
+interface CastLookOut {
+  id: UUID; name: string;
+  reference_ids: UUID[];                // in reference position order; MAY BE EMPTY (see below)
+}
+```
+
+| Limit | Value |
+|---|---|
+| Members per user and product | **50** (`409 cast_limit_reached`, `kind: "members"`; a soft cap, like artists') |
+| References per member | **12** (`kind: "references"`; exact even under concurrent requests) |
+| Looks per member | **12** (`kind: "looks"`; exact too) |
+| `name` / `label` / look `name` / `appearance` / `description` | 100 / 40 / 60 / 320 / 2000 |
+
+Every length is **re-checked after normalization** (Unicode NFC can make a value longer than it looked): `422 document_invalid` with `too_long_after_normalization` at the wire path (`name`, `appearance`, `references[0].label`, …). Names, labels and look names are trimmed and their inner whitespace collapsed; an empty result is `empty_after_normalization`. A malformed `asset` is `invalid_asset_ref` at its path (`references[2].asset`). All issues of one request are reported together; nothing is truncated.
+
+### Endpoints
+
+All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced on every mutation).
+
+| Method | Path | Success | Notes |
+|---|---|---|---|
+| `GET` | `/cast` | `200` page of `CastMemberSummary`, newest first | `?limit=1..50` (30), `?cursor=`; **`?holding=<asset_ref>`** keeps only the members that have a reference to that asset (`400 invalid_asset_ref` for a malformed ref) |
+| `POST` | `/cast` | `201` `CastMemberOut` | member and first references are created **atomically**: if any asset is refused, nothing is created |
+| `GET` | `/cast/{id}` | `200` `CastMemberOut` | |
+| `PATCH` | `/cast/{id}` | `200` `CastMemberOut` | |
+| `DELETE` | `/cast/{id}` | `204` | releases every hold (the assets restart their retention clock); **`409 cast_member_in_use`** while an artist has it as its performer |
+| `POST` | `/cast/{id}/references` | `201` `CastReferenceOut` | appended at `position = count`; `409 cast_limit_reached` at 12 |
+| `PATCH` | `/cast/{id}/references/{ref_id}` | `200` `CastReferenceOut` | relabel and / or swap the asset; the same asset again is a no-op (`200`) |
+| `DELETE` | `/cast/{id}/references/{ref_id}` | `204` | the reference leaves every look; later positions shift down |
+| `PUT` | `/cast/{id}/references/order` | `200` `CastMemberOut` | `reference_ids` must be an exact permutation, else `422 invalid_order`; nothing changes |
+| `POST` | `/cast/{id}/looks` | `201` `CastLookOut` | `reference_ids`: at least one, each of this member's, none twice |
+| `PATCH` | `/cast/{id}/looks/{look_id}` | `200` `CastLookOut` | |
+| `DELETE` | `/cast/{id}/looks/{look_id}` | `204` | the references stay |
+
+A reference, look or member of another user or product, an unknown one, and a reference or look id that belongs to *another member* are the same `404` (`cast_member_not_found`, `cast_reference_not_found`, `cast_look_not_found`). Cast mutations publish **no** real-time event (artist mutations publish none either).
+
+### Looks
+
+A look is a named subset of a member's references. `422 document_invalid` for a bad `reference_ids`, with these issues: `reference_ids` / `empty` (none given), `reference_ids[i]` / `duplicate_reference` (the same id twice) and `reference_ids[i]` / `reference_not_found` (not a reference of **this** member). Names are unique per member, case-insensitively (`409 cast_look_name_taken`).
+
+**A look can end up empty.** Deleting a reference removes it from every look; if that was a look's last reference, the look **stays** and is returned with `reference_ids: []`. Show it as empty (and let the user add references or delete it). Creating a look, or replacing its set, needs at least one reference; emptiness only ever comes from deleting references. A later phase rejects an empty look when it builds a shot.
+
+### The performer link
+
+An artist may name the cast member who performs it: `performer_cast_member_id` on `POST /artists` and `PATCH /artists/{id}` (`null` unlinks; omitting it keeps the link). It must be one of the caller's members, else `404 cast_member_not_found`. **Deleting a member that is some artist's performer is refused** (`409 cast_member_in_use`, `detail.blockers = [{code: "artists", count}]`): unlink the artists first. The server never unlinks silently. If the delete and a link race, one of them wins cleanly (a `409` for the delete, a `404` for the link), never a `500`.
+
+### Notes for the UI
+
+- Show a **pin** on library items with `held: true`, hide their expiry countdown, and when a delete answers `409 asset_held` offer "used by N cast members" (kinds and counts come in the error; fetch names with `GET /cast?holding=`).
+- Deleting a cast member or a reference is the way to **unpin**; the freed asset then has a normal retention period again (starting from that moment, never earlier than before).
+- Pinned storage is bounded: at most 50 × 12 = 600 images per user and product. Holds of a deactivated account persist (deactivation is recoverable).
+- Product scoping is as for artists: the same endpoints on `vex` and `synthara`, and a member never crosses products.

@@ -209,6 +209,17 @@ class SoftDeleteOutcome(StrEnum):
     NOT_FOUND = "not_found"
     IN_FLIGHT = "in_flight"
     """The job is still running (already charged, cannot be stopped); delete it once it finishes."""
+    HELD = "held"
+    """One of the job's outputs is held (pinned) by another context; release it first."""
+
+
+class AssetDeleteOutcome(StrEnum):
+    """Result of ``LibraryService.delete_asset``."""
+
+    DELETED = "deleted"
+    NOT_FOUND = "not_found"
+    HELD = "held"
+    """The asset is held (pinned) by another context: nothing was changed."""
 
 
 class AspectRatio(StrEnum):

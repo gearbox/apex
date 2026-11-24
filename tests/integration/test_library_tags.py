@@ -30,6 +30,7 @@ from src.api.services.library import (
     LibraryValidationError,
 )
 from src.api.services.library_tag import LibraryTagNameConflictError, LibraryTagService
+from src.core.enums import AssetDeleteOutcome
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref
 from src.core.product_registry import VEX_CONFIG
 from src.db.models.library import LibraryAssetTag
@@ -611,7 +612,7 @@ class TestDeleteAssetPurgesTags:
         deleted = await library_service.delete_asset(
             ref, user.id, "vex", session=db_session, content_proxy=content_proxy
         )
-        assert deleted is True
+        assert deleted is AssetDeleteOutcome.DELETED
 
         result = await db_session.execute(
             select(LibraryAssetTag).where(

@@ -24,7 +24,13 @@ from .gpu_session_operation import GpuSessionOperation
 from .health import HealthSnapshot
 from .idempotency import IdempotencyKey
 from .legal import LegalAcceptance
-from .library import LibraryAssetMetadata, LibraryAssetTag, LibraryProject, LibraryTag
+from .library import (
+    LibraryAssetHold,
+    LibraryAssetMetadata,
+    LibraryAssetTag,
+    LibraryProject,
+    LibraryTag,
+)
 from .media_hash import MediaHash
 from .push_subscription import PushSubscription
 from .storage import (
@@ -43,6 +49,12 @@ from .studio import (
     StudioProjectProfile,
     StudioRun,
     StudioTrack,
+)
+from .studio_cast import (
+    StudioCastLook,
+    StudioCastLookReference,
+    StudioCastMember,
+    StudioCastReference,
 )
 from .studio_chat import StudioArtistChat, StudioArtistChatMessage, StudioMemoryDraft
 from .user import RefreshToken, User
@@ -69,6 +81,7 @@ __all__ = [
     "HealthSnapshot",
     "IdempotencyKey",
     "LegalAcceptance",
+    "LibraryAssetHold",
     "LibraryAssetMetadata",
     "LibraryAssetTag",
     "LibraryProject",
@@ -88,6 +101,10 @@ __all__ = [
     "StudioArtistChat",
     "StudioArtistChatMessage",
     "StudioArtistMemory",
+    "StudioCastLook",
+    "StudioCastLookReference",
+    "StudioCastMember",
+    "StudioCastReference",
     "StudioDocumentVersion",
     "StudioLlmUsage",
     "StudioMemoryDraft",

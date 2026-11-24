@@ -64,6 +64,7 @@ from src.api.services.jobs.sweep import JobSweepService
 from src.api.services.legal.acceptance import LegalAcceptanceService
 from src.api.services.legal.registry import LegalDocumentRegistry
 from src.api.services.library import LibraryService
+from src.api.services.library_holds import AssetHoldService
 from src.api.services.library_project import LibraryProjectService
 from src.api.services.library_tag import LibraryTagService
 from src.api.services.media_ingest.factory import (
@@ -127,6 +128,7 @@ from src.db.repositories import (
 from src.llm.registry import LlmModelRegistry
 from src.studio.chat.supervisor import ChatTaskSupervisor
 from src.studio.services.artist import ArtistService
+from src.studio.services.cast import CastService
 from src.studio.services.chat import ChatService
 from src.studio.services.chat_context import ArtistChatContextAssembler
 from src.studio.services.chat_events import StudioChatEvents
@@ -796,6 +798,16 @@ def get_library_tag_service(session: AsyncSession) -> LibraryTagService:
 def get_studio_artist_service(session: AsyncSession) -> ArtistService:
     """Provide the studio ArtistService per-request."""
     return ArtistService(session)
+
+
+def get_studio_cast_service(session: AsyncSession, settings: Settings) -> CastService:
+    """Provide the studio CastService per-request, with the library's hold service.
+
+    The hold service takes its retention clock (``Settings.retention_days``) from here: it reads
+    no settings itself. Both share the request session, so a hold and the reference that owns it
+    are written in one transaction.
+    """
+    return CastService(session, AssetHoldService(session, retention_days=settings.retention_days))
 
 
 def get_studio_memory_service(session: AsyncSession) -> MemoryService:
@@ -2298,6 +2310,7 @@ dependencies = {
     "library_tag_service": Provide(get_library_tag_service, sync_to_thread=False),
     # Media Project Studio (request-scoped; gated by studio_feature_guard on the controllers)
     "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
+    "studio_cast_service": Provide(get_studio_cast_service, sync_to_thread=False),
     "studio_memory_service": Provide(get_studio_memory_service, sync_to_thread=False),
     "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
     "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),

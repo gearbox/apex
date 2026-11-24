@@ -70,6 +70,7 @@ from src.studio.constraints import (
 )
 
 __all__ = [
+    "CAST_PERFORMER_FK",
     "RUN_ONE_ACTIVE_PER_TRACK",
     "RUN_USER_IDEMPOTENCY",
     "StudioArtist",
@@ -81,6 +82,9 @@ __all__ = [
     "StudioTrack",
 ]
 
+CAST_PERFORMER_FK = "fk_studio_artists_performer"
+"""The artist → cast member foreign key (``NO ACTION``). Its violation means "this member is an
+artist's performer" (deleting a member) or "this member vanished" (linking one)."""
 RUN_ONE_ACTIVE_PER_TRACK = "uq_studio_runs_one_active_per_track"
 """Partial unique index: at most one queued/running run per track. The authority for 409."""
 RUN_USER_IDEMPOTENCY = "uq_studio_runs_user_idempotency"
@@ -139,11 +143,32 @@ class StudioArtist(Base):
         ARRAY(String(60)), nullable=False, server_default=text("'{}'")
     )
     """Exportable: merged into the Suno Exclude field after the plan's own avoid list."""
+    performer_cast_member_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    """Optional link to the cast member who performs this artist (S1-P3). The FK is composite
+    (see ``__table_args__``): it also pins ``user_id`` / ``product_id``. ``NO ACTION``: deleting the
+    member is refused (409), never silently unlinked."""
 
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
     __table_args__ = (
+        ForeignKeyConstraint(
+            ["performer_cast_member_id", "user_id", "product_id"],
+            [
+                "studio_cast_members.id",
+                "studio_cast_members.user_id",
+                "studio_cast_members.product_id",
+            ],
+            name=CAST_PERFORMER_FK,
+            ondelete="NO ACTION",
+        ),
+        Index(
+            "ix_studio_artists_performer",
+            "performer_cast_member_id",
+            postgresql_where=text("performer_cast_member_id IS NOT NULL"),
+        ),
         Index(
             "uq_studio_artists_owner_name",
             "product_id",

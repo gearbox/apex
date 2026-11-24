@@ -37,7 +37,7 @@ from sqlalchemy.sql import union_all as sa_union_all
 from src.core.enums import JobStatus, LibrarySort, MediaKind
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.core.uid import new_id
-from src.db.models.library import LibraryAssetMetadata, LibraryAssetTag
+from src.db.models.library import LibraryAssetHold, LibraryAssetMetadata, LibraryAssetTag
 from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 
 if TYPE_CHECKING:
@@ -101,6 +101,8 @@ class LibraryAssetRow:
     display_title: str | None
     is_favorite: bool
     project_id: UUID | None
+    held: bool
+    """Some other context holds (pins) the asset; computed by an ``EXISTS`` in the same query."""
 
 
 class LibraryRepository:
@@ -258,6 +260,7 @@ class LibraryRepository:
                 display_title=row["display_title"],
                 is_favorite=bool(row["is_favorite"]),
                 project_id=row["project_id"],
+                held=bool(row["held"]),
             )
             for row in rows
         ]
@@ -308,6 +311,8 @@ class LibraryRepository:
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
                 LibraryAssetMetadata.project_id.label("project_id"),
+                # Served by uq_library_asset_holds_upload_holder (leading column: upload_id).
+                exists().where(LibraryAssetHold.upload_id == UserImage.id).label("held"),
                 literal(rank).label("source_rank"),
             )
             .outerjoin(LibraryAssetMetadata, meta_join_cond)
@@ -429,6 +434,8 @@ class LibraryRepository:
                 LibraryAssetMetadata.display_title.label("display_title"),
                 func.coalesce(LibraryAssetMetadata.is_favorite, false()).label("is_favorite"),
                 LibraryAssetMetadata.project_id.label("project_id"),
+                # Served by uq_library_asset_holds_output_holder (leading column: output_id).
+                exists().where(LibraryAssetHold.output_id == GenerationOutput.id).label("held"),
                 literal(rank).label("source_rank"),
             )
             .join(GenerationJob, GenerationJob.id == GenerationOutput.job_id)

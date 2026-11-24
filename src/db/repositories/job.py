@@ -21,6 +21,7 @@ from src.db.models.billing import TokenTransaction
 from src.db.models.gpu_session import GpuSession
 from src.db.models.storage import GenerationJob, GenerationOutput
 from src.db.repositories.base import BaseRepository
+from src.db.repositories.library_hold import LibraryHoldRepository
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -303,6 +304,23 @@ class JobRepository(BaseRepository[GenerationJob]):
         policy cleans them up. The job stops appearing in user-facing
         list/get results.
 
+        Protocol, in one transaction (the order is the point). Step 0 is a plain read of the
+        committed status: an in-flight job is refused without taking any lock (it cannot have a
+        hold, and a delete must not wait for a worker's open transaction). Then:
+
+        1. ``SELECT … FOR UPDATE`` the job row (owner-checked);
+        2. **in a new statement**, look for a hold (``library_asset_holds``) on any of the job's
+           outputs;
+        3. one exists: ``HELD`` - hiding the job would hide an output the library still pins;
+        4. otherwise the conditional ``UPDATE`` below, unchanged.
+
+        Why not ``UPDATE … WHERE NOT EXISTS (hold)`` alone: after waiting for a row lock,
+        PostgreSQL re-checks the *updated row* against the ``WHERE`` clause but does not re-run a
+        subquery against holds committed in the meantime, so a hold that committed during the wait
+        would be missed. The job-row lock instead pairs with ``AssetHoldService.hold`` of an
+        output, which takes the job ``FOR SHARE`` and re-reads its state under that lock:
+        whichever commits first wins, and the other gets a typed error.
+
         A job that is still in flight (``JobStatus.in_flight()``) is refused:
         its upstream work is already accepted and charged and cannot be stopped,
         so hiding it would hide the output the user paid for. The check is one
@@ -317,8 +335,35 @@ class JobRepository(BaseRepository[GenerationJob]):
             user_id: Owner check — only the owner can delete their own job.
 
         Returns:
-            ``DELETED``, ``IN_FLIGHT`` (refused), or ``NOT_FOUND`` (missing or not owned).
+            ``DELETED``, ``IN_FLIGHT`` (refused), ``HELD`` (an output is held; refused) or
+            ``NOT_FOUND`` (missing or not owned).
         """
+        # Step 0, no lock: the *committed* status. A job that is in flight is refused right here,
+        # as it always was (the old conditional UPDATE read the committed version too), so a
+        # delete never waits for a worker's open transaction on the job row. No hold can exist on
+        # such a job: ``hold()`` only pins outputs of a COMPLETED job, under the job's share lock.
+        committed = await self._session.execute(
+            select(GenerationJob.status).where(
+                GenerationJob.id == job_id, GenerationJob.user_id == user_id
+            )
+        )
+        status = committed.scalar_one_or_none()
+        if status is None:
+            return SoftDeleteOutcome.NOT_FOUND
+        if status in {s.value for s in JobStatus.in_flight()}:
+            return SoftDeleteOutcome.IN_FLIGHT
+
+        locked = await self._session.execute(
+            select(GenerationJob.id)
+            .where(GenerationJob.id == job_id, GenerationJob.user_id == user_id)
+            .with_for_update()
+        )
+        if locked.scalar_one_or_none() is None:  # deleted between the read and the lock
+            return SoftDeleteOutcome.NOT_FOUND
+
+        if await LibraryHoldRepository(self._session).job_has_hold(job_id):
+            return SoftDeleteOutcome.HELD
+
         deleted = await self._session.execute(
             update(GenerationJob)
             .where(
@@ -331,15 +376,6 @@ class JobRepository(BaseRepository[GenerationJob]):
         )
         if deleted.scalar_one_or_none() is not None:
             return SoftDeleteOutcome.DELETED
-
-        # No row updated: either it is in flight, or it does not exist / is not owned.
-        owned = await self._session.execute(
-            select(GenerationJob.id).where(
-                GenerationJob.id == job_id, GenerationJob.user_id == user_id
-            )
-        )
-        if owned.scalar_one_or_none() is None:
-            return SoftDeleteOutcome.NOT_FOUND
         return SoftDeleteOutcome.IN_FLIGHT
 
     async def list_aisha_jobs_for_polling(

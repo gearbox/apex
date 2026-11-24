@@ -22,6 +22,16 @@ __all__ = [
     "ArtistLimitReached",
     "ArtistNameConflict",
     "ArtistNotFound",
+    "AssetNotEligible",
+    "AssetNotFound",
+    "CastLabelTaken",
+    "CastLimitReached",
+    "CastLookNameTaken",
+    "CastLookNotFound",
+    "CastMemberInUse",
+    "CastMemberNotFound",
+    "CastNameTaken",
+    "CastReferenceNotFound",
     "ChatBusy",
     "ChatFull",
     "ChatLimitReached",
@@ -32,7 +42,9 @@ __all__ = [
     "IdempotencyConflict",
     "IdempotencyKeyRequired",
     "ImportInvalid",
+    "InvalidAssetRef",
     "InvalidCursor",
+    "InvalidReferenceOrder",
     "LyricsIncompatibleWithPlan",
     "LyricsRequired",
     "LyricsVersionNotFound",
@@ -150,6 +162,55 @@ class RunNotFound(StudioError):
     message = "Run not found."
 
 
+# --- cast (S1-P3) -----------------------------------------------------------------------------
+
+
+class CastMemberNotFound(StudioError):
+    """No such cast member for the caller (unknown, another user's, another product's)."""
+
+    code = "cast_member_not_found"
+    status_code = 404
+    message = "Cast member not found."
+
+
+class CastReferenceNotFound(StudioError):
+    """No such reference on this cast member."""
+
+    code = "cast_reference_not_found"
+    status_code = 404
+    message = "Cast reference not found."
+
+
+class CastLookNotFound(StudioError):
+    """No such look on this cast member."""
+
+    code = "cast_look_not_found"
+    status_code = 404
+    message = "Cast look not found."
+
+
+class AssetNotFound(StudioError):
+    """The library asset is missing, or owned by another user or another product (all the same)."""
+
+    code = "asset_not_found"
+    status_code = 404
+    message = "Library asset not found."
+
+
+class AssetNotEligible(StudioError):
+    """The library asset cannot be used as a reference; ``detail.reason`` says why.
+
+    ``reason`` is one of ``derivative``, ``not_an_image``, ``job_not_available``.
+    """
+
+    code = "asset_not_eligible"
+    status_code = 422
+    message = "The library asset cannot be used as a reference."
+
+    def __init__(self, reason: str) -> None:
+        super().__init__({"reason": reason})
+
+
 # --- 400 / 422 -------------------------------------------------------------------------------
 
 
@@ -165,6 +226,14 @@ class InvalidCursor(StudioError):
     code = "invalid_cursor"
     status_code = 400
     message = "Invalid pagination cursor."
+
+
+class InvalidAssetRef(StudioError):
+    """A query parameter that must be an asset ref (``upload:<uuid>`` / ``output:<uuid>``) is not."""
+
+    code = "invalid_asset_ref"
+    status_code = 400
+    message = "Invalid asset reference."
 
 
 class StudioDocumentInvalid(StudioError):
@@ -215,6 +284,14 @@ class TrackOrderMismatch(StudioError):
     message = "The track order must list every track of the project exactly once."
 
 
+class InvalidReferenceOrder(StudioError):
+    """The submitted reference id list is not exactly the member's reference set."""
+
+    code = "invalid_order"
+    status_code = 422
+    message = "The reference order must list every reference of the cast member exactly once."
+
+
 # --- 409 -------------------------------------------------------------------------------------
 
 
@@ -245,6 +322,46 @@ class MemoryLimitReached(StudioError):
     code = "memory_limit_reached"
     status_code = 409
     message = "The maximum number of active memories for this artist has been reached."
+
+
+class CastNameTaken(StudioError):
+    code = "cast_name_taken"
+    status_code = 409
+    message = "A cast member with this name already exists."
+
+
+class CastLabelTaken(StudioError):
+    code = "cast_label_taken"
+    status_code = 409
+    message = "This cast member already has a reference with this label."
+
+
+class CastLookNameTaken(StudioError):
+    code = "cast_look_name_taken"
+    status_code = 409
+    message = "This cast member already has a look with this name."
+
+
+class CastLimitReached(StudioError):
+    """A cap was reached; ``detail`` is ``{"kind": "members" | "references" | "looks", "limit"}``."""
+
+    code = "cast_limit_reached"
+    status_code = 409
+    message = "The maximum number of cast items has been reached."
+
+    def __init__(self, kind: str, limit: int) -> None:
+        super().__init__({"kind": kind, "limit": limit})
+
+
+class CastMemberInUse(StudioError):
+    """An artist uses the member as its performer; ``detail.blockers`` counts them (D12 shape)."""
+
+    code = "cast_member_in_use"
+    status_code = 409
+    message = "The cast member is the performer of one or more artists."
+
+    def __init__(self, artist_count: int) -> None:
+        super().__init__({"blockers": [{"code": "artists", "count": artist_count}]})
 
 
 class ProjectHasTracks(StudioError):

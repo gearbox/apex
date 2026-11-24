@@ -138,7 +138,7 @@ class TestBuildGroupOutputItem:
         output.output_index = 0
         output.created_at = datetime.now(UTC)
 
-        item = svc._build_group_output_item(output, [])
+        item = svc._build_group_output_item(output, [], held=False)
 
         assert item.media.original.url == f"/v1/content/outputs/{output.id}"
         assert item.media.variants == []
@@ -158,7 +158,7 @@ class TestBuildGroupOutputItem:
             height=225,
         )
 
-        item = svc._build_group_output_item(output, [derivative])
+        item = svc._build_group_output_item(output, [derivative], held=False)
 
         assert len(item.media.variants) == 1
         assert item.media.variants[0].label == "md"
@@ -171,7 +171,7 @@ class TestBuildGroupOutputItem:
         output.output_index = 3
         output.created_at = datetime.now(UTC)
 
-        item = svc._build_group_output_item(output, [])
+        item = svc._build_group_output_item(output, [], held=False)
 
         assert item.output_index == 3
 
@@ -182,7 +182,7 @@ class TestBuildGroupOutputItem:
         output.output_index = 0
         output.created_at = datetime.now(UTC)
 
-        item = svc._build_group_output_item(output, [])
+        item = svc._build_group_output_item(output, [], held=False)
 
         assert item.expires_at == output.expires_at
 

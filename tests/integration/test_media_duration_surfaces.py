@@ -1,6 +1,6 @@
 """``MediaOriginal.duration_ms`` on every surface that serializes a media original (I3).
 
-Every ``_build_media_object`` call site in ``LibraryService`` plus the upload response
+Every ``build_media_object`` call site in ``LibraryService`` plus the upload response
 must carry the row's ``duration_ms``: a missed site silently yields ``null`` for that
 surface only. Real PostgreSQL; the R2 boundary is stubbed.
 """

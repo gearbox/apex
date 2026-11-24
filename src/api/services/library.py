@@ -12,6 +12,7 @@ from typing import TYPE_CHECKING
 
 import msgspec
 import structlog
+from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.library import (
     BulkAddTags,
@@ -36,27 +37,29 @@ from src.api.schemas.library import (
     LineageNode,
     LineageRelation,
 )
-from src.api.schemas.media import ImageVariant, MediaObject, MediaOriginal
 from src.api.schemas.pagination import CursorPage, decode_library_cursor, encode_library_cursor
 from src.api.services.content_proxy import ContentNotFoundError
 from src.api.services.library_capabilities import resolve_library_actions
-from src.api.services.media import OUTPUT_PREFIX, UPLOAD_PREFIX
+from src.api.services.library_holds import HolderCount, holder_counts_for_ref
+from src.api.services.library_media import build_media_object
 from src.core.enums import (
+    AssetDeleteOutcome,
     GenerationType,
     JobStatus,
     LibraryBadge,
     LibraryGroupSourceType,
     LibrarySort,
     MediaKind,
-    media_kind_from_content_type,
 )
 from src.core.library_limits import MAX_TAGS_PER_ASSET as _MAX_TAGS_PER_ASSET
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
-from src.core.thumbnails import label_for_max_edge
+from src.db.integrity import violated_constraint
+from src.db.models.library import HOLD_ASSET_FKS
 from src.db.models.storage import GenerationOutput, UserImage
 from src.db.repositories.generation_job_source import GenerationJobSourceRepository
 from src.db.repositories.job import JobRepository
 from src.db.repositories.library import UNSET_UPDATE, LibraryRepository, _UnsetUpdate
+from src.db.repositories.library_hold import LibraryHoldRepository
 from src.db.repositories.library_project import LibraryProjectRepository
 from src.db.repositories.library_tag import LibraryTagRepository, TagRef
 from src.db.repositories.output import OutputRepository
@@ -76,6 +79,10 @@ if TYPE_CHECKING:
     from src.db.repositories.library import LibraryAssetRow, OptionalUpdate
 
 logger = structlog.get_logger(__name__)
+
+# A bulk delete reports why an item failed when the reason is one the client can act on; other
+# failures keep ``error = None`` (the field is additive).
+_BULK_ERRORS: dict[AssetDeleteOutcome, str] = {AssetDeleteOutcome.HELD: "asset_held"}
 
 # Lineage graph bounds (T8) — ancestor walk depth and per-relation
 # descendant cap. Deliberately small constants for an on-demand, bounded
@@ -296,7 +303,7 @@ class LibraryService:
         project_names: dict[UUID, str],
         asset_tags: Mapping[tuple[str, UUID], list[TagRef]],
     ) -> LibraryAssetItem:
-        media = _build_media_object(
+        media = build_media_object(
             source=row.source,
             asset_id=row.id,
             width=row.width,
@@ -319,6 +326,7 @@ class LibraryService:
             media=media,
             created_at=row.created_at,
             expires_at=row.expires_at,
+            held=row.held,
             display_title=row.display_title,
             original_filename=row.original_filename,
             display_filename=row.display_filename,
@@ -383,8 +391,11 @@ class LibraryService:
             LibraryAssetSource.UPLOAD, image.id, user_id, product_id, session
         )
         derivatives = await image_repo.list_derivatives(image.id)
+        held = image.id in await LibraryHoldRepository(session).held_upload_ids(
+            [image.id], user_id=user_id, product_id=product_id
+        )
 
-        media = _build_media_object(
+        media = build_media_object(
             source=LibraryAssetSource.UPLOAD,
             asset_id=image.id,
             width=image.width,
@@ -430,6 +441,7 @@ class LibraryService:
             media=media,
             created_at=image.created_at,
             expires_at=image.expires_at,
+            held=held,
             display_title=metadata.display_title if metadata is not None else None,
             original_filename=image.original_filename,
             display_filename=image.display_filename,
@@ -480,8 +492,11 @@ class LibraryService:
             LibraryAssetSource.OUTPUT, output.id, user_id, product_id, session
         )
         derivatives = await output_repo.list_derivatives(output.id)
+        held = output.id in await LibraryHoldRepository(session).held_output_ids(
+            [output.id], user_id=user_id, product_id=product_id
+        )
 
-        media = _build_media_object(
+        media = build_media_object(
             source=LibraryAssetSource.OUTPUT,
             asset_id=output.id,
             width=output.width,
@@ -528,6 +543,7 @@ class LibraryService:
             media=media,
             created_at=output.created_at,
             expires_at=output.expires_at,
+            held=held,
             display_title=metadata.display_title if metadata is not None else None,
             original_filename=None,
             display_filename=None,
@@ -792,13 +808,21 @@ class LibraryService:
         *,
         session: AsyncSession,
         content_proxy: ContentProxyService,
-    ) -> bool:
-        """Purge the asset's metadata and tag rows, then delete it via ContentProxyService.
+    ) -> AssetDeleteOutcome:
+        """Delete an asset: check its holds, purge its metadata and tags, then delete the content.
 
         A typed pre-check (fetch by the ref's declared source) runs before
         delegating to ``ContentProxyService.delete_content`` — a malformed
         claim (ref says upload but the id belongs to an output) is treated
         as not-found rather than falling through to the other table.
+
+        **A held asset is refused before anything is touched** (``HELD``): the hold check comes
+        before the metadata and tag purge, so a refused delete keeps the user's favorite, title,
+        project and tags. The database is the real guard (``ON DELETE NO ACTION`` foreign keys
+        from ``library_asset_holds``); the check is what makes the common case cheap and typed. A
+        hold that appears between the check and the delete (a concurrent ``hold()``) makes the
+        delete raise a foreign-key violation, which is rolled back (this undoes the flushed purge
+        too) and reported as ``HELD`` as well - never a 500.
 
         The metadata and tag purges are flushed BEFORE ``delete_content`` so
         they ride in the same commit as the content-row delete —
@@ -809,7 +833,7 @@ class LibraryService:
         ``delete_content`` then raises ``ContentNotFoundError`` (race: asset
         vanished between the pre-check and delegation), this method rolls
         the session back itself before returning — ``delete_asset`` swallows
-        the exception to preserve its bool-return contract (bulk delete
+        the exception to preserve its per-ref outcome contract (bulk delete
         needs a per-ref result, not an abort), so the DI session provider's
         own rollback-on-exception never triggers here; without an explicit
         rollback the flushed purges would ride along on the next unrelated
@@ -817,15 +841,19 @@ class LibraryService:
         already purged them too.
 
         Returns:
-            True if deleted; False if not found / not owned.
+            ``DELETED``; ``NOT_FOUND`` if not found / not owned; ``HELD`` if some context holds
+            it (nothing was changed).
         """
         try:
             ref = parse_asset_ref(asset_ref)
         except ValueError:
-            return False
+            return AssetDeleteOutcome.NOT_FOUND
 
         if not await self._asset_exists(ref, user_id, product_id, session):
-            return False
+            return AssetDeleteOutcome.NOT_FOUND
+
+        if await holder_counts_for_ref(session, ref):
+            return AssetDeleteOutcome.HELD
 
         repo = LibraryRepository(session)
         await repo.delete_metadata_for_assets([(ref.source.value, ref.asset_id)])
@@ -842,7 +870,12 @@ class LibraryService:
             )
         except ContentNotFoundError:
             await session.rollback()
-            return False
+            return AssetDeleteOutcome.NOT_FOUND
+        except IntegrityError as exc:
+            if violated_constraint(exc, HOLD_ASSET_FKS) is None:
+                raise
+            await session.rollback()
+            return AssetDeleteOutcome.HELD
 
         logger.info(
             "library.asset_deleted",
@@ -850,7 +883,18 @@ class LibraryService:
             user_id=str(user_id),
             source=ref.source.value,
         )
-        return True
+        return AssetDeleteOutcome.DELETED
+
+    async def holders_of(self, asset_ref: str, *, session: AsyncSession) -> tuple[HolderCount, ...]:
+        """The holders of an asset by kind (for the ``409 asset_held`` detail); empty if none.
+
+        Ownership is the caller's job: this runs right after ``delete_asset`` answered ``HELD``.
+        """
+        try:
+            ref = parse_asset_ref(asset_ref)
+        except ValueError:
+            return ()
+        return await holder_counts_for_ref(session, ref)
 
     async def _asset_exists(
         self,
@@ -1031,10 +1075,16 @@ class LibraryService:
             results = []
             for r in parsed:
                 ref_str = format_asset_ref(r.source, r.asset_id)
-                deleted = await self.delete_asset(
+                outcome = await self.delete_asset(
                     ref_str, user_id, product_id, session=session, content_proxy=content_proxy
                 )
-                results.append(BulkOperationItemResult(asset_ref=ref_str, success=deleted))
+                results.append(
+                    BulkOperationItemResult(
+                        asset_ref=ref_str,
+                        success=outcome is AssetDeleteOutcome.DELETED,
+                        error=_BULK_ERRORS.get(outcome),
+                    )
+                )
 
         succeeded = sum(bool(r.success) for r in results)
         logger.info(
@@ -1115,8 +1165,13 @@ class LibraryService:
             if o.is_thumbnail and o.parent_output_id is not None:
                 derivatives_map[o.parent_output_id].append(o)
 
+        held_output_ids = await LibraryHoldRepository(session).held_output_ids(
+            [o.id for o in full_outputs], user_id=user_id, product_id=product_id
+        )
         output_items = [
-            self._build_group_output_item(o, list(derivatives_map.get(o.id, [])))
+            self._build_group_output_item(
+                o, list(derivatives_map.get(o.id, [])), held=o.id in held_output_ids
+            )
             for o in sorted(full_outputs, key=lambda o: o.output_index)
         ]
 
@@ -1154,7 +1209,7 @@ class LibraryService:
                         position=row.position,
                         asset_ref=row.asset_ref,
                         available=True,
-                        media=_build_media_object(
+                        media=build_media_object(
                             source=LibraryAssetSource.UPLOAD,
                             asset_id=upload.id,
                             width=upload.width,
@@ -1182,7 +1237,7 @@ class LibraryService:
                         position=row.position,
                         asset_ref=row.asset_ref,
                         available=True,
-                        media=_build_media_object(
+                        media=build_media_object(
                             source=LibraryAssetSource.OUTPUT,
                             asset_id=output.id,
                             width=output.width,
@@ -1212,7 +1267,7 @@ class LibraryService:
                     position=0,
                     asset_ref=format_asset_ref(LibraryAssetSource.OUTPUT, job.source_output.id),
                     available=True,
-                    media=_build_media_object(
+                    media=build_media_object(
                         source=LibraryAssetSource.OUTPUT,
                         asset_id=job.source_output.id,
                         width=job.source_output.width,
@@ -1230,7 +1285,7 @@ class LibraryService:
                     position=0,
                     asset_ref=format_asset_ref(LibraryAssetSource.UPLOAD, job.input_image.id),
                     available=True,
-                    media=_build_media_object(
+                    media=build_media_object(
                         source=LibraryAssetSource.UPLOAD,
                         asset_id=job.input_image.id,
                         width=job.input_image.width,
@@ -1379,7 +1434,7 @@ class LibraryService:
             return LineageNode(
                 asset_ref=format_asset_ref(source, row.id),
                 source=source,
-                media=_build_media_object(
+                media=build_media_object(
                     source=source,
                     asset_id=row.id,
                     width=row.width,
@@ -1612,6 +1667,8 @@ class LibraryService:
     def _build_group_output_item(
         output: GenerationOutput,
         derivatives: list[GenerationOutput],
+        *,
+        held: bool,
     ) -> LibraryOutputItem:
         return LibraryOutputItem(
             id=output.id,
@@ -1619,7 +1676,8 @@ class LibraryService:
             output_index=output.output_index,
             created_at=output.created_at,
             expires_at=output.expires_at,
-            media=_build_media_object(
+            held=held,
+            media=build_media_object(
                 source=LibraryAssetSource.OUTPUT,
                 asset_id=output.id,
                 width=output.width,
@@ -1630,52 +1688,3 @@ class LibraryService:
                 derivatives=derivatives,
             ),
         )
-
-
-def _build_media_object(
-    *,
-    source: LibraryAssetSource,
-    asset_id: UUID,
-    width: int | None,
-    height: int | None,
-    content_type: str,
-    size_bytes: int,
-    duration_ms: int | None,
-    derivatives: Sequence[GenerationOutput | UserImage],
-) -> MediaObject:
-    """Build a MediaObject from normalized fields shared by both source tables.
-
-    Distinct from build_output_media/build_upload_media in services/media.py:
-    those take a concrete GenerationOutput/UserImage ORM instance, but the
-    library list path works from LibraryAssetRow — a cross-table projection
-    that isn't either concrete type. Same construction logic, different input
-    shape; the URL prefix constants are still reused from services/media.py.
-    """
-    prefix = OUTPUT_PREFIX if source == LibraryAssetSource.OUTPUT else UPLOAD_PREFIX
-    media_type = media_kind_from_content_type(content_type)
-
-    original = MediaOriginal(
-        url=f"{prefix}/{asset_id}",
-        width=width,
-        height=height,
-        content_type=content_type,
-        size_bytes=size_bytes,
-        duration_ms=duration_ms,
-    )
-
-    variants: list[ImageVariant] = []
-    for d in derivatives:
-        label = label_for_max_edge(d.thumbnail_max_edge)
-        if label is None or d.width is None or d.height is None:
-            continue
-        variants.append(
-            ImageVariant(label=label, width=d.width, height=d.height, url=f"{prefix}/{d.id}")
-        )
-    variants.sort(key=lambda v: v.width)
-
-    return MediaObject(
-        media_type=media_type,
-        original=original,
-        variants=variants,
-        asset_ref=format_asset_ref(source, asset_id),
-    )

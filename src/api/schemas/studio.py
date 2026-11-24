@@ -14,6 +14,7 @@ from uuid import UUID
 import msgspec
 from msgspec import Meta
 
+from src.api.schemas.media import MediaObject
 from src.core.enums import (
     StudioDocumentKind,
     StudioDocumentOrigin,
@@ -24,6 +25,12 @@ from src.core.enums import (
     StudioReleaseKind,
 )
 from src.studio.constraints import (
+    CAST_APPEARANCE_MAX,
+    CAST_DESCRIPTION_MAX,
+    CAST_LABEL_MAX,
+    CAST_LOOK_NAME_MAX,
+    CAST_NAME_MAX,
+    MAX_CAST_REFERENCES,
     MEMORY_BODY_MAX,
     MEMORY_IMAGE_MAX,
     MEMORY_IMAGERY_MAX,
@@ -42,6 +49,17 @@ __all__ = [
     "ArtistCreate",
     "ArtistOut",
     "ArtistPatch",
+    "CastLookIn",
+    "CastLookOut",
+    "CastLookPatch",
+    "CastMemberCreate",
+    "CastMemberOut",
+    "CastMemberPatch",
+    "CastMemberSummary",
+    "CastReferenceIn",
+    "CastReferenceOrder",
+    "CastReferenceOut",
+    "CastReferencePatch",
     "CurrentPut",
     "ExportFieldOut",
     "ExportWarningOut",
@@ -88,6 +106,13 @@ _MemoryImagery = Annotated[
     list[Annotated[str, Meta(max_length=MEMORY_IMAGE_MAX)]], Meta(max_length=MEMORY_IMAGERY_MAX)
 ]
 _Salience = Annotated[int, Meta(ge=1, le=5)]
+_CastName = Annotated[str, Meta(min_length=1, max_length=CAST_NAME_MAX)]
+_CastDescription = Annotated[str, Meta(max_length=CAST_DESCRIPTION_MAX)]
+_CastAppearance = Annotated[str, Meta(max_length=CAST_APPEARANCE_MAX)]
+_CastLabel = Annotated[str, Meta(min_length=1, max_length=CAST_LABEL_MAX)]
+_CastLookName = Annotated[str, Meta(min_length=1, max_length=CAST_LOOK_NAME_MAX)]
+_AssetRefText = Annotated[str, Meta(min_length=1, max_length=100)]
+"""A wire asset ref (``"upload:<uuid>"`` / ``"output:<uuid>"``): parsed by ``parse_asset_ref``."""
 
 # ---------------------------------------------------------------------------
 # Artists
@@ -105,6 +130,9 @@ class ArtistCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     """Exportable (e.g. vocal type, delivery); merged into Suno Style after the plan's tags."""
     global_avoid: _Tags = msgspec.field(default_factory=list)
     """Exportable; merged into Suno Exclude after the plan's own avoid list."""
+    performer_cast_member_id: UUID | None = None
+    """Optional: the cast member who performs this artist (404 ``cast_member_not_found`` if the
+    caller has no such member)."""
 
 
 class ArtistPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
@@ -115,6 +143,8 @@ class ArtistPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     aesthetic_references: _AestheticRefs | msgspec.UnsetType = msgspec.UNSET
     style_tags: _Tags | msgspec.UnsetType = msgspec.UNSET
     global_avoid: _Tags | msgspec.UnsetType = msgspec.UNSET
+    performer_cast_member_id: UUID | msgspec.UnsetType | None = msgspec.UNSET
+    """Absent = leave unchanged. ``null`` = unlink. UUID = link (must be the caller's member)."""
 
 
 class ArtistOut(msgspec.Struct, kw_only=True):
@@ -126,6 +156,103 @@ class ArtistOut(msgspec.Struct, kw_only=True):
     aesthetic_references: list[str]
     style_tags: list[str]
     global_avoid: list[str]
+    performer_cast_member_id: UUID | None
+    created_at: datetime
+    updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Cast (S1-P3)
+# ---------------------------------------------------------------------------
+
+
+class CastReferenceIn(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """One reference image of a cast member: a user label and a library asset to pin."""
+
+    label: _CastLabel
+    asset: _AssetRefText
+    """Wire asset ref, ``"upload:<uuid>"`` / ``"output:<uuid>"``; an image of the caller's."""
+
+
+class CastMemberCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    name: _CastName
+    description: _CastDescription | None = None
+    appearance: _CastAppearance | None = None
+    """A short descriptor, used verbatim as a prompt fragment from S4 on."""
+    references: Annotated[list[CastReferenceIn], Meta(max_length=MAX_CAST_REFERENCES)] = (
+        msgspec.field(default_factory=list)
+    )
+    """Created atomically with the member, in this order (``position`` 0..n-1)."""
+
+
+class CastMemberPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    name: _CastName | msgspec.UnsetType = msgspec.UNSET
+    description: _CastDescription | msgspec.UnsetType | None = msgspec.UNSET
+    appearance: _CastAppearance | msgspec.UnsetType | None = msgspec.UNSET
+
+
+class CastReferencePatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    label: _CastLabel | msgspec.UnsetType = msgspec.UNSET
+    asset: _AssetRefText | msgspec.UnsetType = msgspec.UNSET
+    """Changing it moves the pin: the new asset is held, the old one released."""
+
+
+class CastReferenceOrder(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    reference_ids: Annotated[list[UUID], Meta(max_length=MAX_CAST_REFERENCES)]
+    """Exactly the member's reference ids, each once, in the new order (else ``invalid_order``)."""
+
+
+class CastLookIn(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    name: _CastLookName
+    reference_ids: Annotated[list[UUID], Meta(max_length=MAX_CAST_REFERENCES)]
+    """At least one, all of this member's, each once."""
+
+
+class CastLookPatch(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    name: _CastLookName | msgspec.UnsetType = msgspec.UNSET
+    reference_ids: (
+        Annotated[list[UUID], Meta(max_length=MAX_CAST_REFERENCES)] | msgspec.UnsetType
+    ) = msgspec.UNSET
+    """Replaces the whole set (at least one)."""
+
+
+class CastReferenceOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    label: str
+    position: int
+    asset: str
+    """Wire asset ref of the pinned library asset."""
+    media: MediaObject
+
+
+class CastLookOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    name: str
+    reference_ids: list[UUID]
+    """In reference position order. Empty when every reference of the look was deleted."""
+
+
+class CastMemberSummary(msgspec.Struct, kw_only=True):
+    id: UUID
+    name: str
+    appearance: str | None
+    reference_count: int
+    look_count: int
+    cover: MediaObject | None
+    """The reference at position 0, if any."""
+    created_at: datetime
+    updated_at: datetime
+
+
+class CastMemberOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    name: str
+    description: str | None
+    appearance: str | None
+    references: list[CastReferenceOut]
+    """By position."""
+    looks: list[CastLookOut]
+    """By name."""
     created_at: datetime
     updated_at: datetime
 
