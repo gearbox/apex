@@ -16,6 +16,7 @@ from pathlib import Path
 from typing import TYPE_CHECKING
 from uuid import uuid4
 
+import pytest
 from alembic.autogenerate import compare_metadata
 from alembic.operations import Operations
 from alembic.runtime.migration import MigrationContext
@@ -170,8 +171,13 @@ async def test_the_audio_table_has_composite_keys_and_a_unique_hold(
     assert set(checks) == {
         "ck_studio_track_audio_number",
         "ck_studio_track_audio_duration",
+        "ck_studio_track_audio_lyrics_need_plan",
         "ck_studio_track_audio_origin",
     }
+    lyrics_plan_check = checks["ck_studio_track_audio_lyrics_need_plan"][3]
+    assert "lyrics_version_id IS NULL" in lyrics_plan_check
+    assert "plan_version_id IS NOT NULL" in lyrics_plan_check
+    assert " OR " in lyrics_plan_check
     assert "origin" in checks["ck_studio_track_audio_origin"][3]
     assert "'upload'" in checks["ck_studio_track_audio_origin"][3]
     assert "WHERE (plan_version_id IS NOT NULL)" in plan_index
@@ -248,12 +254,12 @@ async def test_downgrade_drops_what_the_revision_made_and_nothing_else_and_upgra
         await transaction.rollback()
 
 
-async def test_downgrade_takes_only_the_audio_holds_and_rearms_their_assets(
+async def test_downgrade_refuses_while_audio_uploads_remain(
     db_engine: AsyncEngine,
 ) -> None:
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
-        user_id, audio_id, image_id = uuid4(), uuid4(), uuid4()
+        user_id, audio_id = uuid4(), uuid4()
         await connection.execute(
             text(
                 "INSERT INTO users (id, email, password_hash, product_id) "
@@ -261,68 +267,36 @@ async def test_downgrade_takes_only_the_audio_holds_and_rearms_their_assets(
             ),
             {"id": user_id, "email": f"mig-{uuid4().hex}@example.com"},
         )
-        for asset_id, content_type, extension in (
-            (audio_id, "audio/flac", "flac"),
-            (image_id, "image/png", "png"),
-        ):
-            await connection.execute(
-                text(
-                    "INSERT INTO user_images (id, user_id, product_id, storage_key, "
-                    "original_filename, content_type, size_bytes, format, expires_at) "
-                    "VALUES (:id, :user_id, 'vex', :key, :name, :content_type, 10, :format, "
-                    "now() - interval '2 days')"
-                ),
-                {
-                    "id": asset_id,
-                    "user_id": user_id,
-                    "key": f"k/{asset_id}",
-                    "name": f"{asset_id}.{extension}",
-                    "content_type": content_type,
-                    "format": extension,
-                },
-            )
-        for holder_kind, asset_id in (
-            ("studio.track_audio", audio_id),
-            ("studio.cast_reference", image_id),
-        ):
-            await connection.execute(
-                text(
-                    "INSERT INTO library_asset_holds (id, user_id, product_id, upload_id, "
-                    "holder_kind, holder_id) VALUES (:id, :user_id, 'vex', :asset, :kind, :holder)"
-                ),
-                {
-                    "id": uuid4(),
-                    "user_id": user_id,
-                    "asset": asset_id,
-                    "kind": holder_kind,
-                    "holder": uuid4(),
-                },
-            )
-
-        await connection.run_sync(_run, "downgrade")
-
-        kinds = (
-            (await connection.execute(text("SELECT holder_kind FROM library_asset_holds")))
-            .scalars()
-            .all()
+        await connection.execute(
+            text(
+                "INSERT INTO user_images (id, user_id, product_id, storage_key, "
+                "original_filename, content_type, size_bytes, format, expires_at) "
+                "VALUES (:id, :user_id, 'vex', :key, :name, 'audio/flac', 10, 'flac', now())"
+            ),
+            {
+                "id": audio_id,
+                "user_id": user_id,
+                "key": f"k/{audio_id}",
+                "name": f"{audio_id}.flac",
+            },
         )
-        assert kinds == ["studio.cast_reference"]  # the audio hold went; the cast's stayed
-        rearmed = (
-            await connection.execute(
-                text(
-                    "SELECT expires_at > now() + interval '5 days' FROM user_images WHERE id = :id"
-                ),
-                {"id": audio_id},
-            )
-        ).scalar_one()
-        untouched = (
-            await connection.execute(
-                text("SELECT expires_at < now() FROM user_images WHERE id = :id"),
-                {"id": image_id},
-            )
-        ).scalar_one()
-        assert rearmed is True
-        assert untouched is True
+
+        with pytest.raises(
+            RuntimeError, match=r"1 audio upload.*delete those rows first"
+        ) as raised:
+            await connection.run_sync(_run, "downgrade")
+
+        assert "Deleting them removes users' files" in str(raised.value)
+        assert await _exists(connection, "studio_track_audio")
+        await transaction.rollback()
+
+
+async def test_downgrade_succeeds_when_no_audio_assets_remain(db_engine: AsyncEngine) -> None:
+    async with db_engine.connect() as connection:
+        transaction = await connection.begin()
+        await connection.run_sync(_run, "downgrade")
+        for table in _NEW_TABLES:
+            assert not await _exists(connection, table), table
         await transaction.rollback()
 
 

@@ -1,8 +1,8 @@
 """Audio ingest policy that needs neither ffmpeg nor a database (S2a).
 
 ``parse_audio_probe`` applies the accepted-format / codec / duration table to a decoded
-``ffprobe -of json`` document, ``remux_arguments`` builds the stream-copy options per container and
-``compute_peaks`` reduces PCM to the stored peaks. ``PreparedAudio`` guards what is stored.
+``ffprobe -of json`` document, ``remux_arguments`` builds the container cleanup options and
+``compute_peaks`` reduces bounded PCM to the stored peaks. ``PreparedAudio`` guards what is stored.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ from src.api.services.media_ingest import (
 from src.api.services.media_ingest.audio import (
     AUDIO_MAX_SECONDS,
     AUDIO_MIN_SECONDS,
+    MAX_PEAKS_SAMPLES,
     PEAKS_BUCKETS,
     PEAKS_BYTES,
     PEAKS_VERSION,
@@ -34,7 +35,7 @@ _MP4_FORMAT = "mov,mp4,m4a,3gp,3g2,mj2"
 
 
 def _audio_stream(codec: str, **extra: object) -> dict[str, object]:
-    return {
+    values: dict[str, object] = {
         "index": 0,
         "codec_type": "audio",
         "codec_name": codec,
@@ -43,8 +44,11 @@ def _audio_stream(codec: str, **extra: object) -> dict[str, object]:
         "duration": "6.000000",
         "bit_rate": "128000",
         "disposition": {"attached_pic": 0},
-        **extra,
     }
+    if codec == "flac":
+        values["sample_fmt"] = "s16"
+    values.update(extra)
+    return values
 
 
 def _probe(
@@ -247,16 +251,27 @@ _COMMON = [
 
 
 class TestRemuxArguments:
-    @pytest.mark.parametrize(
-        "media_format", [MediaFormat.MP3, MediaFormat.M4A, MediaFormat.WAV, MediaFormat.FLAC]
-    )
-    def test_every_container_maps_only_the_first_audio_stream_and_copies_it(
+    @pytest.mark.parametrize("media_format", [MediaFormat.MP3, MediaFormat.M4A, MediaFormat.WAV])
+    def test_stream_copy_containers_map_only_the_first_audio_stream(
         self, media_format: MediaFormat
     ) -> None:
         arguments = remux_arguments(media_format)
         assert arguments[: len(_COMMON)] == _COMMON
         assert "-c" not in arguments  # never a re-encode request
         assert "libmp3lame" not in arguments
+
+    def test_flac_is_losslessly_reencoded_at_the_same_sample_format(self) -> None:
+        arguments = remux_arguments(MediaFormat.FLAC, sample_fmt="s32")
+
+        assert arguments[:4] == ["-map", "0:a:0", "-c:a", "flac"]
+        assert "-sample_fmt" in arguments
+        assert arguments[arguments.index("-sample_fmt") + 1] == "s32"
+        assert arguments[arguments.index("-compression_level") + 1] == "5"
+        assert arguments[-2:] == ["-f", "flac"]
+
+    def test_flac_without_a_supported_sample_format_is_refused(self) -> None:
+        with pytest.raises(UnsupportedAudioError):
+            remux_arguments(MediaFormat.FLAC)
 
     def test_mp3_writes_no_id3_and_a_xing_header(self) -> None:
         arguments = remux_arguments(MediaFormat.MP3)
@@ -286,9 +301,6 @@ class TestRemuxArguments:
             "-f",
             "wav",
         ]
-
-    def test_flac_has_no_container_options(self) -> None:
-        assert remux_arguments(MediaFormat.FLAC)[len(_COMMON) :] == ["-f", "flac"]
 
     def test_a_non_audio_format_has_no_remux(self) -> None:
         with pytest.raises(KeyError):
@@ -348,6 +360,14 @@ class TestPeaks:
 
     def test_exactly_one_sample_per_bucket_is_enough(self) -> None:
         assert len(compute_peaks(_pcm(np.zeros(1024)))) == 2048
+
+    def test_decoded_pcm_over_the_duration_bound_is_invalid_audio(self) -> None:
+        pcm = bytes((MAX_PEAKS_SAMPLES + 1) * 2)
+
+        with pytest.raises(InvalidAudioError, match="longer than allowed") as raised:
+            compute_peaks(pcm)
+
+        assert raised.value.code is AudioCode.INVALID
 
 
 class TestPreparedAudio:

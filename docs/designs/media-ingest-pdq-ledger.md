@@ -118,9 +118,10 @@ same operational meaning. Its own byte budget is `AUDIO_UPLOAD_MAX_MB`
 (`max_audio_bytes`); the route enforces it from the *declared* type before
 ingest runs and ingest re-checks it.
 
-Pipeline: write a temp file → `ffprobe` (never the client MIME) → remux →
-`ffprobe` of the **remuxed** file (the stored bytes are what is described and
-gated) → peaks pass → read the remuxed bytes.
+Pipeline: write a temp file → `ffprobe` (never the client MIME) → clean the
+container → `ffprobe` of the **prepared** file (the stored bytes are what is
+described and gated) → decoded-sample verification where required → bounded
+peaks pass → read the prepared bytes.
 
 * **Policy** (`media_ingest/audio.py::parse_audio_probe`, pure), in this order:
   format not mp3 / ISO-BMFF / wav / flac → `audio_format_not_supported`; any
@@ -132,14 +133,23 @@ gated) → peaks pass → read the remuxed bytes.
   (`detail: {min_seconds, max_seconds}`). The attached-picture flag is read from
   ffprobe's `stream_disposition` *section*: `disposition` listed inside
   `stream=` prints nothing, which would make cover art look like a video stream.
-* **Remux, never re-encode:** `-map 0:a:0 -c:a copy -map_metadata -1
+* **Container cleanup:** stream copy for MP3 (frames only), M4A and WAV;
+  lossless re-encode for FLAC (bit-identical samples). The stream-copy options
+  are `-map 0:a:0 -c:a copy -map_metadata -1
   -map_metadata:s:a -1 -map_chapters -1 -fflags +bitexact -flags:a +bitexact`,
   plus per container: mp3 `-write_id3v1 0 -id3v2_version 0 -write_xing 1 -f mp3`;
-  m4a `-movflags +faststart -f ipod`; wav `-rf64 auto -f wav`; flac `-f flac`.
-  The output container equals the input's, and attached pictures are dropped
+  m4a `-movflags +faststart -f ipod`; wav `-rf64 auto -f wav`. MP3 packets are
+  scanned for complete Layer III frames; bytes outside confirmed frame chains
+  are dropped, and when any are dropped the frames are remuxed again so the Xing
+  header has the right count. A second scan must drop zero bytes. FLAC uses
+  `-map 0:a:0 -c:a flac -sample_fmt <input-sample-fmt> -compression_level 5
+  -map_metadata -1 -map_metadata:s:a -1 -map_chapters -1 -fflags +bitexact
+  -flags:a +bitexact -f flac`; unsupported decoder sample formats are refused
+  before encoding. The FLAC input and output decoded PCM `-f md5` values must
+  match or ingest raises `MediaProcessingError`. Attached pictures are dropped
   because only the first audio stream is mapped. Every ffmpeg / ffprobe run adds
   `-protocol_whitelist file`.
-* **Peaks:** a second ffmpeg pass on the remuxed bytes (`-ac 1 -ar 11025 -f s16le -`),
+* **Peaks:** a second ffmpeg pass on the prepared bytes (`-t 901 -ac 1 -ar 11025 -f s16le -`),
   read into a numpy `int16` array, split by `np.array_split` into exactly 1,024
   buckets; per bucket min and max `>> 8`, clipped to `[-128, 127]`, stored as
   interleaved `int8` (2,048 bytes, `PEAKS_VERSION = 1`).

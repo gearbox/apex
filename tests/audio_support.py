@@ -99,6 +99,27 @@ def stream_md5(path: Path) -> str:
     return out.strip()
 
 
+def decoded_pcm_md5(path: Path) -> str:
+    """MD5 of decoded signed 32-bit PCM, stable across lossless container rewrites."""
+    out = run(
+        [
+            require_ffmpeg(),
+            "-v",
+            "error",
+            "-i",
+            str(path),
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "pcm_s32le",
+            "-f",
+            "md5",
+            "-",
+        ]
+    ).stdout.decode()
+    return out.strip()
+
+
 def user_tags(info: dict[str, object]) -> dict[str, str]:
     """Every tag of a probe (format and streams) that is not a structural brand of the container."""
     tags: dict[str, str] = {}

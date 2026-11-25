@@ -29,9 +29,10 @@ for the rationale):
 
 The CHECK, unique and FK names are spelled out here because a migration never imports ``src``.
 
-Downgrade drops the track columns and then the audio versions and profiles (the holds the audio
-versions took are removed too, so no pin outlives the revision; the assets themselves are untouched
-and their retention clock is restarted, the same as a last release).
+Downgrade first refuses if any audio upload or generated audio output remains, because the previous
+code cannot read ``audio/*`` library rows. Once those rows are removed, it drops the track columns,
+audio versions and profiles (and their holds); remaining assets are untouched and their retention
+clock is restarted, the same as a last release.
 """
 
 from collections.abc import Sequence
@@ -151,6 +152,10 @@ def upgrade() -> None:
         sa.UniqueConstraint("id", "track_id", name="uq_studio_track_audio_id_track"),
         sa.CheckConstraint("version_number >= 1", name="ck_studio_track_audio_number"),
         sa.CheckConstraint("duration_ms > 0", name="ck_studio_track_audio_duration"),
+        sa.CheckConstraint(
+            "lyrics_version_id IS NULL OR plan_version_id IS NOT NULL",
+            name="ck_studio_track_audio_lyrics_need_plan",
+        ),
         sa.CheckConstraint("origin IN ('upload')", name="ck_studio_track_audio_origin"),
     )
     op.create_index("ix_studio_track_audio_product_id", "studio_track_audio", ["product_id"])
@@ -179,7 +184,28 @@ def upgrade() -> None:
 
 
 def downgrade() -> None:
-    """Downgrade database schema (drops every audio version and audio profile)."""
+    """Downgrade schema only when no audio assets would become unreadable."""
+    counts = (
+        op.get_bind()
+        .execute(
+            sa.text(
+                """
+            SELECT
+                (SELECT count(*) FROM user_images WHERE content_type LIKE 'audio/%') AS uploads,
+                (SELECT count(*) FROM generation_outputs WHERE content_type LIKE 'audio/%') AS outputs
+            """
+            )
+        )
+        .one()
+    )
+    audio_uploads, audio_outputs = int(counts.uploads), int(counts.outputs)
+    if audio_uploads or audio_outputs:
+        raise RuntimeError(
+            "cannot downgrade studio track audio while "
+            f"{audio_uploads} audio upload(s) and {audio_outputs} audio generation output(s) "
+            "remain; delete those rows first. Deleting them removes users' files."
+        )
+
     # Reverse order: the track pointer references the audio versions, which reference holds.
     op.drop_constraint(
         "fk_studio_tracks_current_audio_version", "studio_tracks", type_="foreignkey"

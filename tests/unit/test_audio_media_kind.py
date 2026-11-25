@@ -154,28 +154,29 @@ class TestUploadLimits:
         assert upload_size_limit_bytes(MediaKind.AUDIO, settings) == 60 * MIB
 
     @pytest.mark.parametrize(("image_mb", "audio_mb"), [(20, 80), (100, 80), (50, 50), (1, 1)])
-    def test_the_request_body_limit_is_the_largest_per_kind_limit(
+    def test_the_upload_router_limit_is_the_largest_per_kind_limit_plus_slack(
         self, image_mb: int, audio_mb: int
     ) -> None:
         settings = hermetic_settings(max_upload_size_mb=image_mb, audio_upload_max_mb=audio_mb)
         largest = max(upload_size_limit_bytes(kind, settings) for kind in MediaKind)
-        assert settings.max_request_body_bytes == largest == max(image_mb, audio_mb) * MIB
+        assert settings.upload_request_max_body_bytes == largest + MIB
 
-    @pytest.mark.parametrize("value", [0, -1, 96, 1000])
+    @pytest.mark.parametrize("value", [0, -1, 95, 96, 1000])
     def test_the_audio_limit_stays_under_the_proxy_cap(self, value: int) -> None:
         with pytest.raises(ValueError, match="audio_upload_max_mb"):
             hermetic_settings(audio_upload_max_mb=value)
 
-    def test_the_audio_limit_may_be_95(self) -> None:
-        assert hermetic_settings(audio_upload_max_mb=95).audio_upload_max_bytes == 95 * MIB
+    def test_the_audio_limit_may_be_94(self) -> None:
+        assert hermetic_settings(audio_upload_max_mb=94).audio_upload_max_bytes == 94 * MIB
 
-    def test_the_app_uses_the_largest_limit_as_its_body_size(self) -> None:
+    def test_the_app_and_storage_router_use_separate_body_sizes(self) -> None:
         import importlib
         import inspect
 
         module = importlib.import_module("src.api.app")  # the package re-exports ``app`` itself
         source = inspect.getsource(module.create_app)
-        assert "request_max_body_size=settings.max_request_body_bytes" in source
+        assert "request_max_body_size=settings.max_upload_size_bytes" in source
+        assert "request_max_body_size=settings.upload_request_max_body_bytes" in source
 
 
 class TestLibraryActions:

@@ -494,6 +494,10 @@ class StudioTrackAudio(Base):
         CheckConstraint("version_number >= 1", name="ck_studio_track_audio_number"),
         CheckConstraint("duration_ms > 0", name="ck_studio_track_audio_duration"),
         CheckConstraint(
+            "lyrics_version_id IS NULL OR plan_version_id IS NOT NULL",
+            name="ck_studio_track_audio_lyrics_need_plan",
+        ),
+        CheckConstraint(
             _in_list("origin", StudioTrackAudioOrigin), name="ck_studio_track_audio_origin"
         ),
         Index(

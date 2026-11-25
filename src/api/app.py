@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from litestar import Litestar, Request, Response
+from litestar import Litestar, Request, Response, Router
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import UploadFile
 from litestar.exceptions import HTTPException
@@ -611,7 +611,13 @@ def create_app() -> Litestar:
             InternalGpuSessionController,  # /v1/internal/gpu-sessions/*
             ProvisioningController,  # /v1/provisioning/scripts/*, /v1/provisioning/webhook/*
             # Storage
-            StorageController,
+            # Multipart uploads need the file limit plus framing slack. Keep this larger budget
+            # scoped to storage; every other route keeps the historical image/video app limit.
+            Router(
+                path="/",
+                route_handlers=[StorageController],
+                request_max_body_size=settings.upload_request_max_body_bytes,
+            ),
             # Jobs (unified, cross-provider)
             UnifiedJobController,
             # Real-time events (SSE)
@@ -681,7 +687,7 @@ def create_app() -> Litestar:
         openapi_config=openapi_config,
         debug=settings.debug,
         signature_types=[UploadFile],
-        request_max_body_size=settings.max_request_body_bytes,
+        request_max_body_size=settings.max_upload_size_bytes,
     )
 
 

@@ -27,6 +27,7 @@ from tests.audio_support import (
     CONTAINERS,
     SECRET_TAGS,
     AudioFixtures,
+    decoded_pcm_md5,
     has_attached_picture,
     probe,
     require_ffmpeg,
@@ -82,8 +83,12 @@ class TestEachAcceptedContainer:
         assert [s["codec_type"] for s in info["streams"]] == ["audio"]  # type: ignore[index, union-attr]
         for value in SECRET_TAGS.values():
             assert value.encode() not in prepared.data
-        # bit-identical audio: the packets hash equal, so nothing was re-encoded
-        assert stream_md5(stored) == stream_md5(source)
+        if container == "flac":
+            # FLAC is losslessly encoded again to remove bytes embedded in frame packets.
+            assert decoded_pcm_md5(stored) == decoded_pcm_md5(source)
+        else:
+            # The other containers retain bit-identical stream packets.
+            assert stream_md5(stored) == stream_md5(source)
 
     @pytest.mark.parametrize("container", list(CONTAINERS))
     async def test_the_facts_describe_the_stored_bytes(
@@ -349,6 +354,7 @@ class TestServiceInternalsWithoutFfmpeg:
             return AudioProbe(
                 format=media_format,
                 codec="flac",
+                sample_fmt="s16",
                 sample_rate_hz=44100,
                 channels=2,
                 bit_rate=None,

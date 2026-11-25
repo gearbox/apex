@@ -15,18 +15,21 @@ from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import UUID, uuid4
 
 import pytest
-from litestar import Litestar
+from litestar import Litestar, Router
 from litestar.di import Provide
 from litestar.testing import AsyncTestClient
 from sqlalchemy import delete, func, select
 from sqlalchemy.ext.asyncio import AsyncSession
 
 from src.api.middleware.product import ProductMiddleware
+from src.api.routes.auth import AuthController
 from src.api.routes.storage import StorageController
 from src.api.security.jwt import JWTConfig, JWTService
 from src.api.services.media_ingest import MediaIngestService
+from src.api.services.media_ingest.types import PreparedAudio
 from src.api.services.token_revocation import TokenRevocationService
 from src.api.services.user_content import UserContentService
+from src.core.enums import MediaFormat
 from src.core.product_registry import VEX_CONFIG
 from src.db.models.library import LibraryAudioProfile
 from src.db.models.media_hash import MediaHash
@@ -36,6 +39,7 @@ from tests.audio_support import (
     CONTAINERS,
     SECRET_TAGS,
     AudioFixtures,
+    decoded_pcm_md5,
     has_attached_picture,
     probe,
     require_ffmpeg,
@@ -66,6 +70,30 @@ _MIME = {
     "wav": "audio/wav",
     "flac": "audio/flac",
 }
+
+
+def _synchsafe(value: int) -> bytes:
+    return bytes(((value >> 21) & 0x7F, (value >> 14) & 0x7F, (value >> 7) & 0x7F, value & 0x7F))
+
+
+def _tagged_audio(path: Path, *, codec: str, seconds: int, title: str) -> None:
+    run(
+        [
+            require_ffmpeg(),
+            "-v",
+            "error",
+            "-y",
+            "-f",
+            "lavfi",
+            "-i",
+            f"sine=frequency=440:duration={seconds}",
+            "-c:a",
+            codec,
+            "-metadata",
+            f"title={title}",
+            str(path),
+        ]
+    )
 
 
 @pytest.fixture(autouse=True)
@@ -153,14 +181,21 @@ def _build(
         )
 
     app = Litestar(
-        route_handlers=[StorageController],
+        route_handlers=[
+            Router(
+                path="/",
+                route_handlers=[StorageController],
+                request_max_body_size=settings.upload_request_max_body_bytes,
+            ),
+            AuthController,
+        ],
         middleware=[ProductMiddleware],
         dependencies={
             "session": Provide(provide_session),
             "user_content": Provide(provide_user_content, sync_to_thread=False),
             "settings": Provide(lambda: settings, sync_to_thread=False),
         },
-        request_max_body_size=settings.max_request_body_bytes,
+        request_max_body_size=settings.max_upload_size_bytes,
     )
     app.state["jwt_service"] = JWTService(JWTConfig(secret_key=_SECRET))
     app.state["token_revocation"] = TokenRevocationService(None, max_token_ttl_seconds=0)
@@ -262,7 +297,10 @@ class TestEachContainer:
         assert [s["codec_type"] for s in info["streams"]] == ["audio"]  # type: ignore[index, union-attr]
         for value in SECRET_TAGS.values():
             assert value.encode() not in stored_bytes
-        assert stream_md5(stored) == stream_md5(source), "the audio was re-encoded"
+        if container == "flac":
+            assert decoded_pcm_md5(stored) == decoded_pcm_md5(source)
+        else:
+            assert stream_md5(stored) == stream_md5(source), "the audio was re-encoded"
         # the response
         assert body["media"]["media_type"] == "audio"
         assert body["media"]["original"]["content_type"] == _MIME[container]
@@ -357,6 +395,111 @@ class TestEachContainer:
 
         for value in SECRET_TAGS.values():
             assert value not in response.text
+
+
+class TestEmbeddedJunk:
+    async def test_splices_and_appended_tags_are_removed_from_uploads(
+        self,
+        harness: _Harness,
+        audio_files: AudioFixtures,
+        tmp_path: Path,
+    ) -> None:
+        from src.api.services.media_ingest.mp3_frames import (
+            _frame_length,
+            frames_only,
+            has_xing_header,
+            without_first_frame,
+        )
+
+        mp3_a, mp3_b = tmp_path / "a.mp3", tmp_path / "b.mp3"
+        flac_a, flac_b = tmp_path / "a.flac", tmp_path / "b.flac"
+        m4a_a, m4a_b = tmp_path / "a.m4a", tmp_path / "b.m4a"
+        _tagged_audio(mp3_a, codec="libmp3lame", seconds=8, title="FIRST_SECRET")
+        _tagged_audio(mp3_b, codec="libmp3lame", seconds=4, title="MIDDLE_SECRET")
+        _tagged_audio(flac_a, codec="flac", seconds=8, title="FIRST_SECRET")
+        _tagged_audio(flac_b, codec="flac", seconds=4, title="FLAC_MID_SECRET")
+        _tagged_audio(m4a_a, codec="aac", seconds=8, title="FIRST_SECRET")
+        _tagged_audio(m4a_b, codec="aac", seconds=4, title="M4A_MID_SECRET")
+
+        spliced_mp3 = tmp_path / "spliced.mp3"
+        spliced_mp3.write_bytes(mp3_a.read_bytes() + mp3_b.read_bytes())
+        appended_id3 = tmp_path / "appended-id3.mp3"
+        id3_text = b"APPENDED_ID3_SECRET"
+        id3_frame_data = b"\x03" + id3_text  # UTF-8 encoding marker, then the frame text
+        id3_frame = b"TIT2" + _synchsafe(len(id3_frame_data)) + b"\x00\x00" + id3_frame_data
+        id3_body = id3_frame
+        id3_size = len(id3_body) + 10  # v2.4 tag size includes its ten-byte footer
+        id3_header = b"ID3\x04\x00\x10" + _synchsafe(id3_size)
+        id3_footer = b"3DI\x04\x00\x10" + _synchsafe(id3_size)
+        appended_id3.write_bytes(mp3_a.read_bytes() + id3_header + id3_body + id3_footer)
+
+        clean_mp3 = frames_only(mp3_a.read_bytes()).frames
+        first_frame_length = _frame_length(clean_mp3, 0)
+        assert first_frame_length is not None
+        middle_junk = (b"arbitrary text with MIDDLE_JUNK_SECRET " * 32)[:1024].ljust(1024, b"!")
+        mp3_middle_junk = tmp_path / "middle-junk.mp3"
+        mp3_middle_junk.write_bytes(
+            clean_mp3[:first_frame_length] + middle_junk + clean_mp3[first_frame_length:]
+        )
+
+        spliced_flac = tmp_path / "spliced.flac"
+        spliced_flac.write_bytes(flac_a.read_bytes() + flac_b.read_bytes())
+        spliced_m4a = tmp_path / "spliced.m4a"
+        spliced_m4a.write_bytes(m4a_a.read_bytes() + m4a_b.read_bytes())
+        wav_with_flac = tmp_path / "wav-with-flac.wav"
+        wav_with_flac.write_bytes(audio_files.tone("wav").read_bytes() + flac_b.read_bytes())
+
+        cases = (
+            (spliced_mp3, "audio/mpeg", True),
+            (appended_id3, "audio/mpeg", True),
+            (mp3_middle_junk, "audio/mpeg", True),
+            (spliced_flac, "audio/flac", True),
+            (spliced_m4a, "audio/mp4", False),
+            (wav_with_flac, "audio/wav", False),
+        )
+        for source, content_type, verify_samples in cases:
+            response = await _upload(
+                harness,
+                source.read_bytes(),
+                content_type=content_type,
+                filename=source.name,
+            )
+
+            assert response.status_code == 201, (source.name, response.text)
+            stored_bytes = harness.storage.objects[list(harness.storage.objects)[-1]]
+            for secret in (
+                b"FIRST_SECRET",
+                b"MIDDLE_SECRET",
+                b"FLAC_MID_SECRET",
+                b"M4A_MID_SECRET",
+                b"APPENDED_ID3_SECRET",
+                b"MIDDLE_JUNK_SECRET",
+                *(value.encode() for value in SECRET_TAGS.values()),
+            ):
+                assert secret not in stored_bytes, (source.name, secret)
+            assert b"ID3" not in stored_bytes
+            assert b"APETAGEX" not in stored_bytes
+            if source.suffix == ".flac":
+                assert stored_bytes.count(b"fLaC") == 1
+            if source.name == "wav-with-flac.wav":
+                assert b"fLaC" not in stored_bytes
+
+            if verify_samples:
+                if source.suffix == ".mp3":
+                    real_frames = frames_only(source.read_bytes()).frames
+                    stored_frames = frames_only(stored_bytes).frames
+                    if has_xing_header(real_frames) or has_xing_header(stored_frames):
+                        real_frames = without_first_frame(real_frames)
+                        stored_frames = without_first_frame(stored_frames)
+                    input_for_decode = tmp_path / f"{source.stem}-input-frames.mp3"
+                    input_for_decode.write_bytes(real_frames)
+                    stored_path = tmp_path / f"stored-{source.name}"
+                    stored_path.write_bytes(stored_frames)
+                else:
+                    input_for_decode = source
+                    stored_path = tmp_path / f"stored-{source.name}"
+                    stored_path.write_bytes(stored_bytes)
+                assert decoded_pcm_md5(stored_path) == decoded_pcm_md5(input_for_decode)
 
 
 def _stereo_wav(path: Path, *, seconds: int) -> None:
@@ -559,6 +702,67 @@ class TestPerKindSizeLimits:
         assert response.status_code == 413
         spy.assert_not_awaited()
         assert storage.uploads == []
+
+    async def test_a_25_mib_json_body_on_auth_is_rejected_by_the_app_limit(
+        self, db_engine: AsyncEngine, user_id: UUID
+    ) -> None:
+        storage = _Storage()
+        settings = hermetic_settings(max_upload_size_mb=20, audio_upload_max_mb=80)
+        harness = _Harness(
+            _build(db_engine, settings, _ingestor(), storage),
+            storage,
+            user_id,
+            _ingestor(),
+            db_engine,
+        )
+        payload = b'{"email":"a@example.com","password":"' + b"x" * (25 * 1024 * 1024) + b'"}'
+
+        async with AsyncTestClient(app=harness.app) as client:
+            response = await client.post(
+                "/v1/auth/login",
+                content=payload,
+                headers={"Content-Type": "application/json", "X-Product-Id": "vex"},
+            )
+
+        assert response.status_code == 413, response.text
+
+    async def test_exact_audio_limit_passes_and_one_byte_more_is_file_too_large(
+        self, db_engine: AsyncEngine, user_id: UUID
+    ) -> None:
+        storage = _Storage()
+        ingestor = _ingestor()
+        ingestor.prepare_audio = AsyncMock(
+            return_value=PreparedAudio(
+                data=b"prepared audio",
+                format=MediaFormat.WAV,
+                codec="pcm_s16le",
+                sample_rate_hz=44100,
+                channels=1,
+                bit_rate=705600,
+                duration_ms=6000,
+                peaks=bytes(2048),
+                peaks_version=1,
+            )
+        )
+        settings = hermetic_settings(max_upload_size_mb=1, audio_upload_max_mb=2)
+        harness = _Harness(
+            _build(db_engine, settings, ingestor, storage), storage, user_id, ingestor, db_engine
+        )
+
+        exact = await _upload(
+            harness, b"x" * (2 * 1024 * 1024), content_type="audio/wav", filename="song.wav"
+        )
+        over = await _upload(
+            harness,
+            b"x" * (2 * 1024 * 1024 + 1),
+            content_type="audio/wav",
+            filename="too-large.wav",
+        )
+
+        assert exact.status_code == 201, exact.text
+        assert over.status_code == 400
+        assert over.json()["error"] == "file_too_large"
+        ingestor.prepare_audio.assert_awaited_once()
 
     async def test_ingest_rechecks_the_size_against_the_audio_budget(
         self, audio_files: AudioFixtures

@@ -1,12 +1,13 @@
-"""Audio ingest policy: probe parsing, the remux command line and waveform peaks (S2a).
+"""Audio ingest policy: probe parsing, container cleanup and waveform peaks (S2a).
 
 Everything here is pure (no I/O, no subprocess): ``MediaIngestService.prepare_audio`` runs
 ffprobe / ffmpeg and feeds their output through these functions, so the policy is testable
 without either binary.
 
-What is stored is **the upload's own audio stream, remuxed without re-encoding**, in the container
-it arrived in, with every tag, chapter and attached picture removed (Terms 7.5: embedded metadata
-is removed). Nothing in this module (or its callers) may log a tag value or a file name.
+What is stored is the upload's audio in its original container: **stream copy for MP3 (frames
+only), M4A and WAV; lossless re-encode for FLAC (bit-identical samples)**. Tags, chapters,
+attached pictures and bytes outside MP3 frames are removed (Terms 7.5: embedded metadata is
+removed). Nothing in this module (or its callers) may log a tag value or a file name.
 """
 
 from __future__ import annotations
@@ -27,6 +28,7 @@ from src.core.enums import MediaFormat
 __all__ = [
     "AUDIO_MAX_SECONDS",
     "AUDIO_MIN_SECONDS",
+    "MAX_PEAKS_SAMPLES",
     "PEAKS_BUCKETS",
     "PEAKS_BYTES",
     "PEAKS_SAMPLE_RATE_HZ",
@@ -47,6 +49,8 @@ PEAKS_BYTES: Final = PEAKS_BUCKETS * 2
 """Interleaved ``int8`` ``[min0, max0, min1, max1, ...]``."""
 PEAKS_SAMPLE_RATE_HZ: Final = 11025
 """The mono rate the peaks are decoded at (``-ac 1 -ar 11025 -f s16le``)."""
+MAX_PEAKS_SAMPLES: Final = (AUDIO_MAX_SECONDS + 1) * PEAKS_SAMPLE_RATE_HZ
+"""Hard upper bound for the peaks decoder, including its one-second duration slack."""
 
 _MAX_CHANNELS: Final = 8
 """The ``library_audio_profiles.channels`` CHECK is ``BETWEEN 1 AND 8``."""
@@ -67,6 +71,8 @@ _CODECS_BY_FORMAT: Final[dict[MediaFormat, frozenset[str]]] = {
     MediaFormat.WAV: frozenset({"pcm_s16le", "pcm_s24le"}),
     MediaFormat.FLAC: frozenset({"flac"}),
 }
+_FLAC_SAMPLE_FORMATS: Final = frozenset({"s16", "s32"})
+"""Sample formats the bundled FLAC encoder can preserve without an implicit conversion."""
 
 # ffmpeg muxer names. ``ipod`` is the M4A muxer (``M4A `` brand); ``mp4`` would write ``isom``.
 _MUXER_BY_FORMAT: Final[dict[MediaFormat, str]] = {
@@ -87,7 +93,7 @@ _MUXER_OPTIONS: Final[dict[MediaFormat, tuple[str, ...]]] = {
 }
 
 PROBE_SHOW_ENTRIES: Final = (
-    "stream=index,codec_type,codec_name,sample_rate,channels,bit_rate,duration"
+    "stream=index,codec_type,codec_name,sample_fmt,sample_rate,channels,bit_rate,duration"
     ":stream_disposition=attached_pic"
     ":format=format_name,duration,bit_rate"
 )
@@ -103,6 +109,7 @@ class AudioProbe:
 
     format: MediaFormat
     codec: str
+    sample_fmt: str | None
     sample_rate_hz: int
     channels: int
     bit_rate: int | None
@@ -159,6 +166,7 @@ def parse_audio_probe(decoded: object) -> AudioProbe:
         raise InvalidAudioError(AudioCode.INVALID, "the file has no audio stream")
 
     codec = audio.get("codec_name")
+    sample_fmt = audio.get("sample_fmt")
     channels = _positive_int(audio.get("channels"))
     sample_rate = _positive_int(audio.get("sample_rate"))
     if (
@@ -172,6 +180,11 @@ def parse_audio_probe(decoded: object) -> AudioProbe:
         )
     if sample_rate is None:
         raise InvalidAudioError(AudioCode.INVALID, "the audio stream has no sample rate")
+    if media_format is MediaFormat.FLAC and sample_fmt not in _FLAC_SAMPLE_FORMATS:
+        raise UnsupportedAudioError(
+            AudioCode.CODEC_NOT_SUPPORTED,
+            "the FLAC sample format cannot be preserved by the lossless encoder",
+        )
 
     # The audio stream's own duration first, then the container's. Valid only if one is positive.
     seconds = _positive_float(audio.get("duration")) or _positive_float(container.get("duration"))
@@ -187,6 +200,7 @@ def parse_audio_probe(decoded: object) -> AudioProbe:
     return AudioProbe(
         format=media_format,
         codec=codec,
+        sample_fmt=sample_fmt if isinstance(sample_fmt, str) else None,
         sample_rate_hz=sample_rate,
         channels=channels,
         bit_rate=_positive_int(audio.get("bit_rate")) or _positive_int(container.get("bit_rate")),
@@ -194,13 +208,42 @@ def parse_audio_probe(decoded: object) -> AudioProbe:
     )
 
 
-def remux_arguments(media_format: MediaFormat) -> list[str]:
-    """The ffmpeg options (between ``-i <in>`` and the output path) of the stream-copy remux.
+def remux_arguments(media_format: MediaFormat, *, sample_fmt: str | None = None) -> list[str]:
+    """The ffmpeg options (between ``-i <in>`` and the output path) for audio cleanup.
 
     Maps the first audio stream only (so attached pictures, extra streams and data tracks are
-    dropped), copies it bit-for-bit and clears every metadata scope: global, the audio stream and
-    chapters. ``bitexact`` keeps ffmpeg from writing its own encoder tag back.
+    dropped). MP3, M4A and WAV are stream-copied. FLAC is losslessly encoded at the same decoder
+    sample format; ``parse_audio_probe`` refuses formats the encoder cannot preserve. Every
+    metadata scope and chapters are cleared. ``bitexact`` prevents a new encoder tag.
     """
+    if media_format is MediaFormat.FLAC:
+        if sample_fmt not in _FLAC_SAMPLE_FORMATS:
+            raise UnsupportedAudioError(
+                AudioCode.CODEC_NOT_SUPPORTED,
+                "the FLAC sample format cannot be preserved by the lossless encoder",
+            )
+        return [
+            "-map",
+            "0:a:0",
+            "-c:a",
+            "flac",
+            "-sample_fmt",
+            sample_fmt,
+            "-compression_level",
+            "5",
+            "-map_metadata",
+            "-1",
+            "-map_metadata:s:a",
+            "-1",
+            "-map_chapters",
+            "-1",
+            "-fflags",
+            "+bitexact",
+            "-flags:a",
+            "+bitexact",
+            "-f",
+            "flac",
+        ]
     return [
         "-map",
         "0:a:0",
@@ -233,6 +276,8 @@ def compute_peaks(pcm: bytes) -> bytes:
         InvalidAudioError: Fewer samples than buckets (an empty or near-empty decode).
     """
     samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2")
+    if samples.size > MAX_PEAKS_SAMPLES:
+        raise InvalidAudioError(AudioCode.INVALID, "the audio decodes longer than allowed")
     if samples.size < PEAKS_BUCKETS:
         raise InvalidAudioError(AudioCode.INVALID, "the audio decoded to too few samples")
     peaks = np.empty(PEAKS_BUCKETS * 2, dtype=np.int8)

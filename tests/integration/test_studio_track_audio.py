@@ -37,6 +37,8 @@ from src.studio.errors import (
     AudioVersionLimitReached,
     AudioVersionNotFound,
     InvalidCursor,
+    LyricsIncompatibleWithPlan,
+    PlanRequired,
     StudioDocumentInvalid,
     StudioNotFound,
     VersionHasAudio,
@@ -252,6 +254,136 @@ class TestCreate:
             track_id, world.user_id, world.product_id, attach_body(await _audio(world))
         )
         assert out.label is None
+
+
+class TestRealizedPlanLyricsPair:
+    async def _versions(
+        self, world: StudioWorld, *, same_sections: bool = False
+    ) -> tuple[UUID, UUID, UUID, UUID]:
+        track_id = await _track(world)
+        verse = make_section(K.VERSE)
+        chorus = make_section(K.CHORUS)
+        first_plan, _ = await world.plan(track_id, make_plan(verse, title="Verse plan"))
+        lyrics, _ = await world.lyrics(
+            track_id,
+            make_lyrics((verse.id, ["a lyric"])),
+            first_plan.version.id,
+            make_current=False,
+        )
+        other_section = verse if same_sections else chorus
+        other_plan, _ = await world.plan(
+            track_id, make_plan(other_section, title="Other plan"), make_current=False
+        )
+        return track_id, first_plan.version.id, lyrics.version.id, other_plan.version.id
+
+    async def test_create_requires_a_plan_when_lyrics_are_linked(self, world: StudioWorld) -> None:
+        track_id, _, lyrics_id, _ = await self._versions(world)
+        asset = await _audio(world)
+
+        with pytest.raises(PlanRequired) as raised:
+            await world.audio.create(
+                track_id,
+                world.user_id,
+                world.product_id,
+                attach_body(asset, lyrics_version_id=lyrics_id),
+            )
+
+        assert raised.value.status_code == 422
+        assert await _holds_of(world.session) == 0
+        assert await _numbers(world, track_id) == []
+
+    async def test_create_refuses_an_incompatible_pair_without_holding_the_asset(
+        self, world: StudioWorld
+    ) -> None:
+        track_id, _, lyrics_id, other_plan_id = await self._versions(world)
+        asset = await _audio(world)
+
+        with pytest.raises(LyricsIncompatibleWithPlan) as raised:
+            await world.audio.create(
+                track_id,
+                world.user_id,
+                world.product_id,
+                attach_body(asset, plan_version_id=other_plan_id, lyrics_version_id=lyrics_id),
+            )
+
+        assert raised.value.issues[0].code == "unknown_section"
+        assert await _holds_of(world.session) == 0
+        assert await _numbers(world, track_id) == []
+
+    async def test_patch_requires_a_plan_when_lyrics_are_set_and_leaves_the_row_unchanged(
+        self, world: StudioWorld
+    ) -> None:
+        track_id, _, lyrics_id, _ = await self._versions(world)
+        audio_id = await _attach(world, track_id)
+
+        with pytest.raises(PlanRequired):
+            await world.audio.patch(
+                audio_id,
+                world.user_id,
+                world.product_id,
+                TrackAudioPatch(lyrics_version_id=lyrics_id),
+            )
+
+        row = await world.audio.get(audio_id, world.user_id, world.product_id)
+        assert row.plan_version_id is None
+        assert row.lyrics_version_id is None
+        assert await _holds_of(world.session) == 1
+
+    async def test_patch_refuses_an_incompatible_pair_and_leaves_links_unchanged(
+        self, world: StudioWorld
+    ) -> None:
+        track_id, _, lyrics_id, other_plan_id = await self._versions(world)
+        audio_id = await _attach(world, track_id)
+
+        with pytest.raises(LyricsIncompatibleWithPlan):
+            await world.audio.patch(
+                audio_id,
+                world.user_id,
+                world.product_id,
+                TrackAudioPatch(
+                    plan_version_id=other_plan_id,
+                    lyrics_version_id=lyrics_id,
+                ),
+            )
+
+        row = await world.audio.get(audio_id, world.user_id, world.product_id)
+        assert row.plan_version_id is None
+        assert row.lyrics_version_id is None
+
+    async def test_patch_cannot_clear_plan_while_keeping_lyrics(self, world: StudioWorld) -> None:
+        track_id, plan_id, lyrics_id, _ = await self._versions(world, same_sections=True)
+        audio_id = await _attach(
+            world, track_id, plan_version_id=plan_id, lyrics_version_id=lyrics_id
+        )
+
+        with pytest.raises(PlanRequired):
+            await world.audio.patch(
+                audio_id,
+                world.user_id,
+                world.product_id,
+                TrackAudioPatch(plan_version_id=None),
+            )
+
+        row = await world.audio.get(audio_id, world.user_id, world.product_id)
+        assert row.plan_version_id == plan_id
+        assert row.lyrics_version_id == lyrics_id
+
+    async def test_compatible_lyrics_can_name_a_different_compatible_plan(
+        self, world: StudioWorld
+    ) -> None:
+        track_id, _, lyrics_id, other_plan_id = await self._versions(world, same_sections=True)
+        asset = await _audio(world)
+
+        out = await world.audio.create(
+            track_id,
+            world.user_id,
+            world.product_id,
+            attach_body(asset, plan_version_id=other_plan_id, lyrics_version_id=lyrics_id),
+        )
+
+        assert out.plan_version_id == other_plan_id
+        assert out.lyrics_version_id == lyrics_id
+        assert await _holds_of(world.session) == 1
 
 
 class TestCap:
@@ -1033,7 +1165,7 @@ class TestDocumentVersionDelete:
             track_id, make_plan(verse, title="Two"), parent=None, make_current=True
         )
         lyrics, _ = await w.lyrics(
-            track_id, make_lyrics((verse.id, ["la"])), second.version.id, make_current=True
+            track_id, make_lyrics((verse.id, ["la"])), second.version.id, make_current=False
         )
         return first.version.id, second.version.id, lyrics.version.id
 
@@ -1055,16 +1187,7 @@ class TestDocumentVersionDelete:
     ) -> None:
         track_id = await _track(world)
         _, plan_id, lyrics_id = await self._two_versions(world, track_id)
-        verse = make_section(K.VERSE)
-        await world.versions.set_current(
-            track_id,
-            world.user_id,
-            world.product_id,
-            plan_version_id=msgspec.UNSET,
-            lyrics_version_id=None,
-        )
-        await _attach(world, track_id, lyrics_version_id=lyrics_id)
-        del verse, plan_id
+        await _attach(world, track_id, plan_version_id=plan_id, lyrics_version_id=lyrics_id)
 
         with pytest.raises(VersionHasAudio) as raised:
             await world.versions.delete(lyrics_id, world.user_id, world.product_id)

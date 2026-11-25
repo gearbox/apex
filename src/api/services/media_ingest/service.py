@@ -27,6 +27,8 @@ from src.api.services.image_normalization import (
     sniff_format,
 )
 from src.api.services.media_ingest.audio import (
+    AUDIO_MAX_SECONDS,
+    MAX_PEAKS_SAMPLES,
     PEAKS_SAMPLE_RATE_HZ,
     PEAKS_VERSION,
     PROBE_SHOW_ENTRIES,
@@ -43,6 +45,12 @@ from src.api.services.media_ingest.errors import (
     UnsupportedMediaError,
 )
 from src.api.services.media_ingest.image_strip import strip_image_metadata
+from src.api.services.media_ingest.mp3_frames import (
+    FrameScan,
+    frames_only,
+    has_xing_header,
+    without_first_frame,
+)
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
 from src.api.services.media_ingest.types import (
     ImageIngestPolicy,
@@ -207,10 +215,6 @@ class MediaIngestService:
         self._image_slots.release()
         self._log_cancelled_task_failure(task)
 
-    def _cancelled_video_done(self, task: asyncio.Task[PreparedVideo]) -> None:
-        self._video_slots.release()
-        self._log_cancelled_task_failure(task)
-
     @staticmethod
     def _log_cancelled_task_failure(task: asyncio.Task[object]) -> None:
         try:
@@ -234,28 +238,13 @@ class MediaIngestService:
             not math.isfinite(max_duration_seconds) or max_duration_seconds <= 0
         ):
             raise ValueError("max_duration_seconds must be finite and positive")
-        try:
-            await asyncio.wait_for(self._video_slots.acquire(), self._admission_wait_seconds)
-        except TimeoutError as exc:
-            raise MediaProcessingError("video preparation capacity is exhausted") from exc
-
-        task = asyncio.create_task(self._prepare_video(data, max_duration_seconds))
-        try:
-            result = await asyncio.shield(task)
-        except asyncio.CancelledError:
-            # The worker keeps the temporary directory and capacity slot until
-            # ffmpeg has been reaped; releasing here would over-admit work.
-            task.add_done_callback(self._cancelled_video_done)
-            raise
-        except Exception:
-            self._video_slots.release()
-            raise
-        else:
-            self._video_slots.release()
-            return result
+        return await self._in_video_slot(
+            self._prepare_video(data, max_duration_seconds),
+            busy_message="video preparation capacity is exhausted",
+        )
 
     async def prepare_audio(self, data: bytes) -> PreparedAudio:
-        """Probe, remux (never re-encode) and compute waveform peaks of an audio upload.
+        """Probe, clean the container using the format policy, then compute waveform peaks.
 
         Shares the **video** admission slots and deadline: it is ffmpeg work of the same weight.
         The container is sniffed by ffprobe, never taken from the client's MIME; the byte limit
@@ -508,10 +497,47 @@ class MediaIngestService:
             await asyncio.to_thread(input_path.write_bytes, data)
             source = await self._probe_audio(input_path, deadline)
             output_path = temp_dir / f"prepared.{source.format.value}"
-            await self._remux_audio(input_path, output_path, source, deadline)
+            if source.format is MediaFormat.MP3:
+                first_remux_path = temp_dir / "first-remux.mp3"
+                await self._remux_audio(input_path, first_remux_path, source, deadline)
+                first_remux = await asyncio.to_thread(first_remux_path.read_bytes)
+                first_scan = frames_only(first_remux)
+                if first_scan.dropped_bytes:
+                    logger.info(
+                        "media_ingest.audio_junk_dropped", dropped_bytes=first_scan.dropped_bytes
+                    )
+                    frames_path = temp_dir / "frames.mp3"
+                    await asyncio.to_thread(frames_path.write_bytes, first_scan.frames)
+                    await self._remux_audio(frames_path, output_path, source, deadline)
+                else:
+                    output_path = first_remux_path
+
+                final_mp3 = await asyncio.to_thread(output_path.read_bytes)
+                final_scan = frames_only(final_mp3)
+                self._require_clean_mp3(final_scan)
+                input_frames = frames_only(data).frames
+                output_frames = final_scan.frames
+                # A stream-copy muxer rewrites the Xing/Info metadata frame. It contains
+                # seek and gapless data rather than audible samples, so omit the first
+                # frame from both PCM inputs whenever either side has that header.
+                if has_xing_header(input_frames) or has_xing_header(output_frames):
+                    input_frames = without_first_frame(input_frames)
+                    output_frames = without_first_frame(output_frames)
+                input_frames_path = temp_dir / "input-frames.mp3"
+                output_frames_path = temp_dir / "output-frames.mp3"
+                await asyncio.to_thread(input_frames_path.write_bytes, input_frames)
+                await asyncio.to_thread(output_frames_path.write_bytes, output_frames)
+                await self._assert_decoded_audio_equal(
+                    input_frames_path, output_frames_path, deadline
+                )
+            else:
+                await self._remux_audio(input_path, output_path, source, deadline)
             # The stored bytes are what gets described and gated: probe the remuxed file again.
             prepared = await self._probe_audio(output_path, deadline)
             self._validate_audio_remux(source, prepared)
+            if source.format is MediaFormat.FLAC:
+                self._require_same_flac_sample_format(source, prepared)
+                await self._assert_decoded_audio_equal(input_path, output_path, deadline)
             peaks = await self._audio_peaks(output_path, deadline)
             prepared_bytes = await asyncio.to_thread(output_path.read_bytes)
             self._validate_prepared_audio_size(prepared_bytes)
@@ -539,6 +565,16 @@ class MediaIngestService:
         """A stream copy keeps the container: anything else is our fault, not the client's."""
         if prepared.format is not source.format:
             raise MediaProcessingError("audio remux changed the container")
+
+    @staticmethod
+    def _require_clean_mp3(scan: FrameScan) -> None:
+        if scan.dropped_bytes:
+            raise MediaProcessingError("MP3 remux left bytes outside audio frames")
+
+    @staticmethod
+    def _require_same_flac_sample_format(source: AudioProbe, prepared: AudioProbe) -> None:
+        if prepared.sample_fmt != source.sample_fmt:
+            raise MediaProcessingError("FLAC remux changed the decoded sample format")
 
     def _validate_prepared_audio_size(self, data: bytes) -> None:
         if len(data) > self._max_audio_bytes:
@@ -596,11 +632,45 @@ class MediaIngestService:
                 "file",
                 "-i",
                 str(source),
-                *remux_arguments(probe.format),
+                *remux_arguments(probe.format, sample_fmt=probe.sample_fmt),
                 str(destination),
             ],
             deadline,
         )
+
+    async def _assert_decoded_audio_equal(
+        self, source: Path, prepared: Path, deadline: float
+    ) -> None:
+        """Require the same decoded PCM samples; an encoder mismatch is a service failure."""
+
+        async def decoded_md5(path: Path) -> str:
+            result = await self._run_audio_stage(
+                "sample_verification",
+                [
+                    _FFMPEG,
+                    "-hide_banner",
+                    "-nostats",
+                    "-loglevel",
+                    "error",
+                    "-protocol_whitelist",
+                    "file",
+                    "-i",
+                    str(path),
+                    "-map",
+                    "0:a:0",
+                    "-c:a",
+                    "pcm_s32le",
+                    "-f",
+                    "md5",
+                    "-",
+                ],
+                deadline,
+            )
+            return result.stdout.decode("ascii", errors="strict").strip()
+
+        source_md5, prepared_md5 = await asyncio.gather(decoded_md5(source), decoded_md5(prepared))
+        if not source_md5 or source_md5 != prepared_md5:
+            raise MediaProcessingError("audio cleanup changed decoded samples")
 
     async def _audio_peaks(self, path: Path, deadline: float) -> bytes:
         """Decode the stored file to mono 11,025 Hz PCM and reduce it to the peaks."""
@@ -616,6 +686,8 @@ class MediaIngestService:
                 "file",
                 "-i",
                 str(path),
+                "-t",
+                str(AUDIO_MAX_SECONDS + 1),
                 "-map",
                 "0:a:0",
                 "-ac",
@@ -628,6 +700,8 @@ class MediaIngestService:
             ],
             deadline,
         )
+        if len(result.stdout) // 2 > MAX_PEAKS_SAMPLES:
+            raise InvalidAudioError(AudioCode.INVALID, "the audio decodes longer than allowed")
         return await asyncio.to_thread(compute_peaks, result.stdout)
 
     def _remaining(self, deadline: float) -> float:

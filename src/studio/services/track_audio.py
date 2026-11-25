@@ -66,6 +66,7 @@ from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTr
 from src.db.repositories.studio_track_audio import StudioTrackAudioRepository, TrackAudioRow
 from src.db.repositories.user_image import UserImageRepository
 from src.studio.constraints import MAX_AUDIO_VERSIONS_PER_TRACK, collect_length_issues
+from src.studio.documents import LyricsDocument, PlanDocument, decode_stored
 from src.studio.errors import (
     AssetNotEligible,
     AssetNotFound,
@@ -74,11 +75,14 @@ from src.studio.errors import (
     AudioVersionNotFound,
     DocumentIssue,
     InvalidCursor,
+    LyricsIncompatibleWithPlan,
+    PlanRequired,
     StudioDocumentInvalid,
     StudioNotFound,
     VersionKindMismatch,
     VersionNotFound,
 )
+from src.studio.validation import check_pair_compatible
 
 if TYPE_CHECKING:
     from collections.abc import Collection, Sequence
@@ -319,14 +323,25 @@ class TrackAudioService:
         # Track first, then the version (the lock order); the version may have been deleted while
         # this request waited for the track.
         await self._lock_track(current.track_id, user_id, product_id)
-        if await self._audio.lock(audio_id, user_id=user_id, product_id=product_id) is None:
+        locked = await self._audio.lock(audio_id, user_id=user_id, product_id=product_id)
+        if locked is None:
             raise AudioVersionNotFound
+        plan_version_id = (
+            locked.plan_version_id
+            if isinstance(data.plan_version_id, msgspec.UnsetType)
+            else data.plan_version_id
+        )
+        lyrics_version_id = (
+            locked.lyrics_version_id
+            if isinstance(data.lyrics_version_id, msgspec.UnsetType)
+            else data.lyrics_version_id
+        )
         await self._check_links(
             current.track_id,
             user_id,
             product_id,
-            plan_version_id=_given(data.plan_version_id),
-            lyrics_version_id=_given(data.lyrics_version_id),
+            plan_version_id=plan_version_id,
+            lyrics_version_id=lyrics_version_id,
         )
         if (
             isinstance(label, msgspec.UnsetType)
@@ -428,11 +443,12 @@ class TrackAudioService:
         plan_version_id: UUID | None,
         lyrics_version_id: UUID | None,
     ) -> None:
-        """Each given link must be a version **of this track** (404) **of the right kind** (422).
+        """Validate the plan/lyrics links as one pair under the track lock.
 
         Runs under the track lock, which a version delete takes too, so a version cannot vanish
         between this check and the insert.
         """
+        versions = {}
         for (field, kind, _), version_id in zip(
             _LINK_FIELDS, (plan_version_id, lyrics_version_id), strict=True
         ):
@@ -445,6 +461,26 @@ class TrackAudioService:
                 raise VersionNotFound
             if version.kind != kind.value:
                 raise VersionKindMismatch(field, kind.value)
+            versions[field] = version
+
+        if lyrics_version_id is not None and plan_version_id is None:
+            raise PlanRequired(status_code=422)
+        if plan_version_id is None or lyrics_version_id is None:
+            return
+
+        plan_version = versions["plan_version_id"]
+        lyrics_version = versions["lyrics_version_id"]
+        plan = decode_stored(
+            StudioDocumentKind.PLAN, plan_version.schema_version, plan_version.content
+        )
+        lyrics = decode_stored(
+            StudioDocumentKind.LYRICS, lyrics_version.schema_version, lyrics_version.content
+        )
+        if not isinstance(plan, PlanDocument) or not isinstance(lyrics, LyricsDocument):
+            raise TypeError("A studio document version decoded to the wrong kind.")
+        incompatibilities = check_pair_compatible(plan, lyrics)
+        if incompatibilities:
+            raise LyricsIncompatibleWithPlan(incompatibilities)
 
     @staticmethod
     def _raise_link_conflict(exc: IntegrityError) -> None:

@@ -1136,11 +1136,11 @@ Your own finished tracks. Upload an audio file to the library, then **attach** i
 |---|---|
 | Containers | **MP3** (`audio/mpeg`), **M4A / AAC** (`audio/mp4`), **WAV** (`audio/wav`, 16- or 24-bit PCM) and **FLAC** (`audio/flac`). The client may also send `audio/mp3`, `audio/x-m4a`, `audio/aac`, `audio/x-wav`, `audio/wave` or `audio/x-flac` as the declared type |
 | Not accepted | Ogg / Opus / Vorbis, AIFF, ALAC, float PCM, multi-channel beyond 8, any file with a **video** stream (an `.mp4` with a picture is a video upload), and a raw `.aac` (ADTS) stream |
-| Size | **80 MB** (`AUDIO_UPLOAD_MAX_MB`, 1–95); images and videos keep **20 MB**. A body over the declared kind's limit is `400 file_too_large` with that limit in `message` (`"Maximum size: 80MB"`); a body over every limit never reaches the server's handlers (`413`) |
+| Size | **80 MiB** (`AUDIO_UPLOAD_MAX_MB`, 1–94); images and videos keep **20 MiB**. A file over its declared kind's limit is `400 file_too_large` with that limit in `message` (`"Maximum size: 80MB"`). Only the storage router admits the largest file limit plus 1 MiB of multipart framing; other routes keep the app-wide `MAX_UPLOAD_SIZE_MB` body cap |
 | Duration | **5 seconds to 15 minutes** |
-| What you get back | **The audio you sent, bit for bit**: the first audio stream is copied into the same container, never re-encoded. Every tag (title, artist, comment, …), cover picture, chapter and other stream is **removed**, so the stored file carries no personal metadata |
+| What you get back | MP3 is stream-copied after keeping only MPEG audio frames; M4A and WAV are stream-copied; FLAC is losslessly re-encoded with bit-identical decoded samples. Every tag (title, artist, comment, …), cover picture, chapter, non-audio stream and bytes outside MP3 frames are **removed**, so the stored file carries no personal metadata |
 
-The server decides the type from the **bytes**, never from the declared type: a FLAC sent as `audio/mpeg` is stored (and returned) as `audio/flac`. Audio has **no perceptual hash or other fingerprint** and is **not moderated** in this phase: it stays private to the account.
+The server decides the type from the **bytes**, never from the declared type: a FLAC sent as `audio/mpeg` is stored (and returned) as `audio/flac`. It keeps stream copy for MP3 (frames only), M4A and WAV; FLAC is losslessly re-encoded with bit-identical decoded samples. Audio has **no perceptual hash or other fingerprint** and is **not moderated** in this phase: it stays private to the account.
 
 Audio problems are typed `422`s from the upload (`{error, message, status_code, detail}`; nothing is stored):
 
@@ -1227,7 +1227,7 @@ All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced
 
 ### Links to the plan and lyrics
 
-An audio version may name the plan and / or lyrics version it realizes ("this take is the one with the bridge"). A link must be a version **of the same track** (`404 version_not_found` otherwise, also for an unknown id) **of the right kind** (`422 version_kind_mismatch`, `detail: {field, expected}`). The database enforces it too. A linked version **cannot be deleted** while any audio version names it (`409 version_has_audio`, `detail.count`, §6): clear the link (`PATCH {plan_version_id: null}`) or delete the audio version first. A later phase may freeze the link; today it is editable.
+An audio version may name the plan and / or lyrics version it realizes ("this take is the one with the bridge"). A link must be a version **of the same track** (`404 version_not_found` otherwise, also for an unknown id) **of the right kind** (`422 version_kind_mismatch`, `detail: {field, expected}`). Lyrics require a plan (`422 plan_required`), and when both are linked they must be a compatible pair (`409 lyrics_incompatible_with_plan`, `detail.issues`), checked after merging PATCH values with the stored links. These are the same pair rules as the track's current plan and lyrics. The database enforces the same-track keys and the lyrics-needs-plan rule. A linked version **cannot be deleted** while any audio version names it (`409 version_has_audio`, `detail.count`, §6): clear the link (`PATCH {plan_version_id: null}`) or delete the audio version first. A later phase may freeze the link; today it is editable.
 
 ### Deleting
 
