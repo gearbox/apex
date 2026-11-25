@@ -8,6 +8,7 @@ cleanup and what the service does and does not log.
 from __future__ import annotations
 
 from datetime import UTC, datetime, timedelta
+from typing import cast
 from unittest.mock import AsyncMock, MagicMock, patch
 from uuid import uuid4
 
@@ -88,6 +89,11 @@ def _service() -> tuple[UserContentService, AsyncMock, AsyncMock]:
     return service, storage, ingestor.prepare_audio
 
 
+def _create(service: UserContentService) -> AsyncMock:
+    """The mocked ``UserImageRepository.create`` that ``_service`` installed."""
+    return cast("AsyncMock", service._image_repo.create)
+
+
 async def _upload(service: UserContentService, **overrides: object) -> object:
     arguments: dict[str, object] = {
         "user_id": uuid4(),
@@ -152,7 +158,7 @@ class TestSuccess:
         ) as insert:
             result = await _upload(service)
 
-        kwargs = service._image_repo.create.call_args.kwargs
+        kwargs = _create(service).call_args.kwargs
         assert kwargs["content_type"] == "audio/flac"
         assert kwargs["format"] == "flac"
         assert kwargs["duration_ms"] == 61_000
@@ -236,7 +242,7 @@ class TestIngestRefusals:
         assert raised.value.detail == error.detail  # type: ignore[attr-defined]
         assert isinstance(raised.value, UserContentValidationError)
         storage.upload.assert_not_awaited()
-        service._image_repo.create.assert_not_awaited()
+        _create(service).assert_not_awaited()
 
     async def test_an_untyped_refusal_is_a_plain_validation_error(self) -> None:
         service, storage, prepare_audio = _service()
@@ -275,12 +281,12 @@ class TestStorageAndDatabaseFailures:
         with pytest.raises(UserContentStorageError):
             await _upload(service)
 
-        service._image_repo.create.assert_not_awaited()
+        _create(service).assert_not_awaited()
 
     async def test_a_database_failure_deletes_the_stored_object_and_reraises(self) -> None:
         service, storage, _ = _service()
         stored = storage.upload.return_value
-        service._image_repo.create.side_effect = RuntimeError("database went away")
+        _create(service).side_effect = RuntimeError("database went away")
 
         with pytest.raises(RuntimeError, match="database went away"):
             await _upload(service)
@@ -304,7 +310,7 @@ class TestStorageAndDatabaseFailures:
 
     async def test_a_failing_cleanup_never_replaces_the_original_error(self) -> None:
         service, storage, _ = _service()
-        service._image_repo.create.side_effect = RuntimeError("the real failure")
+        _create(service).side_effect = RuntimeError("the real failure")
         storage.delete.side_effect = RuntimeError("the cleanup failure")
 
         with (

@@ -261,7 +261,7 @@ wheels = [
 
 [[package]]
 name = "apex"
-version = "0.55.0"
+version = "0.55.1"
 source = { editable = "." }
 dependencies = [
     { name = "aioboto3" },
@@ -3008,15 +3008,15 @@ wheels = [
 
 [[package]]
 name = "resend"
-version = "2.55.0"
+version = "2.55.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "requests" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/3a/37/8a26aa1e2b006b4b55b4ddbe630d0f357880378319584d3cdcfc7b312ad2/resend-2.55.0.tar.gz", hash = "sha256:2d28d1e66bec8b8e1a72546600d7f6695bfebcde300807381e1056e31c133fb8", size = 88297, upload-time = "2026-11-19T13:57:11.256Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/8e/e5/ea9af4b55e1ba80d8e6f586e388dfad511ce8fac928315abb78e4fbbca75/resend-2.55.1.tar.gz", hash = "sha256:cb187523ae15085690ddd8dbe9bb8945600edecfb466c7bbf6a81b60b09cfa7c", size = 88477, upload-time = "2026-11-25T14:55:19.78Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/bc/45/b5cf5d54d4274a34ef95c37be0740463cd29961a674cba729baa9d12e1a8/resend-2.55.0-py3-none-any.whl", hash = "sha256:355584d00cac9b9ffba279f7625a90f2baffd41a60ed2582eada5ff5e1bea53c", size = 129018, upload-time = "2026-11-19T13:57:09.764Z" },
+    { url = "https://files.pythonhosted.org/packages/04/23/2078f5db01031ac4652c51b1514704acf89d2245112786cb4a35e81a5f20/resend-2.55.1-py3-none-any.whl", hash = "sha256:1fe0f2010be1e1ba5fa6c85e8ac024bc83d3a573aa9d946ffe86de42701a67f7", size = 129251, upload-time = "2026-11-25T14:55:18.214Z" },
 ]
 
 [[package]]

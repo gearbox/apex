@@ -25,6 +25,22 @@ from src.core.generation_config import (
     GenerationDefaults,
 )
 
+# The studio / LLM settings the dev compose's ``api`` service forwards into the container
+# (interpolated from the developer's ``.env``). ``Settings(_env_file=None)`` skips the file but
+# not the process env, so a test that builds Settings must ``delenv`` ALL of them: scrubbing the
+# registry but not a kill switch that requires it makes ``Settings`` refuse to start.
+COMPOSE_FORWARDED_LLM_ENV: tuple[str, ...] = (
+    "STUDIO_ENABLED",
+    "STUDIO_RUNS_ENABLED",
+    "STUDIO_CHAT_ENABLED",
+    "LLM_MODELS",
+    "LLM_DEFAULT_MODEL",
+    "STUDIO_LLM_MODEL_BY_KIND",
+    "STUDIO_CHAT_MODEL",
+    "STUDIO_CHAT_MODEL_BY_PRODUCT",
+    "STUDIO_MEMORY_DRAFT_MODEL",
+)
+
 
 def hermetic_settings(**overrides: Any) -> Settings:
     """Construct Settings ignoring any local ``.env`` file (S4 remediation).

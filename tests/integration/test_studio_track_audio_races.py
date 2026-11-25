@@ -80,12 +80,19 @@ async def _audio(world: HoldWorld, user: User, **kwargs: object) -> UserImage:
 
 
 async def _attach(
-    world: HoldWorld, user: User, track_id: UUID, asset: UserImage, **links: UUID | None
+    world: HoldWorld,
+    user: User,
+    track_id: UUID,
+    asset: UserImage,
+    *,
+    plan_version_id: UUID | None = None,
+    lyrics_version_id: UUID | None = None,
 ) -> UUID:
     async with world.factory() as session:
-        out = await audio_service(session).create(
-            track_id, user.id, PRODUCT, attach_body(asset, **links)
+        body = attach_body(
+            asset, plan_version_id=plan_version_id, lyrics_version_id=lyrics_version_id
         )
+        out = await audio_service(session).create(track_id, user.id, PRODUCT, body)
         await session.commit()
         return out.id
 

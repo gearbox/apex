@@ -123,11 +123,14 @@ class TestLabelLimit:
         assert (constraints.AUDIO_LABEL_MAX, constraints.MAX_AUDIO_VERSIONS_PER_TRACK) == (60, 20)
 
     @pytest.mark.parametrize("struct", [TrackAudioCreate, TrackAudioPatch])
-    def test_the_label_accepts_its_limit_and_rejects_one_more(self, struct: type) -> None:
+    def test_the_label_accepts_its_limit_and_rejects_one_more(
+        self, struct: type[TrackAudioCreate | TrackAudioPatch]
+    ) -> None:
         payload: dict[str, object] = {"asset": ASSET} if struct is TrackAudioCreate else {}
 
-        ok = decode({**payload, "label": "x" * constraints.AUDIO_LABEL_MAX}, struct)
-        assert len(ok.label) == constraints.AUDIO_LABEL_MAX
+        label = "x" * constraints.AUDIO_LABEL_MAX
+        ok = decode({**payload, "label": label}, struct)
+        assert ok.label == label
         with pytest.raises(msgspec.ValidationError):
             decode({**payload, "label": "x" * (constraints.AUDIO_LABEL_MAX + 1)}, struct)
 
