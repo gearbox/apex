@@ -2,10 +2,13 @@
 
 from __future__ import annotations
 
+import os
+
 import pytest
 
-from src.api.services.media_ingest import AudioCode, InvalidAudioError
+from src.api.services.media_ingest import AudioCode, InvalidAudioError, mp3_frames
 from src.api.services.media_ingest.mp3_frames import (
+    MAX_REJECTED_CANDIDATES,
     FrameScan,
     _frame_length,
     audible_frames,
@@ -131,3 +134,81 @@ def test_empty_input_is_invalid_audio() -> None:
         frames_only(b"")
 
     assert raised.value.code is AudioCode.INVALID
+
+
+def _synchsafe(value: int) -> bytes:
+    return bytes(((value >> 21) & 0x7F, (value >> 14) & 0x7F, (value >> 7) & 0x7F, value & 0x7F))
+
+
+def test_random_trailing_data_uses_few_frame_length_checks(tmp_path, monkeypatch) -> None:
+    source = frames_only(_mp3(tmp_path / "random-junk.mp3")).frames
+    data = source + os.urandom(10 * 1024 * 1024)
+    original = mp3_frames._frame_length
+    calls = 0
+
+    def counted(data: bytes, offset: int) -> int | None:
+        nonlocal calls
+        calls += 1
+        return original(data, offset)
+
+    monkeypatch.setattr(mp3_frames, "_frame_length", counted)
+
+    scan = frames_only(data)
+
+    assert scan.frames == source
+    assert calls < 10_000
+
+
+def test_large_leading_id3_tag_is_skipped_before_frame_checks(tmp_path, monkeypatch) -> None:
+    source = frames_only(_mp3(tmp_path / "leading-tag.mp3")).frames
+    tag_body = b"x" * (5 * 1024 * 1024 - 10)
+    tag = b"ID3\x04\x00\x00" + _synchsafe(len(tag_body)) + tag_body
+    data = tag + source
+    stream_start = len(tag)
+    original = mp3_frames._frame_length
+    offsets: list[int] = []
+
+    def counted(data: bytes, offset: int) -> int | None:
+        offsets.append(offset)
+        return original(data, offset)
+
+    monkeypatch.setattr(mp3_frames, "_frame_length", counted)
+
+    scan = frames_only(data)
+
+    assert scan.frames == source
+    assert offsets[0] == stream_start
+    assert all(offset >= stream_start for offset in offsets)
+
+
+def test_repeated_plausible_headers_exhaust_the_rejection_budget(monkeypatch) -> None:
+    data = b"\xff\xfb\x90\x00" * 200_000
+    original = mp3_frames._frame_length
+    calls = 0
+
+    def counted(data: bytes, offset: int) -> int | None:
+        nonlocal calls
+        calls += 1
+        return original(data, offset)
+
+    monkeypatch.setattr(mp3_frames, "_frame_length", counted)
+
+    with pytest.raises(InvalidAudioError, match="too much non-audio data"):
+        frames_only(data)
+
+    assert calls <= 2 * MAX_REJECTED_CANDIDATES + 10
+
+
+def test_plausible_chain_inside_leading_id3_is_ignored(tmp_path) -> None:
+    source = frames_only(_mp3(tmp_path / "tag-chain.mp3")).frames
+    frame_length = _frame_length(source, 0)
+    assert frame_length is not None
+    body = bytearray(frame_length + 128)
+    body[64:68] = b"\xff\xfb\x90\x00"
+    body[64 + frame_length : 68 + frame_length] = b"\xff\xfb\x90\x00"
+    tag = b"ID3\x04\x00\x00" + _synchsafe(len(body)) + body
+
+    scan = frames_only(tag + source)
+
+    assert scan.frames == source
+    assert scan.dropped_bytes == len(tag)

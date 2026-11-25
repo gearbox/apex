@@ -7,16 +7,38 @@ MPEG-1, MPEG-2 and MPEG-2.5 Layer III frame boundaries without decoding the audi
 
 from __future__ import annotations
 
+import re
 from dataclasses import dataclass
 from typing import Final
 
 from src.api.services.media_ingest.errors import AudioCode, InvalidAudioError
 
-__all__ = ["FrameScan", "audible_frames", "frames_only", "has_xing_header"]
+__all__ = [
+    "MAX_REJECTED_CANDIDATES",
+    "FrameScan",
+    "audible_frames",
+    "frames_only",
+    "has_xing_header",
+]
 
 _BITRATES_MPEG1: Final = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
 _BITRATES_MPEG2: Final = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)
 _SAMPLE_RATES: Final = (44100, 48000, 32000)
+MAX_REJECTED_CANDIDATES: Final = 100_000
+"""Bound Python header checks on data made from repeated plausible MPEG headers."""
+
+# In byte 2, the high nibble is the bitrate index (1-14), the next two bits are the
+# sample-rate index (0-2), and the low two bits are padding/private (either value).
+# Construct the class from those rules so it cannot drift from the MPEG header fields.
+_LAYER3_BYTE2_VALUES: Final = bytes(
+    (bitrate_index << 4) | (sample_rate_index << 2) | low_bits
+    for bitrate_index in range(1, 15)
+    for sample_rate_index in range(3)
+    for low_bits in range(4)
+)
+_LAYER3_HEADER_PATTERN: Final[re.Pattern[bytes]] = re.compile(
+    rb"\xff[\xe2\xe3\xf2\xf3\xfa\xfb][" + re.escape(_LAYER3_BYTE2_VALUES) + rb"]"
+)
 
 
 @dataclass(frozen=True, slots=True)
@@ -129,11 +151,16 @@ def frames_only(data: bytes) -> FrameScan:
     if not data:
         raise InvalidAudioError(AudioCode.INVALID, "audio has no MPEG audio frames")
 
-    output = bytearray()
     stream_start = _leading_id3_end(data)
-    offset = 0
+    output = bytearray()
+    search_from = stream_start
     linked_next = False
-    while offset < len(data):
+    linked_end = stream_start
+    rejected_candidates = 0
+    candidate = _LAYER3_HEADER_PATTERN.search(data, search_from)
+    while candidate is not None:
+        offset = candidate.start()
+        linked_next = linked_next and offset == linked_end
         length = _frame_length(data, offset)
         if length is not None:
             end = offset + length
@@ -141,11 +168,18 @@ def frames_only(data: bytes) -> FrameScan:
             anchored_first = not output and offset == stream_start
             if linked_next or next_header or anchored_first:
                 output.extend(data[offset:end])
-                offset = end
+                search_from = end
                 linked_next = True
+                linked_end = end
+                candidate = _LAYER3_HEADER_PATTERN.search(data, search_from)
                 continue
-        offset += 1
+
+        rejected_candidates += 1
+        if rejected_candidates > MAX_REJECTED_CANDIDATES:
+            raise InvalidAudioError(AudioCode.INVALID, "the audio contains too much non-audio data")
+        search_from = offset + 1
         linked_next = False
+        candidate = _LAYER3_HEADER_PATTERN.search(data, search_from)
 
     if not output:
         raise InvalidAudioError(AudioCode.INVALID, "audio has no MPEG audio frames")

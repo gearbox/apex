@@ -496,7 +496,7 @@ class MediaIngestService:
                 first_remux_path = temp_dir / "first-remux.mp3"
                 await self._remux_audio(input_path, first_remux_path, source, deadline)
                 first_remux = await asyncio.to_thread(first_remux_path.read_bytes)
-                first_scan = frames_only(first_remux)
+                first_scan = await asyncio.to_thread(frames_only, first_remux)
                 if first_scan.dropped_bytes:
                     logger.info(
                         "media_ingest.audio_junk_dropped", dropped_bytes=first_scan.dropped_bytes
@@ -508,9 +508,10 @@ class MediaIngestService:
                     output_path = first_remux_path
 
                 final_mp3 = await asyncio.to_thread(output_path.read_bytes)
-                final_scan = frames_only(final_mp3)
+                final_scan = await asyncio.to_thread(frames_only, final_mp3)
                 self._require_clean_mp3(final_scan)
-                input_frames = frames_only(data).frames
+                source_scan = await asyncio.to_thread(frames_only, data)
+                input_frames = source_scan.frames
                 output_frames = final_scan.frames
                 # The remux writes a new Xing/Info frame; each side must omit its own
                 # metadata frame because its gapless trim values can differ.

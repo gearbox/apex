@@ -8,6 +8,7 @@ runs; a database failure after the object was stored deletes the object again.
 
 from __future__ import annotations
 
+import threading
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any
@@ -613,6 +614,31 @@ async def test_mp3_upload_preserves_decoded_samples_for_each_xing_layout(
     stored_frames_path = tmp_path / f"{variant}-stored-audible-frames.mp3"
     stored_frames_path.write_bytes(audible_frames(stored_scan.frames))
     assert decoded_pcm_md5(stored_frames_path) == decoded_pcm_md5(source_frames_path)
+
+
+async def test_mp3_frame_scans_run_off_the_event_loop(
+    harness: _Harness, audio_files: AudioFixtures
+) -> None:
+    from src.api.services.media_ingest import service as service_module
+
+    original = service_module.frames_only
+    on_main_thread: list[bool] = []
+
+    def observe_thread(data: bytes):
+        on_main_thread.append(threading.current_thread() is threading.main_thread())
+        return original(data)
+
+    with patch.object(service_module, "frames_only", observe_thread):
+        response = await _upload(
+            harness,
+            audio_files.tone("mp3").read_bytes(),
+            content_type="audio/mpeg",
+            filename="thread-check.mp3",
+        )
+
+    assert response.status_code == 201, response.text
+    assert len(on_main_thread) == 3
+    assert not any(on_main_thread)
 
 
 def _stereo_wav(path: Path, *, seconds: int) -> None:
