@@ -66,7 +66,6 @@ from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTr
 from src.db.repositories.studio_track_audio import StudioTrackAudioRepository, TrackAudioRow
 from src.db.repositories.user_image import UserImageRepository
 from src.studio.constraints import MAX_AUDIO_VERSIONS_PER_TRACK, collect_length_issues
-from src.studio.documents import LyricsDocument, PlanDocument, decode_stored
 from src.studio.errors import (
     AssetNotEligible,
     AssetNotFound,
@@ -76,12 +75,13 @@ from src.studio.errors import (
     DocumentIssue,
     InvalidCursor,
     LyricsIncompatibleWithPlan,
-    PlanRequired,
+    RealizedPlanRequired,
     StudioDocumentInvalid,
     StudioNotFound,
     VersionKindMismatch,
     VersionNotFound,
 )
+from src.studio.services.mappers import decode_lyrics, decode_plan
 from src.studio.validation import check_pair_compatible
 
 if TYPE_CHECKING:
@@ -92,7 +92,7 @@ if TYPE_CHECKING:
 
     from src.api.schemas.media import MediaObject
     from src.api.services.library_holds import AssetHoldService
-    from src.db.models.studio import StudioTrack
+    from src.db.models.studio import StudioDocumentVersion, StudioTrack
 
 __all__ = ["TrackAudioService", "build_audio_outs"]
 
@@ -448,36 +448,33 @@ class TrackAudioService:
         Runs under the track lock, which a version delete takes too, so a version cannot vanish
         between this check and the insert.
         """
-        versions = {}
-        for (field, kind, _), version_id in zip(
-            _LINK_FIELDS, (plan_version_id, lyrics_version_id), strict=True
-        ):
-            if version_id is None:
-                continue
-            version = await self._versions.get_on_track(
-                version_id, track_id, user_id=user_id, product_id=product_id
+        plan_row: StudioDocumentVersion | None = None
+        if plan_version_id is not None:
+            plan_row = await self._versions.get_on_track(
+                plan_version_id, track_id, user_id=user_id, product_id=product_id
             )
-            if version is None:
+            if plan_row is None:
                 raise VersionNotFound
-            if version.kind != kind.value:
-                raise VersionKindMismatch(field, kind.value)
-            versions[field] = version
+            if plan_row.kind != StudioDocumentKind.PLAN.value:
+                raise VersionKindMismatch("plan_version_id", StudioDocumentKind.PLAN.value)
+
+        lyrics_row: StudioDocumentVersion | None = None
+        if lyrics_version_id is not None:
+            lyrics_row = await self._versions.get_on_track(
+                lyrics_version_id, track_id, user_id=user_id, product_id=product_id
+            )
+            if lyrics_row is None:
+                raise VersionNotFound
+            if lyrics_row.kind != StudioDocumentKind.LYRICS.value:
+                raise VersionKindMismatch("lyrics_version_id", StudioDocumentKind.LYRICS.value)
 
         if lyrics_version_id is not None and plan_version_id is None:
-            raise PlanRequired(status_code=422)
-        if plan_version_id is None or lyrics_version_id is None:
+            raise RealizedPlanRequired
+        if plan_row is None or lyrics_row is None:
             return
 
-        plan_version = versions["plan_version_id"]
-        lyrics_version = versions["lyrics_version_id"]
-        plan = decode_stored(
-            StudioDocumentKind.PLAN, plan_version.schema_version, plan_version.content
-        )
-        lyrics = decode_stored(
-            StudioDocumentKind.LYRICS, lyrics_version.schema_version, lyrics_version.content
-        )
-        if not isinstance(plan, PlanDocument) or not isinstance(lyrics, LyricsDocument):
-            raise TypeError("A studio document version decoded to the wrong kind.")
+        plan = decode_plan(plan_row)
+        lyrics = decode_lyrics(lyrics_row)
         incompatibilities = check_pair_compatible(plan, lyrics)
         if incompatibilities:
             raise LyricsIncompatibleWithPlan(incompatibilities)

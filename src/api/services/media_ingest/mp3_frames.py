@@ -139,14 +139,16 @@ def _leading_id3_end(data: bytes) -> int:
 def frames_only(data: bytes) -> FrameScan:
     """Return only confirmed MPEG Layer III frames from ``data``.
 
-    A candidate is confirmed by a header exactly one frame later, or by the end of the input.
-    The first frame after a recognized leading ID3v2 tag (or at byte zero) is anchored by the
-    stream boundary; once it is confirmed, that adjacency retains the final frame before a junk
-    gap too. False syncs in arbitrary bytes must pass the double-header check before they can
-    start a chain.
+    The walk starts after a recognized leading ID3v2 tag, then jumps between plausible headers
+    with a compiled byte-pattern search. A candidate is confirmed by a header exactly one frame
+    later, or by the end of the input. The first frame at the stream start is anchored by that
+    boundary; once a chain is confirmed, a frame directly after its predecessor is kept too,
+    including the final frame before a junk gap. Rejected plausible headers are bounded by
+    ``MAX_REJECTED_CANDIDATES``.
 
     Raises:
-        InvalidAudioError: No complete MPEG Layer III frame was found.
+        InvalidAudioError: No complete MPEG Layer III frame was found, or too many plausible
+            headers were rejected as unconfirmed chains.
     """
     if not data:
         raise InvalidAudioError(AudioCode.INVALID, "audio has no MPEG audio frames")

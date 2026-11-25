@@ -28,7 +28,6 @@ from src.api.services.image_normalization import (
 )
 from src.api.services.media_ingest.audio import (
     AUDIO_MAX_SECONDS,
-    MAX_PEAKS_SAMPLES,
     PEAKS_SAMPLE_RATE_HZ,
     PEAKS_VERSION,
     PROBE_SHOW_ENTRIES,
@@ -45,7 +44,11 @@ from src.api.services.media_ingest.errors import (
     UnsupportedMediaError,
 )
 from src.api.services.media_ingest.image_strip import strip_image_metadata
-from src.api.services.media_ingest.mp3_frames import FrameScan, audible_frames, frames_only
+from src.api.services.media_ingest.mp3_frames import (
+    FrameScan,
+    audible_frames,
+    frames_only,
+)
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
 from src.api.services.media_ingest.types import (
     ImageIngestPolicy,
@@ -694,8 +697,6 @@ class MediaIngestService:
             ],
             deadline,
         )
-        if len(result.stdout) // 2 > MAX_PEAKS_SAMPLES:
-            raise InvalidAudioError(AudioCode.INVALID, "the audio decodes longer than allowed")
         return await asyncio.to_thread(compute_peaks, result.stdout)
 
     def _remaining(self, deadline: float) -> float:

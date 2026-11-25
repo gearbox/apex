@@ -39,6 +39,7 @@ from src.studio.errors import (
     InvalidCursor,
     LyricsIncompatibleWithPlan,
     PlanRequired,
+    RealizedPlanRequired,
     StudioDocumentInvalid,
     StudioNotFound,
     VersionHasAudio,
@@ -280,7 +281,7 @@ class TestRealizedPlanLyricsPair:
         track_id, _, lyrics_id, _ = await self._versions(world)
         asset = await _audio(world)
 
-        with pytest.raises(PlanRequired) as raised:
+        with pytest.raises(RealizedPlanRequired) as raised:
             await world.audio.create(
                 track_id,
                 world.user_id,
@@ -289,6 +290,8 @@ class TestRealizedPlanLyricsPair:
             )
 
         assert raised.value.status_code == 422
+        assert raised.value.code == "plan_required"
+        assert raised.value.message == "Audio linked to lyrics also needs its plan."
         assert await _holds_of(world.session) == 0
         assert await _numbers(world, track_id) == []
 

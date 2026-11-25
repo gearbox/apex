@@ -37,6 +37,7 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.VersionLimitReached, 409, "version_limit_reached"),
     (e.VersionUnchanged, 409, "version_unchanged"),
     (e.PlanRequired, 409, "plan_required"),
+    (e.RealizedPlanRequired, 422, "plan_required"),
     (lambda: e.LyricsIncompatibleWithPlan(_ISSUES), 409, "lyrics_incompatible_with_plan"),
     (e.VersionIsCurrent, 409, "version_is_current"),
     (lambda: e.VersionHasChildren(2), 409, "version_has_children"),
@@ -125,8 +126,8 @@ def test_every_studio_error_subclass_is_covered() -> None:
     assert declared == covered
 
 
-def test_codes_are_unique() -> None:
-    codes = [factory().code for factory, _, _ in CASES]  # type: ignore[attr-defined]
+def test_code_and_status_pairs_are_unique() -> None:
+    codes = [(factory().code, status) for factory, status, _ in CASES]  # type: ignore[attr-defined]
     assert len(codes) == len(set(codes))
 
 

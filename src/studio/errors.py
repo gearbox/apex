@@ -61,6 +61,7 @@ __all__ = [
     "PlanRequired",
     "PlanVersionNotFound",
     "ProjectHasTracks",
+    "RealizedPlanRequired",
     "RunInProgress",
     "RunLimitReached",
     "RunNotCancellable",
@@ -449,11 +450,12 @@ class PlanRequired(StudioError):
     status_code = 409
     message = "The track needs a plan first."
 
-    def __init__(self, *, status_code: int | None = None) -> None:
-        """Allow attach validation to use its specified 422 while existing callers stay 409."""
-        super().__init__()
-        if status_code is not None:
-            self.status_code = status_code  # type: ignore[misc]
+
+class RealizedPlanRequired(PlanRequired):
+    """Audio that realizes lyrics must also name the plan they were written for."""
+
+    status_code = 422
+    message = "Audio linked to lyrics also needs its plan."
 
 
 class LyricsRequired(StudioError):
