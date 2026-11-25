@@ -8,9 +8,9 @@ from src.api.services.media_ingest import AudioCode, InvalidAudioError
 from src.api.services.media_ingest.mp3_frames import (
     FrameScan,
     _frame_length,
+    audible_frames,
     frames_only,
     has_xing_header,
-    without_first_frame,
 )
 from tests.audio_support import require_ffmpeg, run
 
@@ -22,7 +22,7 @@ def _ffmpeg() -> None:
     require_ffmpeg()
 
 
-def _mp3(path, *, vbr: bool = False) -> bytes:
+def _mp3(path, *, vbr: bool = False, write_xing: bool = True) -> bytes:
     args = [
         require_ffmpeg(),
         "-v",
@@ -36,7 +36,18 @@ def _mp3(path, *, vbr: bool = False) -> bytes:
         "libmp3lame",
     ]
     args += ["-q:a", "3"] if vbr else ["-b:a", "128k"]
-    run([*args, "-write_id3v1", "0", "-id3v2_version", "0", "-write_xing", "1", str(path)])
+    run(
+        [
+            *args,
+            "-write_id3v1",
+            "0",
+            "-id3v2_version",
+            "0",
+            "-write_xing",
+            "1" if write_xing else "0",
+            str(path),
+        ]
+    )
     return path.read_bytes()
 
 
@@ -59,14 +70,30 @@ def test_clean_vbr_mp3_has_no_dropped_bytes(tmp_path) -> None:
     assert scan.dropped_bytes == 0
 
 
-def test_xing_frame_can_be_excluded_from_pcm_comparison(tmp_path) -> None:
+def test_audible_frames_drops_exactly_the_leading_xing_frame(tmp_path) -> None:
     source = frames_only(_mp3(tmp_path / "xing.mp3")).frames
     first_frame_length = _frame_length(source, 0)
 
     assert first_frame_length is not None
     assert has_xing_header(source)
-    assert without_first_frame(source) == source[first_frame_length:]
-    assert not has_xing_header(without_first_frame(source))
+    assert audible_frames(source) == source[first_frame_length:]
+    assert not has_xing_header(audible_frames(source))
+
+
+def test_audible_frames_keeps_a_stream_without_xing_unchanged(tmp_path) -> None:
+    source = frames_only(_mp3(tmp_path / "no-xing.mp3", write_xing=False)).frames
+
+    assert not has_xing_header(source)
+    assert audible_frames(source) == source
+
+
+def test_audible_frames_rejects_a_xing_only_stream(tmp_path) -> None:
+    source = frames_only(_mp3(tmp_path / "xing-only-source.mp3")).frames
+    first_frame_length = _frame_length(source, 0)
+
+    assert first_frame_length is not None
+    with pytest.raises(InvalidAudioError):
+        audible_frames(source[:first_frame_length])
 
 
 @pytest.mark.parametrize("where", ["start", "middle", "end"])

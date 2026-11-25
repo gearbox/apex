@@ -45,12 +45,7 @@ from src.api.services.media_ingest.errors import (
     UnsupportedMediaError,
 )
 from src.api.services.media_ingest.image_strip import strip_image_metadata
-from src.api.services.media_ingest.mp3_frames import (
-    FrameScan,
-    frames_only,
-    has_xing_header,
-    without_first_frame,
-)
+from src.api.services.media_ingest.mp3_frames import FrameScan, audible_frames, frames_only
 from src.api.services.media_ingest.pdq import pdq_from_image_bytes
 from src.api.services.media_ingest.types import (
     ImageIngestPolicy,
@@ -517,12 +512,10 @@ class MediaIngestService:
                 self._require_clean_mp3(final_scan)
                 input_frames = frames_only(data).frames
                 output_frames = final_scan.frames
-                # A stream-copy muxer rewrites the Xing/Info metadata frame. It contains
-                # seek and gapless data rather than audible samples, so omit the first
-                # frame from both PCM inputs whenever either side has that header.
-                if has_xing_header(input_frames) or has_xing_header(output_frames):
-                    input_frames = without_first_frame(input_frames)
-                    output_frames = without_first_frame(output_frames)
+                # The remux writes a new Xing/Info frame; each side must omit its own
+                # metadata frame because its gapless trim values can differ.
+                input_frames = audible_frames(input_frames)
+                output_frames = audible_frames(output_frames)
                 input_frames_path = temp_dir / "input-frames.mp3"
                 output_frames_path = temp_dir / "output-frames.mp3"
                 await asyncio.to_thread(input_frames_path.write_bytes, input_frames)

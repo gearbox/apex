@@ -96,6 +96,43 @@ def _tagged_audio(path: Path, *, codec: str, seconds: int, title: str) -> None:
     )
 
 
+def _mp3_audio(
+    path: Path,
+    *,
+    write_xing: bool | None = None,
+    vbr: bool = False,
+    title: str | None = None,
+) -> None:
+    args = [
+        require_ffmpeg(),
+        "-v",
+        "error",
+        "-y",
+        "-f",
+        "lavfi",
+        "-i",
+        "sine=frequency=440:duration=8",
+        "-c:a",
+        "libmp3lame",
+    ]
+    args += ["-q:a", "4"] if vbr else ["-b:a", "128k"]
+    if title is not None:
+        args += ["-metadata", f"title={title}"]
+    if write_xing is not None:
+        args += ["-write_xing", "1" if write_xing else "0"]
+    run([*args, str(path)])
+
+
+def _append_id3v24_footer(path: Path, data: bytes) -> None:
+    text = b"APPENDED_ID3_V24_SECRET"
+    frame_data = b"\x03" + text
+    frame = b"TIT2" + _synchsafe(len(frame_data)) + b"\x00\x00" + frame_data
+    size = len(frame) + 10  # v2.4 footer bytes are included in the declared tag size.
+    header = b"ID3\x04\x00\x10" + _synchsafe(size)
+    footer = b"3DI\x04\x00\x10" + _synchsafe(size)
+    path.write_bytes(data + header + frame + footer)
+
+
 @pytest.fixture(autouse=True)
 def _ffmpeg() -> None:
     require_ffmpeg()
@@ -406,9 +443,8 @@ class TestEmbeddedJunk:
     ) -> None:
         from src.api.services.media_ingest.mp3_frames import (
             _frame_length,
+            audible_frames,
             frames_only,
-            has_xing_header,
-            without_first_frame,
         )
 
         mp3_a, mp3_b = tmp_path / "a.mp3", tmp_path / "b.mp3"
@@ -486,11 +522,8 @@ class TestEmbeddedJunk:
 
             if verify_samples:
                 if source.suffix == ".mp3":
-                    real_frames = frames_only(source.read_bytes()).frames
-                    stored_frames = frames_only(stored_bytes).frames
-                    if has_xing_header(real_frames) or has_xing_header(stored_frames):
-                        real_frames = without_first_frame(real_frames)
-                        stored_frames = without_first_frame(stored_frames)
+                    real_frames = audible_frames(frames_only(source.read_bytes()).frames)
+                    stored_frames = audible_frames(frames_only(stored_bytes).frames)
                     input_for_decode = tmp_path / f"{source.stem}-input-frames.mp3"
                     input_for_decode.write_bytes(real_frames)
                     stored_path = tmp_path / f"stored-{source.name}"
@@ -500,6 +533,86 @@ class TestEmbeddedJunk:
                     stored_path = tmp_path / f"stored-{source.name}"
                     stored_path.write_bytes(stored_bytes)
                 assert decoded_pcm_md5(stored_path) == decoded_pcm_md5(input_for_decode)
+
+
+@pytest.mark.parametrize(
+    "variant",
+    [
+        "without_xing",
+        "explicit_xing",
+        "lame_cbr_info",
+        "lame_vbr_xing",
+        "spliced_second_id3_xing",
+        "trailing_id3v24_footer",
+    ],
+)
+async def test_mp3_upload_preserves_decoded_samples_for_each_xing_layout(
+    harness: _Harness, tmp_path: Path, variant: str
+) -> None:
+    from src.api.services.media_ingest.mp3_frames import (
+        audible_frames,
+        frames_only,
+        has_xing_header,
+    )
+
+    source = tmp_path / f"{variant}.mp3"
+    if variant == "without_xing":
+        _mp3_audio(source, write_xing=False)
+    elif variant == "explicit_xing":
+        _mp3_audio(source, write_xing=True)
+    elif variant == "lame_cbr_info":
+        # ffmpeg's libmp3lame CBR default writes an Info frame with a LAME tag.
+        _mp3_audio(source)
+    elif variant == "lame_vbr_xing":
+        # libmp3lame VBR writes a Xing frame and LAME gapless tag.
+        _mp3_audio(source, vbr=True)
+    elif variant == "spliced_second_id3_xing":
+        first = tmp_path / "first-no-xing.mp3"
+        second = tmp_path / "second-id3-xing.mp3"
+        _mp3_audio(first, write_xing=False)
+        _mp3_audio(second, write_xing=True, title="SPLICED_SECOND_SECRET")
+        source.write_bytes(first.read_bytes() + second.read_bytes())
+        assert not has_xing_header(frames_only(first.read_bytes()).frames)
+        assert has_xing_header(frames_only(second.read_bytes()).frames)
+    else:
+        no_xing = tmp_path / "no-xing.mp3"
+        _mp3_audio(no_xing, write_xing=False)
+        _append_id3v24_footer(source, no_xing.read_bytes())
+
+    source_bytes = source.read_bytes()
+    source_scan = frames_only(source_bytes)
+    source_frames = audible_frames(source_scan.frames)
+    if variant == "without_xing":
+        assert not has_xing_header(source_scan.frames)
+    elif variant == "explicit_xing":
+        assert has_xing_header(source_scan.frames)
+    elif variant == "lame_cbr_info":
+        assert b"Info" in source_scan.frames[:1024]
+        assert any(marker in source_scan.frames[:1024] for marker in (b"LAME", b"Lavc"))
+    elif variant == "lame_vbr_xing":
+        assert b"Xing" in source_scan.frames[:1024]
+        assert b"LAME" in source_scan.frames[:1024]
+    elif variant == "trailing_id3v24_footer":
+        assert b"3DI\x04\x00\x10" in source_bytes
+    response = await _upload(harness, source_bytes, content_type="audio/mpeg", filename=source.name)
+
+    assert response.status_code == 201, response.text
+    stored_bytes = harness.storage.objects[list(harness.storage.objects)[-1]]
+    stored_scan = frames_only(stored_bytes)
+    assert stored_scan.dropped_bytes == 0
+    assert stored_scan.frames == stored_bytes
+    assert b"ID3" not in stored_bytes
+    assert b"SPLICED_SECOND_SECRET" not in stored_bytes
+    assert b"APPENDED_ID3_V24_SECRET" not in stored_bytes
+
+    source_frames_path = tmp_path / f"{variant}-audible-frames.mp3"
+    source_frames_path.write_bytes(source_frames)
+    stored_path = tmp_path / f"stored-{variant}.mp3"
+    stored_path.write_bytes(stored_bytes)
+    assert user_tags(probe(stored_path)) == {}
+    stored_frames_path = tmp_path / f"{variant}-stored-audible-frames.mp3"
+    stored_frames_path.write_bytes(audible_frames(stored_scan.frames))
+    assert decoded_pcm_md5(stored_frames_path) == decoded_pcm_md5(source_frames_path)
 
 
 def _stereo_wav(path: Path, *, seconds: int) -> None:

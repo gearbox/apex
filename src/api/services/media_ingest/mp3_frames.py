@@ -12,7 +12,7 @@ from typing import Final
 
 from src.api.services.media_ingest.errors import AudioCode, InvalidAudioError
 
-__all__ = ["FrameScan", "frames_only", "has_xing_header", "without_first_frame"]
+__all__ = ["FrameScan", "audible_frames", "frames_only", "has_xing_header"]
 
 _BITRATES_MPEG1: Final = (0, 32, 40, 48, 56, 64, 80, 96, 112, 128, 160, 192, 224, 256, 320, 0)
 _BITRATES_MPEG2: Final = (0, 8, 16, 24, 32, 40, 48, 56, 64, 80, 96, 112, 128, 144, 160, 0)
@@ -81,12 +81,25 @@ def has_xing_header(data: bytes) -> bool:
     )
 
 
-def without_first_frame(data: bytes) -> bytes:
+def _without_first_frame(data: bytes) -> bytes:
     """Return the byte stream after its first complete MPEG Layer III frame."""
     length = _frame_length(data, 0)
     if length is None or length >= len(data):
         raise InvalidAudioError(AudioCode.INVALID, "audio needs at least two MPEG audio frames")
     return data[length:]
+
+
+def audible_frames(frames: bytes) -> bytes:
+    """Return the stream's audio frames, dropping only its own Xing/Info frame.
+
+    A leading Xing/Info frame carries no samples; the MP3 demuxer uses its LAME gapless
+    values to trim encoder delay and padding. A remux writes a new header whose trim values
+    can differ from the source's. Removing each stream's own header lets the decoded PCM
+    comparison cover the same frames without applying either stream's gapless trim.
+    """
+    if has_xing_header(frames):
+        return _without_first_frame(frames)
+    return frames
 
 
 def _leading_id3_end(data: bytes) -> int:
