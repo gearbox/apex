@@ -297,7 +297,9 @@ class TestErrors:
     def test_details(self) -> None:
         assert CastLimitReached("looks", 12).detail == {"kind": "looks", "limit": 12}
         assert CastMemberInUse(3).detail == {"blockers": [{"code": "artists", "count": 3}]}
-        assert AssetNotEligible("not_an_image").detail == {"reason": "not_an_image"}
+        assert AssetNotEligible("media_kind_not_accepted").detail == {
+            "reason": "media_kind_not_accepted"
+        }
         assert CastMemberNotFound().detail is None
 
     def test_messages_are_static(self) -> None:

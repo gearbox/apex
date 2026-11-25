@@ -32,6 +32,7 @@ from src.api.services.user_content import (
 )
 from src.core.enums import OutputMediaType
 from src.core.library_ref import AssetRef, LibraryAssetSource
+from tests.unit.helpers import hermetic_settings
 
 pytestmark = pytest.mark.unit
 
@@ -101,6 +102,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(content_type="image/gif"),
         )
 
@@ -108,14 +110,15 @@ class TestUploadImageHandler:
         user_content.upload_image.assert_not_awaited()
 
     async def test_file_too_large_returns_400(self) -> None:
-        from src.api.routes.storage import MAX_UPLOAD_SIZE, StorageController
+        from src.api.routes.storage import StorageController
 
-        big_data = b"\x89PNG\r\n" + b"\x00" * (MAX_UPLOAD_SIZE + 1)
+        big_data = b"\x89PNG\r\n" + b"\x00" * (20 * 1024 * 1024 + 1)
         user_content = AsyncMock()
         response = await StorageController.upload_image.fn(  # type: ignore[attr-defined]
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(data=big_data),
         )
 
@@ -129,6 +132,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(data=b""),
         )
 
@@ -145,6 +149,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -160,6 +165,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -179,6 +185,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -194,6 +201,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -212,6 +220,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(filename="тестовое фото.png"),
         )
 
@@ -232,6 +241,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -254,6 +264,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(),
         )
 
@@ -272,6 +283,7 @@ class TestUploadImageHandler:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=_upload_form(filename=None),  # type: ignore[arg-type]
         )
 
@@ -298,6 +310,7 @@ class TestUploadFrameLineage:
             MagicMock(),
             current_user_id=uuid4(),
             user_content=user_content,
+            settings=hermetic_settings(),
             data=form,
         )
 

@@ -28,6 +28,10 @@ from src.api.services.generation.service import (
     GenerationError,
     GenerationService,
 )
+from src.api.services.generation.source_media import (
+    SourceMediaKindNotSupportedError,
+    SourceMediaValidationError,
+)
 from src.api.services.idempotency import IdempotencyReplayResult
 from src.core.enums import (
     GenerationType,
@@ -374,6 +378,38 @@ class TestCommitAcknowledgementRecovery:
             session=session,
         )
         assert response.status_code == 400
+        idempotency.fail.assert_awaited_once()
+
+    @pytest.mark.parametrize(
+        ("error", "code"),
+        [
+            (SourceMediaValidationError("source_media position 0 is wrong"), "validation_error"),
+            (
+                SourceMediaKindNotSupportedError("source_media position 0 is audio"),
+                "media_kind_not_supported",
+            ),
+        ],
+    )
+    async def test_a_source_media_problem_is_a_422_with_its_own_code(
+        self, error: SourceMediaValidationError, code: str
+    ) -> None:
+        """Audio is a library kind that is never a generation source: its own typed code."""
+        svc, idempotency, session = _make_route_handler_mocks(generate_side_effect=error)
+        request = UnifiedGenerationRequest(
+            prompt="a cat",
+            generation_type=GenerationType.T2I,
+            model=ModelType.AISHA_IMAGE,
+        )
+
+        response = await self._call_handler(
+            request,
+            generation_service=svc,
+            idempotency_service=idempotency,
+            session=session,
+        )
+
+        assert response.status_code == 422
+        assert response.content.error == code
         idempotency.fail.assert_awaited_once()
 
     async def test_feature_not_supported_from_provider_returns_400(self) -> None:

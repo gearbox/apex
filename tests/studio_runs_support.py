@@ -42,6 +42,7 @@ from src.studio.services.run_kinds.registry import default_handlers
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from tests.legal_support import TEST_LEGAL_DIGEST
+from tests.library_holds_support import make_holds
 
 if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncEngine
@@ -324,7 +325,7 @@ class RunWorld:
         from src.core.enums import StudioDocumentOrigin
 
         async with self.factory() as session, session.begin():
-            track = await TrackService(session).create(
+            track = await TrackService(session, make_holds(session)).create(
                 actor.project_id, actor.user_id, PRODUCT, title
             )
             if plan is not None:

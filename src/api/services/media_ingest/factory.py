@@ -33,6 +33,7 @@ def _build(
         max_animation_frames=settings.media_ingest_max_animation_frames,
         video_slots=video_slots,
         image_slots=image_slots,
+        max_audio_bytes=settings.audio_upload_max_bytes,
     )
 
 

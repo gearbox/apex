@@ -40,6 +40,7 @@ from src.db.repositories.output import OutputRepository
 from src.db.repositories.user_image import UserImageRepository
 from tests.db_locks import backend_pid, wait_until_blocked
 from tests.library_holds_support import (
+    IMAGES,
     RETENTION_DAYS,
     HoldWorld,
     output_ref,
@@ -111,7 +112,11 @@ class Racer:
 
 async def _hold(session: AsyncSession, ref: AssetRef, user: User, *, kind: str = KIND) -> UUID:
     return await AssetHoldService(session, retention_days=RETENTION_DAYS).hold(
-        ref, holder=AssetHolder(kind=kind, id=uuid4()), user_id=user.id, product_id="vex"
+        ref,
+        holder=AssetHolder(kind=kind, id=uuid4()),
+        user_id=user.id,
+        product_id="vex",
+        accept=IMAGES,
     )
 
 

@@ -136,6 +136,8 @@ async def run_video_worker(
         secret_access_key=settings.r2_secret_access_key,
         bucket_name=settings.r2_bucket_name,
         retention_days=settings.retention_days,
+        max_upload_size_mb=settings.max_upload_size_mb,
+        audio_upload_max_mb=settings.audio_upload_max_mb,
     )
     r2_storage = R2StorageService(r2_settings)
     logger.info("video_worker.r2_initialized", worker=worker_name, bucket=settings.r2_bucket_name)

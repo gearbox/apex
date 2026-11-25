@@ -6,7 +6,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 import structlog
-from litestar import Litestar, Request, Response
+from litestar import Litestar, Request, Response, Router
 from litestar.config.cors import CORSConfig
 from litestar.datastructures import UploadFile
 from litestar.exceptions import HTTPException
@@ -67,6 +67,7 @@ from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.routes.studio_projects import StudioProjectController
 from src.api.routes.studio_runs import StudioRunController
+from src.api.routes.studio_track_audio import StudioTrackAudioController
 from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
@@ -610,7 +611,13 @@ def create_app() -> Litestar:
             InternalGpuSessionController,  # /v1/internal/gpu-sessions/*
             ProvisioningController,  # /v1/provisioning/scripts/*, /v1/provisioning/webhook/*
             # Storage
-            StorageController,
+            # Multipart uploads need the file limit plus framing slack. Keep this larger budget
+            # scoped to storage; every other route keeps the historical image/video app limit.
+            Router(
+                path="/",
+                route_handlers=[StorageController],
+                request_max_body_size=settings.upload_request_max_body_bytes,
+            ),
             # Jobs (unified, cross-provider)
             UnifiedJobController,
             # Real-time events (SSE)
@@ -626,6 +633,7 @@ def create_app() -> Litestar:
             StudioMemoryController,
             StudioProjectController,
             StudioRunController,
+            StudioTrackAudioController,
             StudioTrackController,
             # Content proxy
             ContentProxyController,

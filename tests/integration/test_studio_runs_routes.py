@@ -27,7 +27,6 @@ from src.api.app import (
 )
 from src.api.dependencies.common import (
     get_product_id,
-    get_studio_track_service,
     get_studio_version_service,
 )
 from src.api.routes.studio_runs import StudioRunController
@@ -42,6 +41,7 @@ from src.studio.errors import StudioError
 from src.studio.services.run import StudioRunService
 from src.studio.services.run_events import StudioRunEvents
 from tests.legal_support import TEST_LEGAL_REGISTRY
+from tests.library_holds_support import provide_track_service
 from tests.llm_support import FakeLlm
 from tests.studio_llm import make_draft
 from tests.studio_runs_support import SECRET, RunWorld
@@ -92,7 +92,7 @@ def _build_app(world: RunWorld) -> Litestar:
             "session": Provide(provide_session),
             "product_id": Provide(get_product_id, sync_to_thread=False),
             "studio_run_service": Provide(provide_run_service, sync_to_thread=False),
-            "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
+            "studio_track_service": Provide(provide_track_service, sync_to_thread=False),
             "studio_version_service": Provide(get_studio_version_service, sync_to_thread=False),
         },
         exception_handlers={

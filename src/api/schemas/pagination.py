@@ -224,3 +224,36 @@ def decode_memory_cursor(cursor: str) -> tuple[date | None, datetime, UUID]:
     if created_at.tzinfo is None:
         raise ValueError("Invalid pagination cursor: created_at has no time zone")
     return occurred_on, created_at, id_
+
+
+# ---------------------------------------------------------------------------
+# Version-number cursor (track audio versions)
+# ---------------------------------------------------------------------------
+#
+# A track's audio versions are listed newest first by ``version_number``, which is unique per
+# track, so the keyset is that one integer. (``created_at`` would not do: it is the transaction's
+# start time, so two creates racing for the track lock can number against their timestamps.) The
+# payload has a ``version_number`` key: a cursor issued by another endpoint has none and is invalid.
+
+
+def encode_version_number_cursor(version_number: int) -> str:
+    """Encode the ``version_number`` of the last item on a page of a track's audio versions."""
+    payload = {"version_number": version_number}
+    return base64.urlsafe_b64encode(json.dumps(payload).encode()).decode()
+
+
+def decode_version_number_cursor(cursor: str) -> int:
+    """Decode an audio-version-list cursor into the ``version_number`` to continue after.
+
+    Raises:
+        ValueError: The cursor is malformed, has no ``version_number`` (a cursor issued by another
+            endpoint) or the number is not a positive integer.
+    """
+    try:
+        data = json.loads(base64.urlsafe_b64decode(cursor.encode()))
+        number = data["version_number"]
+    except Exception as exc:
+        raise ValueError(f"Invalid pagination cursor: {exc}") from exc
+    if type(number) is not int or number < 1:
+        raise ValueError("Invalid pagination cursor: version_number is not a positive integer")
+    return number

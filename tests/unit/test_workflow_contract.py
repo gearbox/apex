@@ -26,7 +26,11 @@ from src.api.services.workflow.contract import (
     BoundWorkflow,
     WorkflowRole,
 )
-from src.api.services.workflow.parser import WorkflowContractError, parse_workflow_map
+from src.api.services.workflow.parser import (
+    NON_WORKFLOW_MEDIA_KINDS,
+    WorkflowContractError,
+    parse_workflow_map,
+)
 from src.core.enums import (
     MEDIA_SLOT_KINDS,
     GenerationType,
@@ -256,8 +260,16 @@ def test_capabilities_are_mechanical_from_the_bound_map() -> None:
 
 
 @pytest.mark.parametrize("media_kind", MediaKind)
-def test_every_media_kind_has_capability_derivation(media_kind: MediaKind) -> None:
-    assert media_kind in _GENERATION_TYPES_BY_MEDIA
+def test_every_media_kind_has_capability_derivation_or_is_not_a_workflow_kind(
+    media_kind: MediaKind,
+) -> None:
+    """A new library kind must be decided here: derived, or declared as no workflow's media."""
+    assert (media_kind in _GENERATION_TYPES_BY_MEDIA) != (media_kind in NON_WORKFLOW_MEDIA_KINDS)
+
+
+def test_audio_is_a_library_kind_but_never_a_workflow_media() -> None:
+    assert {MediaKind.AUDIO} == NON_WORKFLOW_MEDIA_KINDS
+    assert MediaKind.AUDIO not in _GENERATION_TYPES_BY_MEDIA
 
 
 def test_missing_capability_derivation_fails_loudly(

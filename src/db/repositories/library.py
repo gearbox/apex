@@ -77,6 +77,14 @@ def _effective_expiry(
     return case((held, literal(PINNED_EXPIRY, DateTime(timezone=True))), else_=expires_at)
 
 
+def _kind_prefix_pattern(kind: MediaKind) -> str:
+    """The ``LIKE`` pattern of a media kind: a **positive** prefix match (``image/%``, ...).
+
+    Never ``NOT LIKE 'video/%'`` for images: that listed audio (and any future kind) as images.
+    """
+    return f"{kind.value}/%"
+
+
 def _escape_like_term(term: str) -> str:
     """Escape LIKE metacharacters so user search input is matched literally.
 
@@ -360,10 +368,8 @@ class LibraryRepository:
             )
         )
 
-        if media_type == MediaKind.VIDEO:
-            query = query.where(UserImage.content_type.like("video/%"))
-        elif media_type == MediaKind.IMAGE:
-            query = query.where(~UserImage.content_type.like("video/%"))
+        if media_type is not None:
+            query = query.where(UserImage.content_type.like(_kind_prefix_pattern(media_type)))
 
         if favorite is True:
             query = query.where(LibraryAssetMetadata.is_favorite.is_(True))
@@ -487,10 +493,10 @@ class LibraryRepository:
             )
         )
 
-        if media_type == MediaKind.VIDEO:
-            query = query.where(GenerationOutput.content_type.like("video/%"))
-        elif media_type == MediaKind.IMAGE:
-            query = query.where(~GenerationOutput.content_type.like("video/%"))
+        if media_type is not None:
+            query = query.where(
+                GenerationOutput.content_type.like(_kind_prefix_pattern(media_type))
+            )
 
         if model is not None:
             query = query.where(GenerationJob.model == model)

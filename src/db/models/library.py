@@ -11,6 +11,9 @@ from sqlalchemy import (
     DateTime,
     ForeignKey,
     Index,
+    Integer,
+    LargeBinary,
+    SmallInteger,
     String,
     Text,
     UniqueConstraint,
@@ -30,6 +33,7 @@ __all__ = [
     "LibraryAssetHold",
     "LibraryAssetMetadata",
     "LibraryAssetTag",
+    "LibraryAudioProfile",
     "LibraryProject",
     "LibraryTag",
 ]
@@ -364,3 +368,65 @@ class LibraryAssetHold(Base):
 
     def __repr__(self) -> str:
         return f"<LibraryAssetHold {self.id} holder={self.holder_kind}:{self.holder_id}>"
+
+
+class LibraryAudioProfile(Base):
+    """Probed facts and waveform peaks of one stored audio asset (S2a, migration 062).
+
+    Library-owned (D12) and 1:1 with its asset: exactly one of ``upload_id`` / ``output_id`` is set
+    (CHECK), each a typed foreign key with ``ON DELETE CASCADE`` (the profile has no life of its
+    own: the retention sweep, a delete and a user hard-delete remove it with the asset). The
+    ``output_id`` arm is unused until generated audio exists (S2b). ``duration_ms`` is **not** here:
+    it is the asset row's own column, like a video's.
+
+    ``peaks`` is ``PEAKS_BYTES`` (2,048) bytes: ``int8`` interleaved ``[min0, max0, min1, max1, ...]``
+    over 1,024 buckets of the mono decode; ``peaks_version`` lets a finer zoom level (S3) coexist.
+    """
+
+    __tablename__ = "library_audio_profiles"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    upload_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), ForeignKey("user_images.id", ondelete="CASCADE"), nullable=True
+    )
+    output_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("generation_outputs.id", ondelete="CASCADE"),
+        nullable=True,
+    )
+    codec: Mapped[str] = mapped_column(String(16), nullable=False)
+    sample_rate_hz: Mapped[int] = mapped_column(Integer, nullable=False)
+    channels: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    bit_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    peaks: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
+    peaks_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        nullable=False,
+        server_default=text("CURRENT_TIMESTAMP"),
+    )
+
+    __table_args__ = (
+        CheckConstraint(
+            "num_nonnulls(upload_id, output_id) = 1",
+            name="ck_library_audio_profiles_one_asset",
+        ),
+        CheckConstraint("octet_length(peaks) = 2048", name="ck_library_audio_profiles_peaks_size"),
+        CheckConstraint("channels BETWEEN 1 AND 8", name="ck_library_audio_profiles_channels"),
+        Index(
+            "uq_library_audio_profiles_upload",
+            "upload_id",
+            unique=True,
+            postgresql_where=text("upload_id IS NOT NULL"),
+        ),
+        Index(
+            "uq_library_audio_profiles_output",
+            "output_id",
+            unique=True,
+            postgresql_where=text("output_id IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<LibraryAudioProfile {self.id} codec={self.codec}>"

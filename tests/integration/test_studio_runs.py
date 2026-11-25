@@ -40,6 +40,7 @@ from src.studio.errors import (
 from src.studio.planner.drafts import DraftRefusal
 from src.studio.run_requests import PlanRunRequest
 from src.studio.services.version import DocumentVersionService
+from tests.library_holds_support import make_holds
 from tests.llm_support import FakeLlm
 from tests.studio_llm import make_draft, refusal_draft
 from tests.studio_runs_support import PRODUCT, RunWorld
@@ -868,12 +869,16 @@ class TestExecution:
 
         async with run_world.factory() as session:
             with pytest.raises(RunInProgress):
-                await TrackService(session).delete(track_id, actor.user_id, PRODUCT)
+                await TrackService(session, make_holds(session)).delete(
+                    track_id, actor.user_id, PRODUCT
+                )
         assert len(await run_world.runs(track_id)) == 1
 
         await run_world.drive(FakeLlm(make_draft()))  # finished runs do not block
         async with run_world.factory() as session, session.begin():
-            await TrackService(session).delete(track_id, actor.user_id, PRODUCT)
+            await TrackService(session, make_holds(session)).delete(
+                track_id, actor.user_id, PRODUCT
+            )
         assert await run_world.runs(track_id) == []
         assert await run_world.versions(track_id) == []
         assert await run_world.refunds_and_debits(actor) == (

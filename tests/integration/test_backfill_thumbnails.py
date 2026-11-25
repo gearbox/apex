@@ -582,6 +582,44 @@ async def test_video_without_poster_is_skipped_no_poster(
     assert output_stats.failed == 0
 
 
+async def test_audio_has_no_thumbnail_and_is_skipped_and_counted_in_both_tables(
+    db_session: AsyncSession, backfill_product_id: str
+) -> None:
+    """S2a: audio is a library kind with no thumbnail. It is skipped (counted, never FAILED), its
+    object is never downloaded and no derivative is created; the image next to it is still done."""
+    user = await _make_user(db_session, product_id=backfill_product_id, suffix="-audio")
+    job = await _make_job(db_session, user)
+    audio_upload = await _make_upload(
+        db_session, user, content_type="audio/flac", fmt="flac", original_filename="a.flac"
+    )
+    audio_output = await _make_output(db_session, user, job, content_type="audio/mpeg", fmt="mp3")
+    image_upload = await _make_upload(db_session, user)
+    r2 = _make_mock_r2()
+
+    output_stats, upload_stats = await run_backfill(
+        db_session,
+        r2,
+        product=backfill_product_id,
+        only=_Only.all,
+        dry_run=False,
+        batch_size=100,
+        limit=None,
+        include_video=True,
+    )
+
+    assert output_stats.skipped_no_thumbnail == 1
+    assert upload_stats.skipped_no_thumbnail == 1
+    assert output_stats.failed == 0
+    assert upload_stats.failed == 0
+    assert upload_stats.updated == 1  # the image
+    assert await _get_upload_derivatives(db_session, audio_upload.id) == []
+    assert await _get_output_derivatives(db_session, audio_output.id) == []
+    assert len(await _get_upload_derivatives(db_session, image_upload.id)) == 2
+    downloaded = [call.args[0] for call in r2.download.await_args_list]
+    assert audio_upload.storage_key not in downloaded
+    assert audio_output.storage_key not in downloaded
+
+
 # ---------------------------------------------------------------------------
 # Product filter
 # ---------------------------------------------------------------------------

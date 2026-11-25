@@ -24,6 +24,9 @@ __all__ = [
     "ArtistNotFound",
     "AssetNotEligible",
     "AssetNotFound",
+    "AudioVersionIsCurrent",
+    "AudioVersionLimitReached",
+    "AudioVersionNotFound",
     "CastLabelTaken",
     "CastLimitReached",
     "CastLookNameTaken",
@@ -58,6 +61,7 @@ __all__ = [
     "PlanRequired",
     "PlanVersionNotFound",
     "ProjectHasTracks",
+    "RealizedPlanRequired",
     "RunInProgress",
     "RunLimitReached",
     "RunNotCancellable",
@@ -69,11 +73,14 @@ __all__ = [
     "StudioNotFound",
     "TrackLimitReached",
     "TrackOrderMismatch",
+    "VersionHasAudio",
     "VersionHasChildren",
     "VersionInUseByRun",
     "VersionIsCurrent",
     "VersionIsLyricsBase",
+    "VersionKindMismatch",
     "VersionLimitReached",
+    "VersionNotFound",
     "VersionUnchanged",
 ]
 
@@ -189,6 +196,22 @@ class CastLookNotFound(StudioError):
     message = "Cast look not found."
 
 
+class VersionNotFound(StudioError):
+    """A plan / lyrics version a request links to is not a version of this track."""
+
+    code = "version_not_found"
+    status_code = 404
+    message = "Version not found on this track."
+
+
+class AudioVersionNotFound(StudioError):
+    """No such audio version for the caller (unknown, another track's, user's or product's)."""
+
+    code = "audio_version_not_found"
+    status_code = 404
+    message = "Audio version not found."
+
+
 class AssetNotFound(StudioError):
     """The library asset is missing, or owned by another user or another product (all the same)."""
 
@@ -200,7 +223,7 @@ class AssetNotFound(StudioError):
 class AssetNotEligible(StudioError):
     """The library asset cannot be used as a reference; ``detail.reason`` says why.
 
-    ``reason`` is one of ``derivative``, ``not_an_image``, ``job_not_available``.
+    ``reason`` is one of ``derivative``, ``media_kind_not_accepted``, ``job_not_available``.
     """
 
     code = "asset_not_eligible"
@@ -212,6 +235,21 @@ class AssetNotEligible(StudioError):
 
 
 # --- 400 / 422 -------------------------------------------------------------------------------
+
+
+class VersionKindMismatch(StudioError):
+    """A realized-version link names a version of the other kind (a lyrics id as the plan link).
+
+    ``detail`` is ``{"field": "plan_version_id" | "lyrics_version_id", "expected": "plan" |
+    "lyrics"}`` - names only, never document text.
+    """
+
+    code = "version_kind_mismatch"
+    status_code = 422
+    message = "The version is not of the kind this link takes."
+
+    def __init__(self, field: str, expected: str) -> None:
+        super().__init__({"field": field, "expected": expected})
 
 
 class IdempotencyKeyRequired(StudioError):
@@ -364,6 +402,23 @@ class CastMemberInUse(StudioError):
         super().__init__({"blockers": [{"code": "artists", "count": artist_count}]})
 
 
+class AudioVersionLimitReached(StudioError):
+    """A track holds at most ``limit`` audio versions; ``detail`` is ``{"limit": n}``."""
+
+    code = "audio_version_limit_reached"
+    status_code = 409
+    message = "The maximum number of audio versions for this track has been reached."
+
+    def __init__(self, limit: int) -> None:
+        super().__init__({"limit": limit})
+
+
+class AudioVersionIsCurrent(StudioError):
+    code = "audio_version_is_current"
+    status_code = 409
+    message = "The audio version is the track's current audio."
+
+
 class ProjectHasTracks(StudioError):
     code = "project_has_tracks"
     status_code = 409
@@ -394,6 +449,13 @@ class PlanRequired(StudioError):
     code = "plan_required"
     status_code = 409
     message = "The track needs a plan first."
+
+
+class RealizedPlanRequired(PlanRequired):
+    """Audio that realizes lyrics must also name the plan they were written for."""
+
+    status_code = 422
+    message = "Audio linked to lyrics also needs its plan."
 
 
 class LyricsRequired(StudioError):
@@ -572,6 +634,17 @@ class VersionInUseByRun(StudioError):
     code = "version_in_use_by_run"
     status_code = 409
     message = "A run in progress is working on this version."
+
+
+class VersionHasAudio(StudioError):
+    """Audio versions realize this plan / lyrics version; ``detail.count`` says how many."""
+
+    code = "version_has_audio"
+    status_code = 409
+    message = "Audio versions are linked to this version."
+
+    def __init__(self, count: int) -> None:
+        super().__init__({"count": count})
 
 
 class VersionIsLyricsBase(StudioError):

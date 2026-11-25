@@ -34,6 +34,7 @@ class FrameLineageReason(StrEnum):
     MALFORMED_REF = "malformed_ref"
     MALFORMED_TIMESTAMP = "malformed_timestamp"
     VIDEO_FILE = "video_file"
+    AUDIO_FILE = "audio_file"
     SOURCE_UNAVAILABLE = "source_unavailable"
     SOURCE_NOT_VIDEO = "source_not_video"
     SOURCE_DURATION_UNKNOWN = "source_duration_unknown"

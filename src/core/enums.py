@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 from enum import StrEnum
-from typing import TYPE_CHECKING, Final
+from typing import TYPE_CHECKING, Final, assert_never
 
 if TYPE_CHECKING:
     from collections.abc import Mapping
@@ -310,10 +310,20 @@ class MediaFormat(StrEnum):
     MP4 = "mp4"
     WEBM = "webm"
     MOV = "mov"
+    # Audio formats (S2a): stored as the upload's own container, remuxed without re-encoding.
+    MP3 = "mp3"
+    M4A = "m4a"
+    WAV = "wav"
+    FLAC = "flac"
 
     @classmethod
     def from_content_type(cls, content_type: str) -> MediaFormat:
-        """Get format from MIME type."""
+        """Get format from MIME type.
+
+        Accepts the stored audio types and the aliases clients send for them
+        (``audio/mp3``, ``audio/x-m4a``, ``audio/aac``, ``audio/x-wav``,
+        ``audio/wave``, ``audio/x-flac``).
+        """
         mapping = {
             "image/png": cls.PNG,
             "image/jpeg": cls.JPEG,
@@ -322,6 +332,16 @@ class MediaFormat(StrEnum):
             "video/mp4": cls.MP4,
             "video/webm": cls.WEBM,
             "video/quicktime": cls.MOV,
+            "audio/mpeg": cls.MP3,
+            "audio/mp3": cls.MP3,
+            "audio/mp4": cls.M4A,
+            "audio/x-m4a": cls.M4A,
+            "audio/aac": cls.M4A,
+            "audio/wav": cls.WAV,
+            "audio/x-wav": cls.WAV,
+            "audio/wave": cls.WAV,
+            "audio/flac": cls.FLAC,
+            "audio/x-flac": cls.FLAC,
         }
         fmt = mapping.get(content_type.lower())
         if fmt is None:
@@ -340,6 +360,10 @@ class MediaFormat(StrEnum):
             "mp4": cls.MP4,
             "webm": cls.WEBM,
             "mov": cls.MOV,
+            "mp3": cls.MP3,
+            "m4a": cls.M4A,
+            "wav": cls.WAV,
+            "flac": cls.FLAC,
         }
         fmt = mapping.get(ext)
         if fmt is None:
@@ -356,6 +380,10 @@ class MediaFormat(StrEnum):
             self.MP4: "video/mp4",
             self.WEBM: "video/webm",
             self.MOV: "video/quicktime",
+            self.MP3: "audio/mpeg",
+            self.M4A: "audio/mp4",
+            self.WAV: "audio/wav",
+            self.FLAC: "audio/flac",
         }[self]
 
     @property
@@ -364,14 +392,32 @@ class MediaFormat(StrEnum):
         return self.value
 
     @property
+    def kind(self) -> MediaKind:
+        """The library media kind this format belongs to (exhaustive: mypy finds a new format)."""
+        match self:
+            case MediaFormat.PNG | MediaFormat.JPEG | MediaFormat.WEBP:
+                return MediaKind.IMAGE
+            case MediaFormat.MP4 | MediaFormat.WEBM | MediaFormat.MOV:
+                return MediaKind.VIDEO
+            case MediaFormat.MP3 | MediaFormat.M4A | MediaFormat.WAV | MediaFormat.FLAC:
+                return MediaKind.AUDIO
+            case _:
+                assert_never(self)
+
+    @property
     def is_video(self) -> bool:
         """Check if this is a video format."""
-        return self in (MediaFormat.MP4, MediaFormat.WEBM, MediaFormat.MOV)
+        return self.kind is MediaKind.VIDEO
 
     @property
     def is_image(self) -> bool:
-        """Check if this is an image format."""
-        return not self.is_video
+        """Check if this is an image format (an audio format is not one)."""
+        return self.kind is MediaKind.IMAGE
+
+    @property
+    def is_audio(self) -> bool:
+        """Check if this is an audio format."""
+        return self.kind is MediaKind.AUDIO
 
 
 class MediaKind(StrEnum):
@@ -379,6 +425,7 @@ class MediaKind(StrEnum):
 
     IMAGE = "image"
     VIDEO = "video"
+    AUDIO = "audio"
 
 
 class MediaSlot(StrEnum):
@@ -411,6 +458,7 @@ _GENERATION_TYPE_MEDIA: Final[Mapping[GenerationType, tuple[frozenset[MediaKind]
 _META_BY_MEDIA: Final[Mapping[MediaKind, str]] = {
     MediaKind.IMAGE: "image",
     MediaKind.VIDEO: "video",
+    MediaKind.AUDIO: "audio",
 }
 
 
@@ -427,15 +475,18 @@ class UnknownMediaTypeError(ValueError):
 _MEDIA_KIND_PREFIXES: Final[tuple[tuple[str, MediaKind], ...]] = (
     ("image/", MediaKind.IMAGE),
     ("video/", MediaKind.VIDEO),
+    ("audio/", MediaKind.AUDIO),
 )
 
 
 def media_kind_from_content_type(content_type: str) -> MediaKind:
     """Return the library media kind represented by ``content_type``.
 
-    Only image and video MIME families are library media today.  Treating an
-    unknown family as an image would incorrectly make e.g. audio selectable
-    by image-only generation models, so it is an explicit error instead.
+    Image, video and audio MIME families are library media.  Treating an
+    unknown family as an image would incorrectly make it selectable by
+    image-only generation models, so it is an explicit error instead.  Callers
+    handle ``MediaKind.AUDIO`` deliberately: audio is a library kind but never
+    a generation input, and it has no thumbnail.
     """
     for prefix, kind in _MEDIA_KIND_PREFIXES:
         if content_type.startswith(prefix):
@@ -979,6 +1030,16 @@ class StudioDocumentOrigin(StrEnum):
     USER = "user"
     LLM = "llm"  # written by the planner (P2); declared now so the CHECK needs no migration
     IMPORT = "import"  # written by the Suno-text importer (P1b); same reason
+
+
+class StudioTrackAudioOrigin(StrEnum):
+    """Where a track's audio version came from.
+
+    ``generated`` joins in S2b (a new CHECK member then); until a generator exists the column
+    admits only ``upload``.
+    """
+
+    UPLOAD = "upload"
 
 
 class StudioIncompatibleLyricsPolicy(StrEnum):

@@ -158,6 +158,7 @@ def track_out(track: StudioTrack) -> TrackOut:
         title=track.title,
         current_plan_version_id=track.current_plan_version_id,
         current_lyrics_version_id=track.current_lyrics_version_id,
+        current_audio_version_id=track.current_audio_version_id,
         created_at=track.created_at,
         updated_at=track.updated_at,
     )

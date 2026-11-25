@@ -39,8 +39,11 @@ _NEW_TABLES = (
 )
 
 
-def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("revision_061", _PATH)
+_NEXT = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "062_studio_track_audio.py"
+
+
+def _load(path: Path = _PATH, name: str = "revision_061") -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -51,6 +54,13 @@ def _load() -> ModuleType:
 def _run(connection: Connection, action: str) -> None:
     with Operations.context(MigrationContext.configure(connection)):
         getattr(_load(), action)()
+
+
+def _run_next(connection: Connection, action: str) -> None:
+    """Revision 062 (track audio): its tables point at the holds, so it goes first on the way
+    down and last on the way up."""
+    with Operations.context(MigrationContext.configure(connection)):
+        getattr(_load(_NEXT, "revision_062"), action)()
 
 
 async def _exists(connection: AsyncConnection, table: str) -> bool:
@@ -216,6 +226,7 @@ async def test_downgrade_drops_what_the_revision_made_and_nothing_else_and_upgra
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
 
+        await connection.run_sync(_run_next, "downgrade")
         await connection.run_sync(_run, "downgrade")
         for table in _NEW_TABLES:
             assert not await _exists(connection, table), table
@@ -242,6 +253,7 @@ async def test_downgrade_drops_what_the_revision_made_and_nothing_else_and_upgra
         assert "fk_studio_artists_performer" in await _constraints(
             connection, "studio_artists", "f"
         )
+        await connection.run_sync(_run_next, "upgrade")
         await transaction.rollback()
 
 
@@ -264,7 +276,9 @@ async def test_models_and_migration_do_not_drift(db_engine: AsyncEngine) -> None
 async def test_downgrade_then_upgrade_leaves_no_drift(db_engine: AsyncEngine) -> None:
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
+        await connection.run_sync(_run_next, "downgrade")
         await connection.run_sync(_run, "downgrade")
         await connection.run_sync(_run, "upgrade")
+        await connection.run_sync(_run_next, "upgrade")
         assert await connection.run_sync(_drift) == []
         await transaction.rollback()

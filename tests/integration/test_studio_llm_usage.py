@@ -26,6 +26,7 @@ from src.db.models.studio_chat import StudioArtistChatMessage, StudioMemoryDraft
 from src.studio.chat.draft import MemoryDraftDraft
 from src.studio.errors import ChatRateLimited, RunRateLimited
 from src.studio.services.track import TrackService
+from tests.library_holds_support import make_holds
 from tests.llm_support import FakeLlm
 from tests.studio_chat_support import reply
 from tests.studio_llm import make_draft
@@ -61,7 +62,7 @@ async def _delete_chat(world: ChatWorld, actor: Actor, chat_id: UUID) -> None:
 
 async def _delete_track(world: ChatWorld, actor: Actor, track_id: UUID) -> None:
     async with world.factory() as session, session.begin():
-        await TrackService(session).delete(track_id, actor.user_id, PRODUCT)
+        await TrackService(session, make_holds(session)).delete(track_id, actor.user_id, PRODUCT)
 
 
 async def _insert_usage(world: ChatWorld, actor: Actor, kind: str, *, age: timedelta) -> None:

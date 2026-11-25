@@ -70,6 +70,7 @@ from tests.cast_support import (
     wire,
 )
 from tests.library_holds_support import (
+    IMAGES,
     RETENTION_DAYS,
     future,
     make_job,
@@ -350,7 +351,7 @@ class TestMembers:
                 create_body("Mira", references=[ref_in("ok", good), ref_in("bad", video)]),
             )
 
-        assert raised.value.detail == {"reason": "not_an_image"}
+        assert raised.value.detail == {"reason": "media_kind_not_accepted"}
         assert await count(db_session, "studio_cast_members") == 0
         assert await count(db_session, "studio_cast_references") == 0
         assert await count(db_session, "library_asset_holds") == 0  # the first hold went too
@@ -511,6 +512,7 @@ class TestList:
             holder=AssetHolder(kind="other.context", id=uuid4()),
             user_id=user.id,
             product_id=PRODUCT,
+            accept=IMAGES,
         )
 
         async def names(asset: UserImage | GenerationOutput) -> set[str]:
@@ -1147,7 +1149,7 @@ class TestOwnership:
 
         assert reasons == {
             "thumb": {"reason": "derivative"},
-            "video": {"reason": "not_an_image"},
+            "video": {"reason": "media_kind_not_accepted"},
             "unfinished": {"reason": "job_not_available"},
             "hidden": {"reason": "job_not_available"},
         }

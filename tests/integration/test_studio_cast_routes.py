@@ -295,7 +295,7 @@ class TestErrorsOverHttp:
             json={"label": "v", "asset": f"upload:{video.id}"},
         )
         assert (status, body["error"], body["detail"]) == (
-            422, "asset_not_eligible", {"reason": "not_an_image"},
+            422, "asset_not_eligible", {"reason": "media_kind_not_accepted"},
         )  # fmt: skip
         status, body = await error(
             "POST",

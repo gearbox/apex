@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, assert_never
 
 import structlog
 
@@ -24,7 +24,18 @@ logger = structlog.get_logger(__name__)
 
 
 class SourceMediaValidationError(ValueError):
-    """A safe, client-actionable validation failure for ``source_media``."""
+    """A safe, client-actionable validation failure for ``source_media``.
+
+    ``code`` is the machine-readable error code the route answers ``422`` with.
+    """
+
+    code = "validation_error"
+
+
+class SourceMediaKindNotSupportedError(SourceMediaValidationError):
+    """The asset is library media of a kind that is never a generation input (audio)."""
+
+    code = "media_kind_not_supported"
 
 
 @dataclass(frozen=True, slots=True)
@@ -113,6 +124,16 @@ class SourceMediaResolver:
                 raise SourceMediaValidationError(
                     f"source_media position {position} does not name a supported media asset"
                 ) from exc
+            match media_kind:
+                case MediaKind.IMAGE | MediaKind.VIDEO:
+                    pass
+                case MediaKind.AUDIO:
+                    # Audio is a library kind (S2a) but no generation mode takes it as input.
+                    raise SourceMediaKindNotSupportedError(
+                        f"source_media position {position} is audio, which cannot be a source"
+                    )
+                case _:
+                    assert_never(media_kind)
 
             resolved.append(
                 ResolvedSourceMedia(

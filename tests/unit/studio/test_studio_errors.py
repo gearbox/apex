@@ -37,6 +37,7 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.VersionLimitReached, 409, "version_limit_reached"),
     (e.VersionUnchanged, 409, "version_unchanged"),
     (e.PlanRequired, 409, "plan_required"),
+    (e.RealizedPlanRequired, 422, "plan_required"),
     (lambda: e.LyricsIncompatibleWithPlan(_ISSUES), 409, "lyrics_incompatible_with_plan"),
     (e.VersionIsCurrent, 409, "version_is_current"),
     (lambda: e.VersionHasChildren(2), 409, "version_has_children"),
@@ -76,6 +77,12 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (e.CastLookNameTaken, 409, "cast_look_name_taken"),
     (lambda: e.CastLimitReached("references", 12), 409, "cast_limit_reached"),
     (lambda: e.CastMemberInUse(2), 409, "cast_member_in_use"),
+    (e.AudioVersionNotFound, 404, "audio_version_not_found"),
+    (e.VersionNotFound, 404, "version_not_found"),
+    (lambda: e.VersionKindMismatch("plan_version_id", "plan"), 422, "version_kind_mismatch"),
+    (lambda: e.AudioVersionLimitReached(20), 409, "audio_version_limit_reached"),
+    (e.AudioVersionIsCurrent, 409, "audio_version_is_current"),
+    (lambda: e.VersionHasAudio(2), 409, "version_has_audio"),
 ]
 
 
@@ -119,8 +126,8 @@ def test_every_studio_error_subclass_is_covered() -> None:
     assert declared == covered
 
 
-def test_codes_are_unique() -> None:
-    codes = [factory().code for factory, _, _ in CASES]  # type: ignore[attr-defined]
+def test_code_and_status_pairs_are_unique() -> None:
+    codes = [(factory().code, status) for factory, status, _ in CASES]  # type: ignore[attr-defined]
     assert len(codes) == len(set(codes))
 
 
@@ -132,6 +139,15 @@ def test_detail_carries_issues_and_counts() -> None:
         assert client.get("/boom").json()["detail"] == {"project_count": 3}
     with _client(lambda: e.VersionHasChildren(2)) as client:
         assert client.get("/boom").json()["detail"] == {"count": 2}
+    with _client(lambda: e.VersionHasAudio(3)) as client:
+        assert client.get("/boom").json()["detail"] == {"count": 3}
+    with _client(lambda: e.AudioVersionLimitReached(20)) as client:
+        assert client.get("/boom").json()["detail"] == {"limit": 20}
+    with _client(lambda: e.VersionKindMismatch("lyrics_version_id", "lyrics")) as client:
+        assert client.get("/boom").json()["detail"] == {
+            "field": "lyrics_version_id",
+            "expected": "lyrics",
+        }
     with _client(e.StudioNotFound) as client:
         assert client.get("/boom").json()["detail"] is None
 

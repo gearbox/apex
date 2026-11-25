@@ -36,7 +36,7 @@ from typing import TYPE_CHECKING
 
 from sqlalchemy.exc import IntegrityError
 
-from src.core.enums import JobStatus
+from src.core.enums import JobStatus, MediaKind, UnknownMediaTypeError, media_kind_from_content_type
 from src.core.library_ref import AssetRef, LibraryAssetSource
 from src.db.integrity import violated_constraint
 from src.db.models.library import HOLD_ASSET_FKS, HOLD_UNIQUES
@@ -85,8 +85,9 @@ class AssetIneligibleReason(StrEnum):
 
     DERIVATIVE = "derivative"
     """A thumbnail or another derivative of a library asset."""
-    NOT_AN_IMAGE = "not_an_image"
-    """Its ``content_type`` is not ``image/*``."""
+    MEDIA_KIND_NOT_ACCEPTED = "media_kind_not_accepted"
+    """Its media kind is not one the holder declared (``accept``): a cast reference pins images
+    only, a track's audio version pins audio only."""
     JOB_NOT_AVAILABLE = "job_not_available"
     """An output whose job is not ``COMPLETED``, or was soft-deleted."""
 
@@ -152,7 +153,13 @@ class AssetHoldService:
         self._retention_days = retention_days
 
     async def hold(
-        self, ref: AssetRef, *, holder: AssetHolder, user_id: UUID, product_id: str
+        self,
+        ref: AssetRef,
+        *,
+        holder: AssetHolder,
+        user_id: UUID,
+        product_id: str,
+        accept: frozenset[MediaKind],
     ) -> UUID:
         """Pin ``ref`` for ``holder`` and return the new hold's id.
 
@@ -161,35 +168,55 @@ class AssetHoldService:
             holder: Who holds it. One holder holds one asset at most once.
             user_id: The asset's owner (and the holder's).
             product_id: The product both belong to.
+            accept: The media kinds this holder may pin. Required, with no default: every holder
+                declares what it pins, so a new kind can never be held by a holder that did not
+                say it wanted it.
 
         Raises:
             AssetNotFoundError: The asset is missing, owned by another user or in another
                 product (indistinguishable), or was deleted concurrently.
-            AssetNotEligibleError: A derivative, not an image, or an output whose job is not
-                available.
+            AssetNotEligibleError: A derivative, a kind outside ``accept``, or an output whose
+                job is not available.
             sqlalchemy.exc.IntegrityError: ``holder`` already holds the asset - a programming
                 error in the caller, deliberately not swallowed.
         """
         if ref.source == LibraryAssetSource.UPLOAD:
-            await self._check_upload(ref.asset_id, user_id=user_id, product_id=product_id)
+            await self._check_upload(
+                ref.asset_id, user_id=user_id, product_id=product_id, accept=accept
+            )
             return await self._insert(
                 holder, user_id=user_id, product_id=product_id, upload_id=ref.asset_id
             )
-        await self._check_output(ref.asset_id, user_id=user_id, product_id=product_id)
+        await self._check_output(
+            ref.asset_id, user_id=user_id, product_id=product_id, accept=accept
+        )
         return await self._insert(
             holder, user_id=user_id, product_id=product_id, output_id=ref.asset_id
         )
 
-    async def _check_upload(self, upload_id: UUID, *, user_id: UUID, product_id: str) -> None:
+    async def _check_upload(
+        self, upload_id: UUID, *, user_id: UUID, product_id: str, accept: frozenset[MediaKind]
+    ) -> None:
         asset = await self._repo.lock_upload(upload_id, user_id=user_id, product_id=product_id)
         if asset is None:
             raise AssetNotFoundError
         if asset.is_derivative:
             raise AssetNotEligibleError(AssetIneligibleReason.DERIVATIVE)
-        if not asset.content_type.startswith("image/"):
-            raise AssetNotEligibleError(AssetIneligibleReason.NOT_AN_IMAGE)
+        self._check_kind(asset.content_type, accept)
 
-    async def _check_output(self, output_id: UUID, *, user_id: UUID, product_id: str) -> None:
+    @staticmethod
+    def _check_kind(content_type: str, accept: frozenset[MediaKind]) -> None:
+        """The asset's kind (from its stored content type) must be one the holder accepts."""
+        try:
+            kind = media_kind_from_content_type(content_type)
+        except UnknownMediaTypeError:
+            raise AssetNotEligibleError(AssetIneligibleReason.MEDIA_KIND_NOT_ACCEPTED) from None
+        if kind not in accept:
+            raise AssetNotEligibleError(AssetIneligibleReason.MEDIA_KIND_NOT_ACCEPTED)
+
+    async def _check_output(
+        self, output_id: UUID, *, user_id: UUID, product_id: str, accept: frozenset[MediaKind]
+    ) -> None:
         # Output first, then its job (see the module docstring for why not the other way round).
         asset = await self._repo.lock_output(output_id, user_id=user_id, product_id=product_id)
         if asset is None or asset.job_id is None:
@@ -201,8 +228,7 @@ class AssetHoldService:
             raise AssetNotFoundError
         if asset.is_derivative:
             raise AssetNotEligibleError(AssetIneligibleReason.DERIVATIVE)
-        if not asset.content_type.startswith("image/"):
-            raise AssetNotEligibleError(AssetIneligibleReason.NOT_AN_IMAGE)
+        self._check_kind(asset.content_type, accept)
         if job.status != JobStatus.COMPLETED or job.is_deleted:
             raise AssetNotEligibleError(AssetIneligibleReason.JOB_NOT_AVAILABLE)
 

@@ -14,6 +14,7 @@ from src.db.models.library import LibraryAssetMetadata, LibraryProject
 from src.db.models.studio import StudioProjectProfile, StudioTrack
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
 from src.studio.services.track import TrackService
+from tests.library_holds_support import make_holds
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -123,7 +124,9 @@ async def test_a_track_inserted_after_the_guard_ran_is_a_409_not_a_500(
         ) -> list[ProjectDeletionBlocker]:
             self.calls += 1
             if self.calls == 1:
-                await TrackService(session).create(project_id, user_id, product_id, "sneaky")
+                await TrackService(session, make_holds(session)).create(
+                    project_id, user_id, product_id, "sneaky"
+                )
                 return []
             return list(
                 await StudioProjectDeletionGuard().blockers(

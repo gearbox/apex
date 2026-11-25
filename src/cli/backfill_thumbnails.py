@@ -11,7 +11,7 @@ import asyncio
 import contextlib
 import enum
 from dataclasses import dataclass
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, assert_never
 
 import structlog
 import typer
@@ -66,6 +66,7 @@ class _Only(enum.StrEnum):
 class _RowStatus(enum.Enum):
     SKIPPED_COMPLETE = "skipped_complete"
     SKIPPED_NO_POSTER = "skipped_no_poster"
+    SKIPPED_NO_THUMBNAIL = "skipped_no_thumbnail"
     UPDATED = "updated"
     FAILED = "failed"
 
@@ -81,9 +82,29 @@ class _Stats:
     scanned: int = 0
     skipped_complete: int = 0
     skipped_no_poster: int = 0
+    skipped_no_thumbnail: int = 0
     updated: int = 0
     variants_created: int = 0
     failed: int = 0
+
+
+def _skip_audio(full: GenerationOutput | UserImage) -> _RowResult | None:
+    """Audio has no thumbnail (the client draws its stored peaks): skip it, counted and logged.
+
+    ``None`` means the row is an image or a video and the backfill goes on. Exhaustive over the
+    media kinds, so a new kind has to decide here whether it has thumbnails.
+    """
+    kind = media_kind_from_content_type(full.content_type)
+    match kind:
+        case MediaKind.AUDIO:
+            logger.info(
+                "backfill.row.skipped_no_thumbnail", full_id=str(full.id), media_kind=kind.value
+            )
+            return _RowResult(_RowStatus.SKIPPED_NO_THUMBNAIL)
+        case MediaKind.IMAGE | MediaKind.VIDEO:
+            return None
+        case _:
+            assert_never(kind)
 
 
 def _tally(stats: _Stats, result: _RowResult) -> None:
@@ -92,6 +113,8 @@ def _tally(stats: _Stats, result: _RowResult) -> None:
             stats.skipped_complete += 1
         case _RowStatus.SKIPPED_NO_POSTER:
             stats.skipped_no_poster += 1
+        case _RowStatus.SKIPPED_NO_THUMBNAIL:
+            stats.skipped_no_thumbnail += 1
         case _RowStatus.UPDATED:
             stats.updated += 1
             stats.variants_created += result.variants_created
@@ -113,6 +136,8 @@ async def _backfill_output_row(
     dry_run: bool,
     include_video: bool,
 ) -> _RowResult:
+    if (skipped := _skip_audio(full)) is not None:
+        return skipped
     # Count any derivative occupying a known size slot — WEBP or not.
     # A JPEG legacy poster with thumbnail_max_edge=512 occupies "md" and must not
     # be joined by a new WEBP md (build_media would emit two md variants).
@@ -258,6 +283,8 @@ async def _backfill_upload_row(
     *,
     dry_run: bool,
 ) -> _RowResult:
+    if (skipped := _skip_audio(full)) is not None:
+        return skipped
     valid: set[str] = set()
     for d in derivatives:
         lbl = label_for_max_edge(d.thumbnail_max_edge)
@@ -555,6 +582,7 @@ def _print_summary(
     table.add_column("Scanned", justify="right")
     table.add_column("Complete", justify="right", style="green")
     table.add_column("No poster", justify="right", style="yellow")
+    table.add_column("No thumbnail", justify="right", style="yellow")
     table.add_column("Updated", justify="right", style="cyan")
     table.add_column("Variants", justify="right", style="cyan")
     table.add_column("Failed", justify="right", style="red")
@@ -565,6 +593,7 @@ def _print_summary(
             str(s.scanned),
             str(s.skipped_complete),
             str(s.skipped_no_poster),
+            str(s.skipped_no_thumbnail),
             str(s.updated),
             str(s.variants_created),
             str(s.failed),
@@ -602,6 +631,8 @@ async def _run_impl(
         secret_access_key=settings.r2_secret_access_key,
         bucket_name=settings.r2_bucket_name,
         retention_days=settings.retention_days,
+        max_upload_size_mb=settings.max_upload_size_mb,
+        audio_upload_max_mb=settings.audio_upload_max_mb,
     )
     r2 = R2StorageService(r2_settings)
     db = DatabaseManager(settings.database_url)

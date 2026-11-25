@@ -949,7 +949,7 @@ class TestDeleteVersion:
             nonlocal calls
             calls += 1
             if calls == 1:  # the first (pre-delete) check "misses" the child
-                return VersionDeletionBlockers(child_count=0, lyrics_base_count=0)
+                return VersionDeletionBlockers(child_count=0, lyrics_base_count=0, audio_count=0)
             return await real(version_id, track_id=track_id, kind=kind)
 
         monkeypatch.setattr(repo, "deletion_blockers", stale_once)

@@ -5,9 +5,10 @@ Graph::
     users ─┬─< studio_artists ─< studio_artist_memories   (CASCADE; composite FK keeps owner = artist's owner)
            ├─< library_projects ─1:1─ studio_project_profiles >── artist (NO ACTION)
            │                                   │ NO ACTION
-           │                                   └─< studio_tracks ─< studio_document_versions
-           │                                            │ composite FKs (current_plan / current_lyrics)
-           │                                            └────────────────────────────────┘
+           │                                   └─< studio_tracks ─┬─< studio_document_versions
+           │                                            │            │      composite FKs (current_plan / current_lyrics)
+           │                                            │            └─< studio_track_audio >── library_asset_holds
+           │                                            └─────────────────┘ composite FK (current_audio) + (plan, lyrics) links
            └─< (every studio table also carries user_id / product_id)
 
 Design notes (see ``docs/contracts/studio-contract.md``):
@@ -20,6 +21,9 @@ Design notes (see ``docs/contracts/studio-contract.md``):
 * ``tracks -> profile`` and ``profile -> artist`` are NO ACTION (end-of-statement check), not
   RESTRICT: RESTRICT fires immediately and would make the user hard-delete cascade order-dependent.
 * Version numbers come from per-track counters and are never reused (no ``max()+1``).
+* ``studio_track_audio`` (S2a) is a track's numbered audio versions; each pins its library asset through
+  ``hold_id`` (no ``asset_ref`` of its own) and may link the plan / lyrics version it realizes with
+  composite ``(version, track_id)`` FKs, so another track's version is unrepresentable.
 * ``studio_runs`` (planner runs, P2a) hangs off a track (``ON DELETE CASCADE``) and points at the
   versions it produced with ``ON DELETE SET NULL``. A run is terminal once: the CHECKs tie
   ``finished_at`` to the terminal statuses and a ``failed`` run to its ``error_code``.
@@ -60,10 +64,12 @@ from src.core.enums import (
     StudioRunKind,
     StudioRunStage,
     StudioRunStatus,
+    StudioTrackAudioOrigin,
 )
 from src.core.uid import new_id
 from src.db.models.base import Base
 from src.studio.constraints import (
+    AUDIO_LABEL_MAX,
     MEMORY_IMAGE_MAX,
     MEMORY_THEME_MAX,
     MEMORY_TITLE_MAX,
@@ -73,6 +79,10 @@ __all__ = [
     "CAST_PERFORMER_FK",
     "RUN_ONE_ACTIVE_PER_TRACK",
     "RUN_USER_IDEMPOTENCY",
+    "TRACK_AUDIO_HOLDER_KIND",
+    "TRACK_AUDIO_HOLD_FK",
+    "TRACK_AUDIO_LYRICS_FK",
+    "TRACK_AUDIO_PLAN_FK",
     "StudioArtist",
     "StudioArtistMemory",
     "StudioDocumentVersion",
@@ -80,11 +90,20 @@ __all__ = [
     "StudioProjectProfile",
     "StudioRun",
     "StudioTrack",
+    "StudioTrackAudio",
 ]
 
 CAST_PERFORMER_FK = "fk_studio_artists_performer"
 """The artist → cast member foreign key (``NO ACTION``). Its violation means "this member is an
 artist's performer" (deleting a member) or "this member vanished" (linking one)."""
+TRACK_AUDIO_HOLDER_KIND = "studio.track_audio"
+"""``holder_kind`` of the library hold behind every track audio version (``holder_id`` = the row)."""
+TRACK_AUDIO_HOLD_FK = "fk_studio_track_audio_hold"
+"""The audio version → hold foreign key (``NO ACTION``): the hold cannot be deleted under its row."""
+TRACK_AUDIO_PLAN_FK = "fk_studio_track_audio_plan_version"
+TRACK_AUDIO_LYRICS_FK = "fk_studio_track_audio_lyrics_version"
+"""The composite same-track foreign keys of the realized plan / lyrics links (``NO ACTION``): a
+violation on a document-version delete means "an audio version realizes this version"."""
 RUN_ONE_ACTIVE_PER_TRACK = "uq_studio_runs_one_active_per_track"
 """Partial unique index: at most one queued/running run per track. The authority for 409."""
 RUN_USER_IDEMPOTENCY = "uq_studio_runs_user_idempotency"
@@ -350,10 +369,17 @@ class StudioTrack(Base):
         Integer, nullable=False, server_default=text("1")
     )
 
+    next_audio_version_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+
     current_plan_version_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
     )
     current_lyrics_version_id: Mapped[UUID | None] = mapped_column(
+        PG_UUID(as_uuid=True), nullable=True
+    )
+    current_audio_version_id: Mapped[UUID | None] = mapped_column(
         PG_UUID(as_uuid=True), nullable=True
     )
 
@@ -361,6 +387,8 @@ class StudioTrack(Base):
     updated_at: Mapped[datetime] = _updated_at()
 
     __table_args__ = (
+        # The target of the audio versions' composite owner FK (S2a).
+        UniqueConstraint("id", "user_id", "product_id", name="uq_studio_tracks_id_owner"),
         UniqueConstraint(
             "library_project_id",
             "position",
@@ -386,10 +414,106 @@ class StudioTrack(Base):
             name="fk_studio_tracks_current_lyrics_version",
             use_alter=True,
         ),
+        ForeignKeyConstraint(
+            ["current_audio_version_id", "id"],
+            ["studio_track_audio.id", "studio_track_audio.track_id"],
+            name="fk_studio_tracks_current_audio_version",
+            use_alter=True,
+        ),
     )
 
     def __repr__(self) -> str:
         return f"<StudioTrack {self.id} project={self.library_project_id} pos={self.position}>"
+
+
+class StudioTrackAudio(Base):
+    """A numbered audio version of a track; pins its library asset through ``hold_id`` (S2a).
+
+    The asset lives only on the hold row (``library_asset_holds``): the row stores no
+    ``asset_ref`` of its own, so there is one source of truth and the asset is read through a join.
+    ``hold_id`` is ``NOT NULL UNIQUE``: "every audio version is pinned" is a database invariant.
+    The asset is **immutable** (a new file is a new version); ``label`` and the two realized-
+    version links are editable.
+
+    The links name the plan / lyrics version this audio *realizes* and are composite FKs with
+    ``track_id``, so another track's version is unrepresentable (the service checks first for the
+    typed ``404`` / ``422``; the keys are the backstop). They are ``NO ACTION``: deleting a
+    realized version is refused (``409 version_has_audio``).
+    """
+
+    __tablename__ = "studio_track_audio"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    track_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    """The FK is composite (see ``__table_args__``): it also pins ``user_id`` / ``product_id``."""
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    label: Mapped[str | None] = mapped_column(String(AUDIO_LABEL_MAX), nullable=True)
+    origin: Mapped[str] = mapped_column(String(10), nullable=False)
+    hold_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("library_asset_holds.id", name=TRACK_AUDIO_HOLD_FK, ondelete="NO ACTION"),
+        nullable=False,
+        unique=True,
+    )
+    plan_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    lyrics_version_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
+    """A snapshot of the asset's duration at attach time (the asset is immutable)."""
+
+    created_at: Mapped[datetime] = _created_at()
+    updated_at: Mapped[datetime] = _updated_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["track_id", "user_id", "product_id"],
+            ["studio_tracks.id", "studio_tracks.user_id", "studio_tracks.product_id"],
+            name="fk_studio_track_audio_track_owner",
+            ondelete="CASCADE",
+        ),
+        UniqueConstraint("track_id", "version_number", name="uq_studio_track_audio_number"),
+        # The target of the track's current-audio pointer (composite, so it is the same track's).
+        UniqueConstraint("id", "track_id", name="uq_studio_track_audio_id_track"),
+        ForeignKeyConstraint(
+            ["plan_version_id", "track_id"],
+            ["studio_document_versions.id", "studio_document_versions.track_id"],
+            name=TRACK_AUDIO_PLAN_FK,
+        ),
+        ForeignKeyConstraint(
+            ["lyrics_version_id", "track_id"],
+            ["studio_document_versions.id", "studio_document_versions.track_id"],
+            name=TRACK_AUDIO_LYRICS_FK,
+        ),
+        CheckConstraint("version_number >= 1", name="ck_studio_track_audio_number"),
+        CheckConstraint("duration_ms > 0", name="ck_studio_track_audio_duration"),
+        CheckConstraint(
+            "lyrics_version_id IS NULL OR plan_version_id IS NOT NULL",
+            name="ck_studio_track_audio_lyrics_need_plan",
+        ),
+        CheckConstraint(
+            _in_list("origin", StudioTrackAudioOrigin), name="ck_studio_track_audio_origin"
+        ),
+        Index(
+            "ix_studio_track_audio_plan_version",
+            "plan_version_id",
+            postgresql_where=text("plan_version_id IS NOT NULL"),
+        ),
+        Index(
+            "ix_studio_track_audio_lyrics_version",
+            "lyrics_version_id",
+            postgresql_where=text("lyrics_version_id IS NOT NULL"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return f"<StudioTrackAudio {self.id} track={self.track_id} v{self.version_number}>"
 
 
 class StudioDocumentVersion(Base):

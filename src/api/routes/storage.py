@@ -21,6 +21,7 @@ from litestar.status_codes import (
     HTTP_201_CREATED,
     HTTP_400_BAD_REQUEST,
     HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+    HTTP_422_UNPROCESSABLE_ENTITY,
     HTTP_502_BAD_GATEWAY,
     HTTP_503_SERVICE_UNAVAILABLE,
 )
@@ -38,10 +39,13 @@ from src.api.services.frame_lineage import (
     parse_frame_lineage,
 )
 from src.api.services.storage.schemas import (
+    ALLOWED_AUDIO_CONTENT_TYPES,
     ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES,
     ALLOWED_VIDEO_CONTENT_TYPES,
+    AUDIO_CLIENT_CONTENT_TYPE_ALIASES,
 )
 from src.api.services.user_content import (
+    UserContentAudioError,
     UserContentError,
     UserContentFrameLineageError,
     UserContentService,
@@ -50,6 +54,9 @@ from src.api.services.user_content import (
     UserContentUnavailableError,
     UserContentValidationError,
 )
+from src.core.config import Settings
+from src.core.enums import MediaKind
+from src.core.upload_limits import MIB, upload_size_limit_bytes
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -61,7 +68,32 @@ logger = structlog.get_logger(__name__)
 # -----------------------------------------------------------------------------
 
 ALLOWED_CONTENT_TYPES = ALLOWED_CLIENT_UPLOAD_CONTENT_TYPES
-MAX_UPLOAD_SIZE = 20 * 1024 * 1024  # 20MB
+_CLIENT_AUDIO_CONTENT_TYPES = ALLOWED_AUDIO_CONTENT_TYPES | AUDIO_CLIENT_CONTENT_TYPE_ALIASES
+
+
+def _declared_kind(content_type: str) -> MediaKind:
+    """The kind the client *declares*, used only to pick the size limit and an early filter.
+
+    The stored kind is decided by ingest from the bytes; a mismatch is a typed ``422`` there.
+    """
+    if content_type in _CLIENT_AUDIO_CONTENT_TYPES:
+        return MediaKind.AUDIO
+    if content_type in ALLOWED_VIDEO_CONTENT_TYPES:
+        return MediaKind.VIDEO
+    return MediaKind.IMAGE
+
+
+def _audio_error(error: UserContentAudioError) -> Response[UploadResponse | ErrorEnvelope]:
+    """A typed ``422``: the code is the contract, the detail carries numbers only."""
+    return Response(
+        content=ErrorEnvelope(
+            error=error.code,
+            message=error.message,
+            status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            detail=error.detail,
+        ),
+        status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+    )
 
 
 def _invalid_frame_lineage(
@@ -114,9 +146,10 @@ class StorageController(Controller):
         self,
         current_user_id: UUID,
         user_content: UserContentService,
+        settings: Settings,
         data: Annotated[UploadForm, Body(media_type=RequestEncodingType.MULTI_PART)],
     ) -> Response[UploadResponse | ErrorEnvelope]:
-        """Upload an image or video for use in generation, or a captured video frame.
+        """Upload an image, video or audio file, or a captured video frame.
 
         Accepts PNG, JPEG, WebP, HEIC/HEIF, or AVIF images up to 20MB;
         non-PNG/JPEG/WebP inputs are converted to PNG. Also accepts MP4,
@@ -124,6 +157,13 @@ class StorageController(Controller):
         with ffprobe (rejected if undecodable, not a video, or longer than
         ``media_video_max_duration_seconds``) and stored as-is, with a JPEG
         poster frame derivative. Returns storage details and expiration time.
+
+        Audio (MP3, M4A/AAC, WAV PCM, FLAC) is accepted up to ``AUDIO_UPLOAD_MAX_MB``
+        (default 80MB), 5 s to 15 min. It is probed from the bytes (never the declared
+        type), remuxed without re-encoding with every tag and cover picture removed, and
+        stored with its probed facts and waveform peaks. Audio problems are typed ``422``
+        errors: ``audio_format_not_supported``, ``audio_has_video``, ``invalid_audio``,
+        ``audio_codec_not_supported``, ``audio_duration_out_of_range``.
 
         Uploaded images and videos can be referenced by ``asset_ref`` in
         generation requests. Content is automatically deleted after the
@@ -159,18 +199,23 @@ class StorageController(Controller):
             lineage = parse_frame_lineage(data.source_asset_ref, data.source_timestamp_ms)
         except FrameLineageError as e:
             return _invalid_frame_lineage(e.reason)
-        if lineage is not None and content_type in ALLOWED_VIDEO_CONTENT_TYPES:
+        declared_kind = _declared_kind(content_type)
+        if lineage is not None and declared_kind is MediaKind.VIDEO:
             return _invalid_frame_lineage(FrameLineageReason.VIDEO_FILE)
+        if lineage is not None and declared_kind is MediaKind.AUDIO:
+            return _invalid_frame_lineage(FrameLineageReason.AUDIO_FILE)
 
         # Read file data
         file_bytes = await data.data.read()
 
-        # Validate size
-        if len(file_bytes) > MAX_UPLOAD_SIZE:
+        # Validate size against the declared kind's limit - before any media work. Ingest
+        # re-checks it against the kind it sniffs, because the declared type is not trusted.
+        max_bytes = upload_size_limit_bytes(declared_kind, settings)
+        if len(file_bytes) > max_bytes:
             return Response(
                 content=ErrorEnvelope(
                     error="file_too_large",
-                    message=f"Maximum size: {MAX_UPLOAD_SIZE // (1024 * 1024)}MB",
+                    message=f"Maximum size: {max_bytes // MIB}MB",
                     status_code=HTTP_400_BAD_REQUEST,
                 ),
                 status_code=HTTP_400_BAD_REQUEST,
@@ -191,7 +236,8 @@ class StorageController(Controller):
             logger.debug(
                 "storage.uploading_image",
                 user_id=str(current_user_id),
-                filename=data.data.filename,
+                # An audio file name is user text we never log (invariant: ids, kinds, sizes only).
+                filename=None if declared_kind is MediaKind.AUDIO else data.data.filename,
                 bytes=len(file_bytes),
             )
             result = await user_content.upload_image(
@@ -225,6 +271,10 @@ class StorageController(Controller):
         except UserContentFrameLineageError as e:
             # Must precede UserContentValidationError (its base class).
             return _invalid_frame_lineage(e.reason)
+        except UserContentAudioError as e:
+            # Must precede UserContentValidationError (its base class).
+            logger.warning("storage.upload_audio_rejected", code=e.code)
+            return _audio_error(e)
         except UserContentValidationError as e:
             logger.warning("storage.upload_validation_failed", error=str(e))
             return Response(

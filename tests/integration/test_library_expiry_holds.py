@@ -24,7 +24,7 @@ from src.core.library_limits import PINNED_EXPIRY
 from src.core.library_ref import LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.product_registry import VEX_CONFIG
 from src.db.models.storage import GenerationOutput, UserImage
-from tests.library_holds_support import RETENTION_DAYS, HoldWorld, future, past
+from tests.library_holds_support import IMAGES, RETENTION_DAYS, HoldWorld, future, past
 
 if TYPE_CHECKING:
     from uuid import UUID
@@ -70,6 +70,7 @@ class _Seed:
                 holder=AssetHolder(kind="studio.cast_reference", id=uuid4()),
                 user_id=self.user.id,
                 product_id="vex",
+                accept=IMAGES,
             )
             await session.commit()
         self._hold_ids.setdefault(asset_ref, []).append(hold_id)

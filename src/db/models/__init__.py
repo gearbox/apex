@@ -28,6 +28,7 @@ from .library import (
     LibraryAssetHold,
     LibraryAssetMetadata,
     LibraryAssetTag,
+    LibraryAudioProfile,
     LibraryProject,
     LibraryTag,
 )
@@ -49,6 +50,7 @@ from .studio import (
     StudioProjectProfile,
     StudioRun,
     StudioTrack,
+    StudioTrackAudio,
 )
 from .studio_cast import (
     StudioCastLook,
@@ -84,6 +86,7 @@ __all__ = [
     "LibraryAssetHold",
     "LibraryAssetMetadata",
     "LibraryAssetTag",
+    "LibraryAudioProfile",
     "LibraryProject",
     "LibraryTag",
     "MediaHash",
@@ -111,6 +114,7 @@ __all__ = [
     "StudioProjectProfile",
     "StudioRun",
     "StudioTrack",
+    "StudioTrackAudio",
     "TokenAccount",
     "TokenTransaction",
     "User",

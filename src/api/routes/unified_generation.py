@@ -277,7 +277,7 @@ class UnifiedGenerationController(Controller):
             logger.info("generation.source_media.validation_failed", error=str(exc))
             return Response(
                 content=ErrorEnvelope(
-                    error="validation_error",
+                    error=exc.code,
                     message=str(exc),
                     status_code=HTTP_422_UNPROCESSABLE_ENTITY,
                 ),

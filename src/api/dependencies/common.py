@@ -141,6 +141,7 @@ from src.studio.services.project_deletion_guard import StudioProjectDeletionGuar
 from src.studio.services.run import StudioRunService
 from src.studio.services.run_events import StudioRunEvents
 from src.studio.services.track import TrackService
+from src.studio.services.track_audio import TrackAudioService
 from src.studio.services.version import DocumentVersionService
 from src.workers.aisha_job_poller import AishaJobPoller, AishaPollerConfig
 from src.workers.content_retention import ContentRetentionWorker
@@ -820,9 +821,23 @@ def get_studio_project_service(session: AsyncSession) -> StudioProjectService:
     return StudioProjectService(session)
 
 
-def get_studio_track_service(session: AsyncSession) -> TrackService:
-    """Provide the studio TrackService per-request."""
-    return TrackService(session)
+def get_studio_track_service(session: AsyncSession, settings: Settings) -> TrackService:
+    """Provide the studio TrackService per-request, with the library's hold service.
+
+    A track delete releases the holds its audio versions took, in the request's transaction.
+    """
+    return TrackService(session, AssetHoldService(session, retention_days=settings.retention_days))
+
+
+def get_studio_track_audio_service(session: AsyncSession, settings: Settings) -> TrackAudioService:
+    """Provide the studio TrackAudioService per-request, with the library's hold service.
+
+    Both share the request session, so a hold and the audio version that owns it are written in
+    one transaction.
+    """
+    return TrackAudioService(
+        session, AssetHoldService(session, retention_days=settings.retention_days)
+    )
 
 
 def get_studio_version_service(session: AsyncSession) -> DocumentVersionService:
@@ -1316,6 +1331,8 @@ async def init_services(settings: Settings) -> JWTService:
             secret_access_key=settings.r2_secret_access_key,
             bucket_name=settings.r2_bucket_name,
             retention_days=settings.retention_days,
+            max_upload_size_mb=settings.max_upload_size_mb,
+            audio_upload_max_mb=settings.audio_upload_max_mb,
         )
         _services.r2_storage = R2StorageService(r2_settings)
         logger.info(
@@ -2311,6 +2328,7 @@ dependencies = {
     # Media Project Studio (request-scoped; gated by studio_feature_guard on the controllers)
     "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
     "studio_cast_service": Provide(get_studio_cast_service, sync_to_thread=False),
+    "studio_track_audio_service": Provide(get_studio_track_audio_service, sync_to_thread=False),
     "studio_memory_service": Provide(get_studio_memory_service, sync_to_thread=False),
     "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
     "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),

@@ -50,6 +50,7 @@ from src.api.services.library_holds import (
     AssetNotFoundError,
 )
 from src.api.services.library_media import build_media_object
+from src.core.enums import MediaKind
 from src.core.library_ref import AssetRef, LibraryAssetSource, format_asset_ref, parse_asset_ref
 from src.core.uid import new_id
 from src.db.integrity import violated_constraint
@@ -115,6 +116,9 @@ if TYPE_CHECKING:
 __all__ = ["CastService"]
 
 logger = structlog.get_logger(__name__)
+
+_CAST_REFERENCE_ACCEPTS: Final = frozenset({MediaKind.IMAGE})
+"""A cast reference pins images only (S4 feeds them to image models)."""
 
 _EMPTY: Final = "empty_after_normalization"
 _INVALID_ASSET: Final = "invalid_asset_ref"
@@ -692,6 +696,7 @@ class CastService:
                 holder=AssetHolder(kind=CAST_REFERENCE_HOLDER_KIND, id=reference_id),
                 user_id=user_id,
                 product_id=product_id,
+                accept=_CAST_REFERENCE_ACCEPTS,
             )
         except AssetNotFoundError as exc:
             raise AssetNotFound from exc
