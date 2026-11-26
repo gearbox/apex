@@ -66,3 +66,68 @@ def test_the_audio_duration_cap_is_defined_once() -> None:
     assert definers == ["core/media_limits.py"]
     for name in ("api/services/media_ingest/audio.py", "studio/timeline.py"):
         assert "src.core.media_limits" in _imported_modules(SRC / name), name
+
+
+def _contract_section_16() -> str:
+    contract = (ROOT / "docs/contracts/studio-contract.md").read_text()
+    assert len(re.findall(r"^## 16\. Timelines", contract, flags=re.MULTILINE)) == 1
+    return contract[contract.index("\n## 16. Timelines") :]
+
+
+def _issue_codes() -> list[str]:
+    """Every validation code the timeline module declares (its ``Final`` code constants)."""
+    from src.studio import timeline
+
+    codes = [
+        value
+        for name, value in vars(timeline).items()
+        if name.isupper() and isinstance(value, str) and name == value.upper()
+    ]
+    assert len(codes) == 14  # S3-4
+    return codes
+
+
+def test_the_contract_documents_every_validation_code_error_and_warning() -> None:
+    from src.studio import errors
+    from src.studio.renderers import timed_lyrics
+
+    section = _contract_section_16()
+    needles = [
+        *_issue_codes(),
+        *(
+            error.code
+            for error in (
+                errors.TimelineNotFound,
+                errors.AudioHasNoPlan,
+                errors.TimelineUnchanged,
+                errors.TimelineLimitReached,
+                errors.TimelineIsCurrent,
+                errors.TimelineHasChildren,
+                errors.AudioHasTimelines,
+            )
+        ),
+        timed_lyrics.UNTIMED_LINES,
+        timed_lyrics.NO_LYRICS,
+        timed_lyrics.INFERRED_WORD_TIMINGS,
+        "too_long_after_normalization",
+        "document_too_large",
+    ]
+    missing = [needle for needle in needles if not re.search(rf"\b{needle}\b", section)]
+
+    assert not missing, missing
+    assert "never invents" in section
+    assert "invalid_peaks_window" in (ROOT / "docs/BACKEND_API_REFERENCE.md").read_text()
+    assert "peaks_not_ready" in (ROOT / "docs/BACKEND_API_REFERENCE.md").read_text()
+
+
+def test_the_conventions_record_the_timelines() -> None:
+    text = (ROOT / "CLAUDE.md").read_text()
+    for needle in (
+        "**Timelines (S3a, migration 063",
+        "backfill_audio_peaks",
+        "StudioAudioTimeline",
+        "detail_peaks",
+        "studio_timelines.py",
+        "timed_lyrics.py",
+    ):
+        assert needle in text, needle

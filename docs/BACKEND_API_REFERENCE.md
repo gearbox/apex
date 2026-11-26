@@ -1417,8 +1417,9 @@ Request:  multipart/form-data, field "data" (max 20MB; audio max 80MB — see be
                    audio/aac, audio/x-wav, audio/wave or audio/x-flac. 5 s – 15 min.
                    Probed from the bytes (never the declared type) and remuxed WITHOUT
                    re-encoding: the stored file is the upload's own audio stream with every
-                   tag, cover picture and chapter removed. Probed facts + waveform peaks are
-                   stored (`GET /v1/library/assets/{ref}/peaks`). No thumbnail, no poster, no
+                   tag, cover picture and chapter removed. Probed facts + waveform peaks (an
+                   overview and a 20 ms detail level) are stored
+                   (`GET /v1/library/assets/{ref}/peaks`). No thumbnail, no poster, no
                    perceptual hash.
           Size:     images and videos ≤ MAX_UPLOAD_SIZE_MB (20); audio ≤ AUDIO_UPLOAD_MAX_MB
                     (80, max 95). The limit is the one of the DECLARED kind and is checked
@@ -1644,12 +1645,26 @@ Errors:   404 not_found (malformed ref, not owned, or wrong product)
 
 ```
 Path:     asset_ref (string, an AUDIO asset: "upload:<uuid>" | "output:<uuid>")
-Response: { version: 1, buckets: 1024, peaks: int[2048] }   // each in [-128, 127]
+Query:    level? ("overview" | "detail", default "overview"; anything else → 400)
+          from_ms?, to_ms? (int; level=detail only, BOTH or neither:
+                    0 <= from_ms < to_ms and to_ms - from_ms <= 600000)
+Response: level=overview:
+            { level: "overview", version: 1, buckets: 1024, peaks: int[2048] }
+          level=detail (one [min, max] pair per 20 ms):
+            { level: "detail", version: 1, bucket_ms: 20, total_buckets: int,
+              from_bucket: int, peaks: int[] }        // 2 per returned bucket
+          Every peak is in [-128, 127].
 Errors:   404 asset_not_found (malformed ref, missing, not owned, wrong product — one answer)
           422 media_kind_not_supported (the asset is not audio)
-Note:     Interleaved [min0, max0, min1, max1, …] over 1,024 equal slices of the mono
-          11,025 Hz decode, computed once at upload. 0 is silence, ±127 full scale.
-          One SELECT; free; needs no studio.
+          422 invalid_peaks_window (a bad window, or from_ms / to_ms with level=overview)
+          409 peaks_not_ready (level=detail on audio whose detail is not computed yet: uploaded
+                    before S3a and not yet backfilled by python -m src.cli.backfill_audio_peaks)
+Note:     Interleaved [min0, max0, min1, max1, …] of the mono 11,025 Hz decode, computed
+          once at upload. 0 is silence, ±127 full scale. Overview: 1,024 equal slices.
+          Detail: the window is the buckets [from_ms // 20, ceil(to_ms / 20)), clamped to
+          total_buckets (past the end → peaks [] with from_bucket = total_buckets); without
+          a window, the whole level (≤ 45,050 buckets). One SELECT that slices in SQL (a
+          window never reads the whole value); free; needs no studio.
 ```
 
 Audio library items: `media.media_type = "audio"`, `duration_ms` set, `width`/`height` `null`,
