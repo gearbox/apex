@@ -539,12 +539,14 @@ class TestStoredForm:
 
     def test_word_text_is_stored_in_nfc_and_otherwise_as_sent(self) -> None:
         document = complete_timeline(
-            lines=replaced(LINES, 0, line(VERSE, 0, 1_000, 5_000, word("  café  ", 1_000, 2_000)))
+            lines=replaced(
+                LINES, 0, line(VERSE, 0, 1_000, 5_000, word("  cafe\u0301  ", 1_000, 2_000))
+            )
         )
 
         normalized = normalize_timeline(document)
 
-        assert normalized.lines[0].words[0].text == "  café  "
+        assert normalized.lines[0].words[0].text == "  caf\u00e9  "
         assert normalized.sections == document.sections
         assert normalized.lines[0].words[0].start_ms == 1_000
 
@@ -636,8 +638,8 @@ class TestLimits:
 
     def test_a_word_nfc_expands_past_100_is_refused_after_normalization(self) -> None:
         """RD6: U+FB2C is one code point on the wire and three after NFC."""
-        fits = normalize_timeline(_decode(_one_word("שּׁ" * 33)))
-        expands = normalize_timeline(_decode(_one_word("שּׁ" * 34)))
+        fits = normalize_timeline(_decode(_one_word("\ufb2c" * 33)))
+        expands = normalize_timeline(_decode(_one_word("\ufb2c" * 34)))
 
         assert check_timeline_limits(fits) == []
         assert pairs(check_timeline_limits(expands)) == [
