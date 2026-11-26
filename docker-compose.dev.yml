@@ -45,6 +45,7 @@ services:
       - ./.env.staging.example:/app/.env.staging.example:ro
       - ./docker-compose.staging.yml:/app/docker-compose.staging.yml:ro
       - ./docker-compose.portainer-staging.yml:/app/docker-compose.portainer-staging.yml:ro
+      - ./docker-compose.yml:/app/docker-compose.yml:ro
       - ./Dockerfile:/app/Dockerfile:ro
       # Repo files that architecture tests read directly (tests/unit/studio/test_architecture.py).
       # pyproject.toml is otherwise a stale copy baked in at image-build time; the other two
