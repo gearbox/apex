@@ -67,6 +67,7 @@ from src.api.routes.studio_chat import StudioChatController
 from src.api.routes.studio_memories import StudioMemoryController
 from src.api.routes.studio_projects import StudioProjectController
 from src.api.routes.studio_runs import StudioRunController
+from src.api.routes.studio_timelines import StudioTimelineController
 from src.api.routes.studio_track_audio import StudioTrackAudioController
 from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
@@ -633,6 +634,7 @@ def create_app() -> Litestar:
             StudioMemoryController,
             StudioProjectController,
             StudioRunController,
+            StudioTimelineController,
             StudioTrackAudioController,
             StudioTrackController,
             # Content proxy

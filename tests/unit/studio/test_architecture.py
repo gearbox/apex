@@ -197,7 +197,7 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 8
+    assert len(controllers) == 9
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth

@@ -140,6 +140,7 @@ from src.studio.services.project import StudioProjectService
 from src.studio.services.project_deletion_guard import StudioProjectDeletionGuard
 from src.studio.services.run import StudioRunService
 from src.studio.services.run_events import StudioRunEvents
+from src.studio.services.timeline import TimelineService
 from src.studio.services.track import TrackService
 from src.studio.services.track_audio import TrackAudioService
 from src.studio.services.version import DocumentVersionService
@@ -838,6 +839,11 @@ def get_studio_track_audio_service(session: AsyncSession, settings: Settings) ->
     return TrackAudioService(
         session, AssetHoldService(session, retention_days=settings.retention_days)
     )
+
+
+def get_studio_timeline_service(session: AsyncSession) -> TimelineService:
+    """Provide the studio TimelineService (realized timelines and their exports) per-request."""
+    return TimelineService(session)
 
 
 def get_studio_version_service(session: AsyncSession) -> DocumentVersionService:
@@ -2329,6 +2335,7 @@ dependencies = {
     "studio_artist_service": Provide(get_studio_artist_service, sync_to_thread=False),
     "studio_cast_service": Provide(get_studio_cast_service, sync_to_thread=False),
     "studio_track_audio_service": Provide(get_studio_track_audio_service, sync_to_thread=False),
+    "studio_timeline_service": Provide(get_studio_timeline_service, sync_to_thread=False),
     "studio_memory_service": Provide(get_studio_memory_service, sync_to_thread=False),
     "studio_project_service": Provide(get_studio_project_service, sync_to_thread=False),
     "studio_track_service": Provide(get_studio_track_service, sync_to_thread=False),
