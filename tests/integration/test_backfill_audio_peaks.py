@@ -9,6 +9,7 @@ first fills whatever other tests left behind.
 from __future__ import annotations
 
 import asyncio
+import io
 from contextlib import asynccontextmanager
 from typing import TYPE_CHECKING, Any
 from unittest.mock import AsyncMock, patch
@@ -16,13 +17,14 @@ from uuid import uuid4
 
 import pytest
 from botocore.exceptions import ClientError
+from rich.console import Console
 from sqlalchemy import select, text
 from structlog.testing import capture_logs
 from typer.testing import CliRunner
 
 from src.api.services.media_ingest.audio import compute_detail_peaks
 from src.api.services.storage import R2StorageService, R2StorageSettings
-from src.cli.backfill_audio_peaks import BackfillStats, app, run_backfill
+from src.cli.backfill_audio_peaks import BackfillStats, _run_impl, app, run_backfill
 from src.db.models.library import LibraryAudioProfile
 from tests.audio_support import require_ffmpeg, run
 from tests.media_ingest_support import make_media_ingestor
@@ -327,6 +329,55 @@ async def test_an_audio_output_is_filled_from_its_own_key(
         profile = await session.get(LibraryAudioProfile, profile_id)
         assert profile is not None
         assert profile.detail_peaks is not None
+
+
+@pytest.mark.parametrize("dry_run", [True, False], ids=["dry-run", "write"])
+async def test_the_command_runs_end_to_end_and_prints_its_counts(
+    hold_world: HoldWorld,
+    sine_wav: bytes,
+    test_database_url: str,
+    monkeypatch: pytest.MonkeyPatch,
+    dry_run: bool,
+) -> None:
+    """The deploy step itself: its own settings, engine and session, and the printed summary.
+    Only the S3 client is fake."""
+    user = await hold_world.user()
+    good, gone = await _audios(hold_world, user, 2)
+    bucket = _Bucket({good.storage_key: sine_wav})
+
+    @asynccontextmanager
+    async def fake_client() -> AsyncIterator[_Bucket]:
+        yield bucket
+
+    def storage_over_the_fake(settings: R2StorageSettings) -> R2StorageService:
+        storage = R2StorageService(settings)
+        monkeypatch.setattr(storage, "_get_client", fake_client)
+        return storage
+
+    monkeypatch.setenv("DATABASE_URL", test_database_url)
+    for name in ("R2_ACCOUNT_ID", "R2_ACCESS_KEY_ID", "R2_SECRET_ACCESS_KEY"):
+        monkeypatch.setenv(name, "test")
+    monkeypatch.setattr("src.cli.backfill_audio_peaks.R2StorageService", storage_over_the_fake)
+    printed = io.StringIO()
+    monkeypatch.setattr("src.cli.backfill_audio_peaks.console", Console(file=printed, width=120))
+
+    await _run_impl(dry_run=dry_run, batch_size=1)
+
+    summary = {
+        " ".join(cells[:-1]): cells[-1]
+        for line in printed.getvalue().splitlines()
+        if line.startswith("│") and (cells := line.replace("│", " ").split())
+    }
+    assert summary == {
+        "scanned": "2",
+        "would fill" if dry_run else "done": "1",
+        "skipped": "0",
+        "failed": "1",
+        "failed: missing": "1",
+    }
+    assert ("(dry-run)" in printed.getvalue()) is dry_run
+    assert ((await _profile(hold_world, good.id)).detail_peaks is None) is dry_run
+    assert (await _profile(hold_world, gone.id)).detail_peaks is None
 
 
 def test_the_command_refuses_to_run_without_r2(monkeypatch: pytest.MonkeyPatch) -> None:

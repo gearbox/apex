@@ -1338,7 +1338,7 @@ A timeline is checked against the audio version's `duration_ms`, its linked **pl
 | `too_long_after_normalization` | a word's text is over 100 characters after NFC (path `lines[j].words[k].text`) |
 | `document_too_large` | the compact JSON is over 131,072 bytes (path `""`) |
 
-**Gaps are allowed** (silence, a count-in, an effect). **"Lyrics order" is the lyrics document's own order**: lyrics saved with their sections in a different order than the plan cannot have all their lines timed (the sections must follow plan order and the lines lyrics order at once). Lyrics written by the studio (runs, Suno import) are always in plan order.
+**Gaps are allowed** (silence, a count-in, an effect). **"Lyrics order" is the lyrics document's own order**: lyrics saved with their sections in a different order than the plan cannot have all their lines timed (the sections must follow plan order and the lines lyrics order at once). `lyrics` runs and the Suno import write lyrics in plan order; a `revise_lyrics` run keeps the order of the lyrics it revises. So only lyrics saved by hand with another order are affected: keep your editor's lyrics sections in plan order.
 
 ### Partial and complete
 

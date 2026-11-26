@@ -6,6 +6,7 @@ over every row) and the audio-hold reconciliation, run by an autouse fixture.
 
 from __future__ import annotations
 
+from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
 
@@ -19,6 +20,7 @@ from src.api.schemas.studio import TimelineCreate, TrackAudioPatch
 from src.core.enums import StudioTimelineOrigin
 from src.db.models.studio import StudioAudioTimeline, StudioTrack, StudioTrackAudio
 from src.db.models.user import User
+from src.db.repositories.studio_timeline import StudioAudioTimelineRepository
 from src.studio.constraints import MAX_TIMELINES_PER_AUDIO
 from src.studio.errors import (
     AudioHasNoPlan,
@@ -33,6 +35,7 @@ from src.studio.errors import (
     TimelineNotFound,
     TimelineUnchanged,
 )
+from src.studio.services.timeline import TimelineService
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
 from src.studio.timeline import SectionSpan, TimelineDocument, WordSpan
@@ -721,6 +724,64 @@ class TestDelete:
             assert (
                 await session.execute(select(StudioTrack.id).where(StudioTrack.id == song.track_id))
             ).scalar_one_or_none() is None
+
+
+class TestForeignKeyBackstops:
+    """The composite keys behind the service's checks. Each test blinds one check, so the
+    statement reaches the database, which must still answer with the typed error: never a 500,
+    never a dangling pointer, nothing changed."""
+
+    async def test_pointing_at_another_audio_s_timeline_is_still_not_found(
+        self,
+        hold_world: HoldWorld,
+        user: UserModel,
+        song: Song,
+        monkeypatch: pytest.MonkeyPatch,
+    ) -> None:
+        other = await committed_song(hold_world, user)
+        elsewhere, _ = await create_timeline(hold_world, other, other.complete())
+
+        async def unchecked(*_args: object) -> None:
+            return None
+
+        monkeypatch.setattr(TimelineService, "_timeline_of", unchecked)
+
+        with pytest.raises(TimelineNotFound):
+            await _set_current(hold_world, song, elsewhere.id)
+
+        assert await _pointer(hold_world, song.audio_id) is None
+
+    async def test_deleting_a_parent_is_still_refused(
+        self, hold_world: HoldWorld, song: Song, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        root, leaf = await _chain(hold_world, song, 2)
+
+        async def childless(*_args: object, **_kwargs: object) -> bool:
+            return False
+
+        monkeypatch.setattr(StudioAudioTimelineRepository, "has_children", childless)
+
+        with pytest.raises(TimelineHasChildren):
+            await _delete(hold_world, song, root.id)
+
+        assert [row.id for row in await _rows(hold_world, song.audio_id)] == [root.id, leaf.id]
+
+    async def test_deleting_the_current_timeline_is_still_refused(
+        self, hold_world: HoldWorld, song: Song, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        out, _ = await create_timeline(hold_world, song, song.complete(), make_current=True)
+        lock_audio = TimelineService._lock_audio
+
+        async def sees_no_pointer(self: TimelineService, *args: Any) -> SimpleNamespace:
+            await lock_audio(self, *args)  # the real locks, a blinded answer
+            return SimpleNamespace(current_timeline_id=None)
+
+        monkeypatch.setattr(TimelineService, "_lock_audio", sees_no_pointer)
+
+        with pytest.raises(TimelineIsCurrent):
+            await _delete(hold_world, song, out.id)
+
+        assert await _pointer(hold_world, song.audio_id) == out.id
 
 
 # -- W9.5 the link freeze (S3-5) ---------------------------------------------------------------

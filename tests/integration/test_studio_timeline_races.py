@@ -15,6 +15,7 @@ race    what collides                                          test class
 (d)     two creates, same parent and content                   ``TestTwinCreates``
 cap     two creates at 49 -> exactly one 409; numbers          ``TestCapAndNumbering``
 more    timeline delete vs audio delete (both orders)          ``TestTimelineDeleteVsAudioDelete``
+more    two deletes of the same timeline                       ``TestTwinDeletes``
 more    timeline create vs track delete (both orders)          ``TestCreateVsTrackDelete``
 ======  =====================================================  ====================================
 
@@ -447,6 +448,26 @@ class TestTimelineDeleteVsAudioDelete:
 
         assert isinstance(outcome, TimelineNotFound), outcome
         assert await _timeline_ids(hold_world, song.audio_id) == []
+
+
+class TestTwinDeletes:
+    async def test_the_second_delete_finds_it_gone_after_waiting_for_the_locks(
+        self, hold_world: HoldWorld, db_engine: AsyncEngine, song: Song
+    ) -> None:
+        """It resolved the timeline before the first delete committed, so it must read it again
+        under the locks."""
+        kept, _ = await create_timeline(hold_world, song, song.complete())
+        timeline, _ = await create_timeline(hold_world, song, song.sections_only())
+
+        outcome = await _race(
+            hold_world,
+            db_engine,
+            first=_delete_timeline(song, timeline.id),
+            second=_delete_timeline(song, timeline.id),
+        )
+
+        assert isinstance(outcome, TimelineNotFound), outcome
+        assert await _timeline_ids(hold_world, song.audio_id) == [kept.id]
 
 
 class TestCreateVsTrackDelete:
