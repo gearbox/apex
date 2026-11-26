@@ -31,11 +31,12 @@ if TYPE_CHECKING:
     from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine
 
 _PATH = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "062_studio_track_audio.py"
+_NEXT = _PATH.with_name("063_studio_audio_timelines.py")
 _NEW_TABLES = ("library_audio_profiles", "studio_track_audio")
 
 
-def _load() -> ModuleType:
-    spec = importlib.util.spec_from_file_location("revision_062", _PATH)
+def _load(path: Path = _PATH, name: str = "revision_062") -> ModuleType:
+    spec = importlib.util.spec_from_file_location(name, path)
     assert spec is not None
     assert spec.loader is not None
     module = importlib.util.module_from_spec(spec)
@@ -46,6 +47,13 @@ def _load() -> ModuleType:
 def _run(connection: Connection, action: str) -> None:
     with Operations.context(MigrationContext.configure(connection)):
         getattr(_load(), action)()
+
+
+def _run_next(connection: Connection, action: str) -> None:
+    """Revision 063 (timelines): it references the audio versions and widens the profiles, so it
+    goes first on the way down and last on the way up."""
+    with Operations.context(MigrationContext.configure(connection)):
+        getattr(_load(_NEXT, "revision_063"), action)()
 
 
 async def _exists(connection: AsyncConnection, table: str) -> bool:
@@ -109,6 +117,9 @@ async def test_the_profile_table_has_its_checks_cascading_keys_and_partial_uniqu
         "ck_library_audio_profiles_one_asset",
         "ck_library_audio_profiles_peaks_size",
         "ck_library_audio_profiles_channels",
+        # added by 063 (the detail peaks level; its own migration test checks them)
+        "ck_library_audio_profiles_detail_peaks_pair",
+        "ck_library_audio_profiles_detail_peaks_size",
     }
     assert (
         "num_nonnulls(upload_id, output_id) = 1" in checks["ck_library_audio_profiles_one_asset"][3]
@@ -216,6 +227,7 @@ async def test_downgrade_drops_what_the_revision_made_and_nothing_else_and_upgra
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
 
+        await connection.run_sync(_run_next, "downgrade")
         await connection.run_sync(_run, "downgrade")
         for table in _NEW_TABLES:
             assert not await _exists(connection, table), table
@@ -251,6 +263,7 @@ async def test_downgrade_drops_what_the_revision_made_and_nothing_else_and_upgra
         assert "fk_studio_tracks_current_audio_version" in await _constraints(
             connection, "studio_tracks", "f"
         )
+        await connection.run_sync(_run_next, "upgrade")
         await transaction.rollback()
 
 
@@ -281,6 +294,7 @@ async def test_downgrade_refuses_while_audio_uploads_remain(
             },
         )
 
+        await connection.run_sync(_run_next, "downgrade")
         with pytest.raises(
             RuntimeError, match=r"1 audio upload.*delete those rows first"
         ) as raised:
@@ -294,6 +308,7 @@ async def test_downgrade_refuses_while_audio_uploads_remain(
 async def test_downgrade_succeeds_when_no_audio_assets_remain(db_engine: AsyncEngine) -> None:
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
+        await connection.run_sync(_run_next, "downgrade")
         await connection.run_sync(_run, "downgrade")
         for table in _NEW_TABLES:
             assert not await _exists(connection, table), table
@@ -319,7 +334,9 @@ async def test_models_and_migration_do_not_drift(db_engine: AsyncEngine) -> None
 async def test_downgrade_then_upgrade_leaves_no_drift(db_engine: AsyncEngine) -> None:
     async with db_engine.connect() as connection:
         transaction = await connection.begin()
+        await connection.run_sync(_run_next, "downgrade")
         await connection.run_sync(_run, "downgrade")
         await connection.run_sync(_run, "upgrade")
+        await connection.run_sync(_run_next, "upgrade")
         assert await connection.run_sync(_drift) == []
         await transaction.rollback()

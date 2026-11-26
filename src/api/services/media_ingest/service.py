@@ -27,7 +27,6 @@ from src.api.services.image_normalization import (
     sniff_format,
 )
 from src.api.services.media_ingest.audio import (
-    AUDIO_MAX_SECONDS,
     PEAKS_SAMPLE_RATE_HZ,
     PEAKS_VERSION,
     PROBE_SHOW_ENTRIES,
@@ -65,6 +64,7 @@ from src.api.services.media_tools import (
 )
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet
+from src.core.media_limits import AUDIO_MAX_SECONDS
 
 # Docker installs these at /usr/bin.  The explicit lookup also supports local
 # development installations without ever accepting an executable from input.

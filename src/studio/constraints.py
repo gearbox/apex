@@ -47,6 +47,7 @@ __all__ = [
     "MAX_CAST_REFERENCES",
     "MAX_CHATS_PER_ARTIST",
     "MAX_MESSAGES_PER_CHAT",
+    "MAX_TIMELINES_PER_AUDIO",
     "MEMORY_BODY_MAX",
     "MEMORY_CONTEXT_BUDGET",
     "MEMORY_IMAGERY_MAX",
@@ -120,6 +121,9 @@ MAX_AUDIO_VERSIONS_PER_TRACK: Final = 20
 """Audio versions one track holds (a hard cap, counted under the track lock; S2a-8)."""
 AUDIO_LABEL_MAX: Final = 60
 """Characters in an audio version's label."""
+MAX_TIMELINES_PER_AUDIO: Final = 50
+"""Realized timeline versions one audio version holds (a hard cap, counted under the track lock;
+S3-2)."""
 MAX_CAST_REFERENCES: Final = 12
 """Reference images one cast member holds (a hard cap, counted under the member lock)."""
 MAX_CAST_LOOKS: Final = 12

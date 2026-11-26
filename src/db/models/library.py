@@ -380,7 +380,13 @@ class LibraryAudioProfile(Base):
     it is the asset row's own column, like a video's.
 
     ``peaks`` is ``PEAKS_BYTES`` (2,048) bytes: ``int8`` interleaved ``[min0, max0, min1, max1, ...]``
-    over 1,024 buckets of the mono decode; ``peaks_version`` lets a finer zoom level (S3) coexist.
+    over 1,024 buckets of the mono decode; ``peaks_version`` versions that layout.
+
+    ``detail_peaks`` (S3a, migration 063) is the zoomed level of the same decode: one ``int8``
+    min/max pair per 20 ms bucket, at most 90,100 bytes. Both detail columns are NULL for a row
+    written before S3a until ``python -m src.cli.backfill_audio_peaks`` computes them. The column
+    is ``STORAGE EXTERNAL`` (set by the migration), so reading a window with ``substring()``
+    fetches only the chunks that hold it.
     """
 
     __tablename__ = "library_audio_profiles"
@@ -400,6 +406,8 @@ class LibraryAudioProfile(Base):
     bit_rate: Mapped[int | None] = mapped_column(Integer, nullable=True)
     peaks: Mapped[bytes] = mapped_column(LargeBinary, nullable=False)
     peaks_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    detail_peaks: Mapped[bytes | None] = mapped_column(LargeBinary, nullable=True)
+    detail_peaks_version: Mapped[int | None] = mapped_column(SmallInteger, nullable=True)
 
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True),
@@ -414,6 +422,16 @@ class LibraryAudioProfile(Base):
         ),
         CheckConstraint("octet_length(peaks) = 2048", name="ck_library_audio_profiles_peaks_size"),
         CheckConstraint("channels BETWEEN 1 AND 8", name="ck_library_audio_profiles_channels"),
+        CheckConstraint(
+            "(detail_peaks IS NULL) = (detail_peaks_version IS NULL)",
+            name="ck_library_audio_profiles_detail_peaks_pair",
+        ),
+        # 90,100 = 901 s x 50 buckets/s x 2 bytes (MAX_DETAIL_PEAKS_BYTES in media_ingest/audio.py).
+        CheckConstraint(
+            "detail_peaks IS NULL OR (octet_length(detail_peaks) % 2 = 0 "
+            "AND octet_length(detail_peaks) <= 90100)",
+            name="ck_library_audio_profiles_detail_peaks_size",
+        ),
         Index(
             "uq_library_audio_profiles_upload",
             "upload_id",

@@ -39,7 +39,11 @@ _NEW_TABLES = (
 )
 
 
-_NEXT = Path(__file__).resolve().parents[2] / "alembic" / "versions" / "062_studio_track_audio.py"
+_VERSIONS = Path(__file__).resolve().parents[2] / "alembic" / "versions"
+_LATER = (
+    ("062_studio_track_audio.py", "revision_062"),
+    ("063_studio_audio_timelines.py", "revision_063"),
+)
 
 
 def _load(path: Path = _PATH, name: str = "revision_061") -> ModuleType:
@@ -57,10 +61,12 @@ def _run(connection: Connection, action: str) -> None:
 
 
 def _run_next(connection: Connection, action: str) -> None:
-    """Revision 062 (track audio): its tables point at the holds, so it goes first on the way
-    down and last on the way up."""
-    with Operations.context(MigrationContext.configure(connection)):
-        getattr(_load(_NEXT, "revision_062"), action)()
+    """The later revisions that sit on 061's tables (062's track audio points at the holds, 063's
+    timelines at 062's audio): newest first on the way down, oldest first on the way up."""
+    revisions = _LATER if action == "upgrade" else tuple(reversed(_LATER))
+    for file_name, module_name in revisions:
+        with Operations.context(MigrationContext.configure(connection)):
+            getattr(_load(_VERSIONS / file_name, module_name), action)()
 
 
 async def _exists(connection: AsyncConnection, table: str) -> bool:

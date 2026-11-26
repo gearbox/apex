@@ -24,9 +24,9 @@ from src.api.services.media_ingest.errors import (
     UnsupportedAudioError,
 )
 from src.core.enums import MediaFormat
+from src.core.media_limits import AUDIO_MAX_SECONDS
 
 __all__ = [
-    "AUDIO_MAX_SECONDS",
     "AUDIO_MIN_SECONDS",
     "MAX_PEAKS_SAMPLES",
     "PEAKS_BUCKETS",
@@ -40,8 +40,9 @@ __all__ = [
 ]
 
 AUDIO_MIN_SECONDS: Final = 5
-AUDIO_MAX_SECONDS: Final = 900
-"""Duration limits: module constants, not settings - nothing needs to tune them per deployment."""
+"""Duration limits: module constants, not settings - nothing needs to tune them per deployment.
+The upper one, ``AUDIO_MAX_SECONDS``, is shared with the studio and lives in
+``src/core/media_limits.py``."""
 
 PEAKS_VERSION: Final = 1
 PEAKS_BUCKETS: Final = 1024

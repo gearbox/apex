@@ -1042,6 +1042,24 @@ class StudioTrackAudioOrigin(StrEnum):
     UPLOAD = "upload"
 
 
+class StudioTimelineOrigin(StrEnum):
+    """Who produced a realized timeline version of an audio version (S3a).
+
+    ``aligner`` is declared for S3b (automatic alignment); nothing writes it yet. There is no
+    ``import`` origin: nothing produces one.
+    """
+
+    USER = "user"
+    ALIGNER = "aligner"
+
+
+class StudioTimedLyricsFormat(StrEnum):
+    """A lyric file a realized timeline can be exported as."""
+
+    LRC = "lrc"
+    SRT = "srt"
+
+
 class StudioIncompatibleLyricsPolicy(StrEnum):
     """What a plan create does when the track's current lyrics no longer fit the new plan."""
 
