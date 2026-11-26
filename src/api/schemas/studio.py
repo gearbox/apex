@@ -23,6 +23,8 @@ from src.core.enums import (
     StudioMemoryOrigin,
     StudioMemoryStatus,
     StudioReleaseKind,
+    StudioTimedLyricsFormat,
+    StudioTimelineOrigin,
     StudioTrackAudioOrigin,
 )
 from src.studio.constraints import (
@@ -46,6 +48,7 @@ from src.studio.documents import (
     PlanDocument,
     Tag,
 )
+from src.studio.timeline import TimelineDocument
 
 __all__ = [
     "ArtistCreate",
@@ -63,6 +66,7 @@ __all__ = [
     "CastReferenceOut",
     "CastReferencePatch",
     "CurrentPut",
+    "CurrentTimelinePut",
     "ExportFieldOut",
     "ExportWarningOut",
     "ImportWarningOut",
@@ -79,6 +83,10 @@ __all__ = [
     "SunoExportOut",
     "SunoImportOut",
     "SunoImportRequest",
+    "TimelineCreate",
+    "TimelineExportOut",
+    "TimelineExportWarningOut",
+    "TimelineOut",
     "TrackAudioCreate",
     "TrackAudioOut",
     "TrackAudioPatch",
@@ -404,8 +412,66 @@ class TrackAudioOut(msgspec.Struct, kw_only=True):
     plan_version_id: UUID | None
     lyrics_version_id: UUID | None
     is_current: bool
+    current_timeline_id: UUID | None
+    """The current realized timeline (S3a), if one is chosen."""
+    timeline_count: int
+    """Timeline versions of this audio version. Deleting the audio version deletes them, and while
+    there is any, the plan / lyrics links cannot change."""
+    timeline_complete: bool | None
+    """Whether the **current** timeline times every plan section and lyric line; ``null`` when
+    there is no current timeline."""
     created_at: datetime
     updated_at: datetime
+
+
+# ---------------------------------------------------------------------------
+# Realized timelines (S3a)
+# ---------------------------------------------------------------------------
+
+
+class TimelineCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Save a timeline of an audio version as a new version (or replay an identical one)."""
+
+    content: TimelineDocument
+    parent_id: UUID | None = None
+    """The timeline this one was edited from: a timeline of **this** audio version."""
+    make_current: bool = False
+
+
+class TimelineOut(msgspec.Struct, kw_only=True):
+    id: UUID
+    audio_version_id: UUID
+    track_id: UUID
+    version_number: int
+    parent_id: UUID | None
+    origin: StudioTimelineOrigin
+    is_complete: bool
+    """Every plan section has a span and, when the audio links lyrics, so does every line."""
+    is_current: bool
+    content: TimelineDocument
+    """As stored: ``lines``, ``words`` and ``inferred`` are **omitted** at their defaults (empty,
+    empty, ``false``)."""
+    created_at: datetime
+
+
+class CurrentTimelinePut(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
+    """Choose the audio version's current timeline; ``null`` clears it. The field is required."""
+
+    timeline_id: UUID | None
+
+
+class TimelineExportWarningOut(msgspec.Struct, kw_only=True):
+    code: str
+    """``untimed_lines``, ``no_lyrics`` or ``inferred_word_timings``."""
+    count: int | None = None
+
+
+class TimelineExportOut(msgspec.Struct, kw_only=True):
+    timeline_id: UUID
+    format: StudioTimedLyricsFormat
+    text: str
+    """The complete file; ``""`` when there is nothing to time."""
+    warnings: list[TimelineExportWarningOut]
 
 
 # ---------------------------------------------------------------------------

@@ -32,6 +32,7 @@ STUDIO_FILES = sorted(
         SRC / "db/repositories/studio.py",
         SRC / "db/repositories/studio_cast.py",
         SRC / "db/repositories/studio_track_audio.py",
+        SRC / "db/repositories/studio_timeline.py",
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
         SRC / "api/schemas/studio_runs.py",
@@ -119,6 +120,16 @@ def test_renderers_never_name_the_full_document_or_the_artist_row() -> None:
 def test_the_studio_repository_never_flushes_or_commits() -> None:
     text = (SRC / "db/repositories/studio.py").read_text()
     assert not re.search(r"session\.(commit|flush)\(", text)
+
+
+@pytest.mark.parametrize(
+    "path",
+    [SRC / "db/repositories/studio_timeline.py", SRC / "studio/services/timeline.py"],
+    ids=lambda p: str(p.relative_to(SRC)),
+)
+def test_the_timeline_code_never_flushes_or_commits(path: Path) -> None:
+    """Timeline writes belong to the request transaction (S3a)."""
+    assert not re.search(r"session\.(commit|flush|rollback)\(", path.read_text()), path
 
 
 @pytest.mark.parametrize(

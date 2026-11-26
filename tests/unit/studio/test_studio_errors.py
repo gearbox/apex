@@ -83,6 +83,14 @@ CASES: list[tuple[Callable[[], Exception], int, str]] = [
     (lambda: e.AudioVersionLimitReached(20), 409, "audio_version_limit_reached"),
     (e.AudioVersionIsCurrent, 409, "audio_version_is_current"),
     (lambda: e.VersionHasAudio(2), 409, "version_has_audio"),
+    # realized timelines (S3a)
+    (e.TimelineNotFound, 404, "timeline_not_found"),
+    (e.AudioHasNoPlan, 409, "audio_has_no_plan"),
+    (e.TimelineUnchanged, 409, "timeline_unchanged"),
+    (lambda: e.TimelineLimitReached(50), 409, "timeline_limit_reached"),
+    (e.TimelineIsCurrent, 409, "timeline_is_current"),
+    (e.TimelineHasChildren, 409, "timeline_has_children"),
+    (lambda: e.AudioHasTimelines(2), 409, "audio_has_timelines"),
 ]
 
 
@@ -148,6 +156,13 @@ def test_detail_carries_issues_and_counts() -> None:
             "field": "lyrics_version_id",
             "expected": "lyrics",
         }
+    with _client(lambda: e.TimelineLimitReached(50)) as client:
+        assert client.get("/boom").json()["detail"] == {"limit": 50}
+    with _client(lambda: e.AudioHasTimelines(2)) as client:
+        assert client.get("/boom").json()["detail"] == {"count": 2}
+    for factory in (e.TimelineNotFound, e.TimelineIsCurrent, e.TimelineHasChildren):
+        with _client(factory) as client:
+            assert client.get("/boom").json()["detail"] is None
     with _client(e.StudioNotFound) as client:
         assert client.get("/boom").json()["detail"] is None
 
