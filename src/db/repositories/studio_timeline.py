@@ -32,12 +32,18 @@ if TYPE_CHECKING:
     from sqlalchemy import ColumnElement, Row, Select
     from sqlalchemy.ext.asyncio import AsyncSession
 
-__all__ = ["StudioAudioTimelineRepository", "TimelineExportRow", "TimelineRow"]
+__all__ = [
+    "StudioAudioTimelineRepository",
+    "TimelineExportRow",
+    "TimelineRow",
+    "TimelineSummaryRow",
+]
 
 
 @dataclass(frozen=True, slots=True)
-class TimelineRow:
-    """A stored timeline, plus whether its audio version's pointer names it."""
+class TimelineSummaryRow:
+    """A stored timeline without its document, plus whether its audio version's pointer names
+    it."""
 
     id: UUID
     audio_version_id: UUID
@@ -45,12 +51,18 @@ class TimelineRow:
     version_number: int
     parent_id: UUID | None
     origin: str
-    schema_version: int
-    content: dict[str, Any]
-    content_hash: str
     is_complete: bool
     created_at: datetime
     is_current: bool
+
+
+@dataclass(frozen=True, slots=True)
+class TimelineRow(TimelineSummaryRow):
+    """A stored timeline with its document."""
+
+    schema_version: int
+    content: dict[str, Any]
+    content_hash: str
 
 
 @dataclass(frozen=True, slots=True)
@@ -63,16 +75,13 @@ class TimelineExportRow:
     """``None`` exactly when ``lyrics_version_id`` is (anything else is a broken invariant)."""
 
 
-_COLUMNS = (
+_SUMMARY_COLUMNS = (
     StudioAudioTimeline.id,
     StudioAudioTimeline.audio_version_id,
     StudioAudioTimeline.track_id,
     StudioAudioTimeline.version_number,
     StudioAudioTimeline.parent_id,
     StudioAudioTimeline.origin,
-    StudioAudioTimeline.schema_version,
-    StudioAudioTimeline.content,
-    StudioAudioTimeline.content_hash,
     StudioAudioTimeline.is_complete,
     StudioAudioTimeline.created_at,
     # IS NOT DISTINCT FROM: an audio version with no current timeline never yields NULL.
@@ -81,13 +90,38 @@ _COLUMNS = (
     ),
 )
 
+_DOCUMENT_COLUMNS = (
+    StudioAudioTimeline.schema_version,
+    StudioAudioTimeline.content,
+    StudioAudioTimeline.content_hash,
+)
 
-def _select_rows() -> Select[*tuple[Any, ...]]:
-    """The rows' SELECT: the timeline and its audio version (for ``is_current``)."""
+
+def _select_rows(*, with_content: bool) -> Select[*tuple[Any, ...]]:
+    """The rows' SELECT: the timeline and its audio version (for ``is_current``).
+
+    ``with_content=False`` leaves the document (and its schema version and hash) unread: a
+    document may be 128 KiB, and a page holds up to 50 timelines.
+    """
+    columns = (*_SUMMARY_COLUMNS, *_DOCUMENT_COLUMNS) if with_content else _SUMMARY_COLUMNS
     return (
-        select(*_COLUMNS)
+        select(*columns)
         .select_from(StudioAudioTimeline)
         .join(StudioTrackAudio, StudioTrackAudio.id == StudioAudioTimeline.audio_version_id)
+    )
+
+
+def _summary_row(row: Row[*tuple[Any, ...]]) -> TimelineSummaryRow:
+    return TimelineSummaryRow(
+        id=row.id,
+        audio_version_id=row.audio_version_id,
+        track_id=row.track_id,
+        version_number=row.version_number,
+        parent_id=row.parent_id,
+        origin=row.origin,
+        is_complete=row.is_complete,
+        created_at=row.created_at,
+        is_current=bool(row.is_current),
     )
 
 
@@ -99,12 +133,12 @@ def _row(row: Row[*tuple[Any, ...]]) -> TimelineRow:
         version_number=row.version_number,
         parent_id=row.parent_id,
         origin=row.origin,
-        schema_version=row.schema_version,
-        content=row.content,
-        content_hash=row.content_hash,
         is_complete=row.is_complete,
         created_at=row.created_at,
         is_current=bool(row.is_current),
+        schema_version=row.schema_version,
+        content=row.content,
+        content_hash=row.content_hash,
     )
 
 
@@ -215,7 +249,7 @@ class StudioAudioTimelineRepository:
 
     async def get(self, timeline_id: UUID, *, user_id: UUID, product_id: str) -> TimelineRow | None:
         result = await self._session.execute(
-            _select_rows().where(
+            _select_rows(with_content=True).where(
                 StudioAudioTimeline.id == timeline_id, *self._scope(user_id, product_id)
             )
         )
@@ -231,7 +265,7 @@ class StudioAudioTimelineRepository:
         timeline, then relink the audio" could pair these times with another version's text.
         """
         result = await self._session.execute(
-            _select_rows()
+            _select_rows(with_content=True)
             .add_columns(StudioTrackAudio.lyrics_version_id, StudioDocumentVersion)
             .outerjoin(
                 StudioDocumentVersion,
@@ -298,9 +332,10 @@ class StudioAudioTimelineRepository:
         product_id: str,
         limit: int,
         before_number: int | None = None,
-    ) -> Sequence[TimelineRow]:
-        """Newest first by ``version_number``: ``limit + 1`` rows below the cursor's number."""
-        query = _select_rows().where(
+    ) -> Sequence[TimelineSummaryRow]:
+        """Newest first by ``version_number``: ``limit + 1`` rows below the cursor's number,
+        without their documents."""
+        query = _select_rows(with_content=False).where(
             StudioAudioTimeline.audio_version_id == audio_id,
             *self._scope(user_id, product_id),
         )
@@ -309,4 +344,4 @@ class StudioAudioTimelineRepository:
         result = await self._session.execute(
             query.order_by(StudioAudioTimeline.version_number.desc()).limit(limit + 1)
         )
-        return [_row(row) for row in result.all()]
+        return [_summary_row(row) for row in result.all()]

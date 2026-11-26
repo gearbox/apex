@@ -2,7 +2,7 @@
 
 Endpoints:
   POST   /v1/studio/audio/{id}/timelines          — save a version (201) or replay it (200)
-  GET    /v1/studio/audio/{id}/timelines          — keyset page, newest version first
+  GET    /v1/studio/audio/{id}/timelines          — keyset page of summaries, newest first
   GET    /v1/studio/timelines/{id}                — one timeline with its content
   DELETE /v1/studio/timelines/{id}                — delete (204) one that is not current or a parent
   PUT    /v1/studio/audio/{id}/current-timeline   — choose or clear the current timeline
@@ -33,6 +33,7 @@ from src.api.schemas.studio import (
     TimelineCreate,
     TimelineExportOut,
     TimelineOut,
+    TimelineSummaryOut,
     TrackAudioOut,
 )
 from src.api.security import auth_guard
@@ -102,8 +103,11 @@ class StudioTimelineController(Controller):
         studio_timeline_service: TimelineService,
         limit: Annotated[int, Parameter(ge=1, le=50)] = 30,
         cursor: str | None = None,
-    ) -> CursorPage[TimelineOut]:
-        """The audio version's timelines, newest (highest version number) first."""
+    ) -> CursorPage[TimelineSummaryOut]:
+        """The audio version's timelines, newest (highest version number) first.
+
+        Summaries only: read one timeline to get its content.
+        """
         return await studio_timeline_service.list_page(
             audio_id, current_user_id, product_id, limit=limit, cursor=cursor
         )

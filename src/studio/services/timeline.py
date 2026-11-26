@@ -35,7 +35,12 @@ from src.api.schemas.pagination import (
     decode_version_number_cursor,
     encode_version_number_cursor,
 )
-from src.api.schemas.studio import TimelineExportOut, TimelineExportWarningOut, TimelineOut
+from src.api.schemas.studio import (
+    TimelineExportOut,
+    TimelineExportWarningOut,
+    TimelineOut,
+    TimelineSummaryOut,
+)
 from src.core.enums import StudioTimedLyricsFormat, StudioTimelineOrigin
 from src.db.integrity import violated_constraint
 from src.db.models.studio import TIMELINE_PARENT_FK, TRACK_AUDIO_CURRENT_TIMELINE_FK
@@ -77,7 +82,7 @@ if TYPE_CHECKING:
 
     from src.api.schemas.studio import TimelineCreate, TrackAudioOut
     from src.db.models.studio import StudioDocumentVersion, StudioTrackAudio
-    from src.db.repositories.studio_timeline import TimelineRow
+    from src.db.repositories.studio_timeline import TimelineRow, TimelineSummaryRow
     from src.studio.documents import LyricsDocument, PlanDocument
 
 __all__ = ["TimelineService"]
@@ -85,8 +90,8 @@ __all__ = ["TimelineService"]
 logger = structlog.get_logger(__name__)
 
 
-def _timeline_out(row: TimelineRow) -> TimelineOut:
-    return TimelineOut(
+def _summary_out(row: TimelineSummaryRow) -> TimelineSummaryOut:
+    return TimelineSummaryOut(
         id=row.id,
         audio_version_id=row.audio_version_id,
         track_id=row.track_id,
@@ -95,8 +100,23 @@ def _timeline_out(row: TimelineRow) -> TimelineOut:
         origin=StudioTimelineOrigin(row.origin),
         is_complete=row.is_complete,
         is_current=row.is_current,
-        content=decode_stored_timeline(row.schema_version, row.content),
         created_at=row.created_at,
+    )
+
+
+def _timeline_out(row: TimelineRow) -> TimelineOut:
+    summary = _summary_out(row)
+    return TimelineOut(
+        id=summary.id,
+        audio_version_id=summary.audio_version_id,
+        track_id=summary.track_id,
+        version_number=summary.version_number,
+        parent_id=summary.parent_id,
+        origin=summary.origin,
+        is_complete=summary.is_complete,
+        is_current=summary.is_current,
+        created_at=summary.created_at,
+        content=decode_stored_timeline(row.schema_version, row.content),
     )
 
 
@@ -128,8 +148,9 @@ class TimelineService:
         *,
         limit: int,
         cursor: str | None,
-    ) -> CursorPage[TimelineOut]:
-        """The audio version's timelines, newest (highest ``version_number``) first."""
+    ) -> CursorPage[TimelineSummaryOut]:
+        """The audio version's timelines, newest (highest ``version_number``) first, without
+        their documents."""
         before: int | None = None
         if cursor is not None:
             try:
@@ -144,7 +165,7 @@ class TimelineService:
         has_more = len(rows) > limit
         page = rows[:limit]
         return CursorPage(
-            items=[_timeline_out(row) for row in page],
+            items=[_summary_out(row) for row in page],
             limit=limit,
             has_more=has_more,
             next_cursor=encode_version_number_cursor(page[-1].version_number) if has_more else None,

@@ -87,6 +87,7 @@ __all__ = [
     "TimelineExportOut",
     "TimelineExportWarningOut",
     "TimelineOut",
+    "TimelineSummaryOut",
     "TrackAudioCreate",
     "TrackAudioOut",
     "TrackAudioPatch",
@@ -438,7 +439,9 @@ class TimelineCreate(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):
     make_current: bool = False
 
 
-class TimelineOut(msgspec.Struct, kw_only=True):
+class TimelineSummaryOut(msgspec.Struct, kw_only=True):
+    """A timeline version without its document: an item of an audio version's history."""
+
     id: UUID
     audio_version_id: UUID
     track_id: UUID
@@ -448,10 +451,15 @@ class TimelineOut(msgspec.Struct, kw_only=True):
     is_complete: bool
     """Every plan section has a span and, when the audio links lyrics, so does every line."""
     is_current: bool
+    created_at: datetime
+
+
+class TimelineOut(TimelineSummaryOut, kw_only=True):
+    """A timeline version with its document."""
+
     content: TimelineDocument
     """As stored: ``lines``, ``words`` and ``inferred`` are **omitted** at their defaults (empty,
     empty, ``false``)."""
-    created_at: datetime
 
 
 class CurrentTimelinePut(msgspec.Struct, forbid_unknown_fields=True, kw_only=True):

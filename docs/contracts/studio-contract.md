@@ -232,7 +232,7 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | PUT | `/tracks/{id}/current` | 200 `Track` | body `{plan_version_id?, lyrics_version_id?, audio_version_id?}` — see §5 and §15 |
 | GET / POST | `/tracks/{id}/audio` | 200 page of `TrackAudio` / **201** `TrackAudio` | the track's audio versions, newest first / attach an uploaded audio file — see §15 |
 | GET / PATCH / DELETE | `/audio/{id}` | 200 / 200 / 204 | see §15; deleting an audio version deletes its timelines (§16) |
-| GET / POST | `/audio/{id}/timelines` | 200 page of `Timeline` / **201** created / **200** replay | see §16 |
+| GET / POST | `/audio/{id}/timelines` | 200 page of `TimelineSummary` / **201** created / **200** replay (`Timeline`) | see §16 |
 | GET / DELETE | `/timelines/{id}` | 200 `Timeline` / 204 | see §16 |
 | PUT | `/audio/{id}/current-timeline` | 200 `TrackAudio` | body `{timeline_id}` (`null` clears), §16 |
 | GET | `/timelines/{id}/exports/{lrc\|srt}` | 200 `TimelineExport` | see §16 |
@@ -1350,15 +1350,17 @@ Like plan and lyrics documents, timelines are **immutable, numbered versions** i
 
 ```ts
 interface TimelineCreate { content: TimelineDocument; parent_id?: UUID; make_current?: boolean }  // make_current default FALSE
-interface Timeline {
+interface TimelineSummary {             // an item of the list: the version history, without documents
   id: UUID; audio_version_id: UUID; track_id: UUID;
   version_number: number;               // per audio version, 1, 2, 3 …, never reused after a delete
   parent_id: UUID | null;
   origin: "user" | "aligner";           // only "user" is written today
   is_complete: boolean;
   is_current: boolean;                  // the audio version's current timeline
-  content: TimelineDocument;            // returned whole, in lists too
   created_at: ISODateTime;
+}
+interface Timeline extends TimelineSummary {  // one timeline: POST (201 / 200) and GET /timelines/{id}
+  content: TimelineDocument;
 }
 ```
 
@@ -1376,7 +1378,7 @@ All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced
 | Method | Path | Success | Notes |
 |---|---|---|---|
 | `POST` | `/audio/{id}/timelines` | `201` `Timeline` / `200` replay | body `TimelineCreate` |
-| `GET` | `/audio/{id}/timelines` | `200` page of `Timeline`, **highest `version_number` first** | `?limit=1..50` (30), `?cursor=` |
+| `GET` | `/audio/{id}/timelines` | `200` page of `TimelineSummary` (**no `content`**), **highest `version_number` first** | `?limit=1..50` (30), `?cursor=` |
 | `GET` | `/timelines/{id}` | `200` `Timeline` | |
 | `DELETE` | `/timelines/{id}` | `204` | `409 timeline_is_current` / `409 timeline_has_children` |
 | `PUT` | `/audio/{id}/current-timeline` | `200` `TrackAudio` | body `{"timeline_id": UUID \| null}` (required; `null` clears); another audio's timeline is `404 timeline_not_found` |
@@ -1438,6 +1440,7 @@ Carry me home
 ### Notes for the UI
 
 - Save explicitly (a version per save), not on every drag; the 50-version cap is per audio version.
+- The list is the version history and carries no `content` (a document can be 128 KiB). Open a version with `GET /timelines/{id}`.
 - Draw the editor from the **detail** peaks (§15), one window at a time; fall back to the overview on `409 peaks_not_ready`.
 - Keep `parent_id` = the version being edited, so the history reads as a tree and a mistaken save can be walked back.
 - Mark `inferred` words visibly; clearing the flag (omit it) when the user moves the word.

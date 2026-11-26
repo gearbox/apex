@@ -137,12 +137,27 @@ class TestLifecycleOverHttp:
         page = listed.json()
         assert [item["id"] for item in page["items"]] == [child["id"]]
         assert page["has_more"] is True
+        (item,) = page["items"]
+        assert set(item) == {
+            "id",
+            "audio_version_id",
+            "track_id",
+            "version_number",
+            "parent_id",
+            "origin",
+            "is_complete",
+            "is_current",
+            "created_at",
+        }
+        assert item == {key: value for key, value in child.items() if key != "content"}
         older = await client.get(
             f"/v1/studio/audio/{song.audio_id}/timelines",
             headers=headers,
             params={"limit": 1, "cursor": page["next_cursor"]},
         )
-        assert [item["id"] for item in older.json()["items"]] == [first["id"]]
+        assert older.json()["items"] == [
+            {key: value for key, value in first.items() if key != "content"} | {"is_current": False}
+        ]
 
         read = await client.get(f"/v1/studio/timelines/{first['id']}", headers=headers)
         assert read.status_code == 200

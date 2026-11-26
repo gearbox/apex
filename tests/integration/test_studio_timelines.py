@@ -6,6 +6,7 @@ over every row) and the audio-hold reconciliation, run by an autouse fixture.
 
 from __future__ import annotations
 
+import re
 from types import SimpleNamespace
 from typing import TYPE_CHECKING, Any
 from uuid import UUID, uuid4
@@ -16,7 +17,7 @@ from sqlalchemy import delete, event, func, select, update
 from sqlalchemy.exc import IntegrityError
 from structlog.testing import capture_logs
 
-from src.api.schemas.studio import TimelineCreate, TrackAudioPatch
+from src.api.schemas.studio import TimelineCreate, TimelineSummaryOut, TrackAudioPatch
 from src.core.enums import StudioTimelineOrigin
 from src.db.models.studio import (
     StudioAudioTimeline,
@@ -999,7 +1000,39 @@ class TestReads:
         assert [i.version_number for i in third.items] == [1]
         assert (third.has_more, third.next_cursor) == (False, None)
         assert [i.is_current for i in (*first.items, *second.items)] == [False, False, True, False]
-        assert second.items[0].content == song.variant(2)
+        # exactly the summary: a full TimelineOut is a subclass and would be sent whole
+        listed = (*first.items, *second.items, *third.items)
+        assert {type(item) for item in listed} == {TimelineSummaryOut}
+        async with hold_world.factory() as session:
+            opened = await timeline_service(session).get(second.items[0].id, song.user.id, PRODUCT)
+        assert opened.content == song.variant(2)
+
+    async def test_the_list_never_selects_content(
+        self, hold_world: HoldWorld, db_engine: AsyncEngine, song: Song
+    ) -> None:
+        """A version history is metadata: no document leaves the database for it."""
+        out, _ = await create_timeline(hold_world, song, song.complete(), make_current=True)
+        content_column = re.compile(r"\bstudio_audio_timelines\.content\b")  # not content_hash
+        statements: list[str] = []
+
+        def on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
+            statements.append(statement)
+
+        event.listen(db_engine.sync_engine, "before_cursor_execute", on_execute)
+        try:
+            async with hold_world.factory() as session:
+                service = timeline_service(session)
+                await service.list_page(song.audio_id, song.user.id, PRODUCT, limit=2, cursor=None)
+                by_the_list = statements.copy()
+                statements.clear()
+                await service.get(out.id, song.user.id, PRODUCT)
+        finally:
+            event.remove(db_engine.sync_engine, "before_cursor_execute", on_execute)
+
+        assert [s for s in by_the_list if "FROM studio_audio_timelines" in s], by_the_list
+        assert not [s for s in by_the_list if content_column.search(s)], by_the_list
+        # the pattern does find the column where it is read
+        assert [s for s in statements if content_column.search(s)], statements
 
     async def test_a_bad_cursor_and_a_foreign_audio(
         self, hold_world: HoldWorld, song: Song
