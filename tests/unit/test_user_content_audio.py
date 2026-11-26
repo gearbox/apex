@@ -124,14 +124,16 @@ class TestRouting:
     async def test_every_audio_type_goes_to_audio_ingest_only(self, content_type: str) -> None:
         service, _, prepare_audio = _service()
         ingestor = service._media_ingestor
-        ingestor.prepare_image = AsyncMock()  # type: ignore[attr-defined]
-        ingestor.prepare_video = AsyncMock()  # type: ignore[attr-defined]
 
-        result = await _upload(service, content_type=content_type)
+        with (
+            patch.object(ingestor, "prepare_image", new_callable=AsyncMock) as prepare_image,
+            patch.object(ingestor, "prepare_video", new_callable=AsyncMock) as prepare_video,
+        ):
+            result = await _upload(service, content_type=content_type)
 
         prepare_audio.assert_awaited_once_with(b"audio-bytes")
-        ingestor.prepare_image.assert_not_awaited()  # type: ignore[attr-defined]
-        ingestor.prepare_video.assert_not_awaited()  # type: ignore[attr-defined]
+        prepare_image.assert_not_awaited()
+        prepare_video.assert_not_awaited()
         assert result.media.media_type.value == "audio"  # type: ignore[attr-defined]
 
     async def test_audio_with_a_frame_lineage_is_refused_before_any_work(self) -> None:
