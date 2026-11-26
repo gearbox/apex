@@ -634,6 +634,27 @@ class TestDelete:
 
         assert await _rows(hold_world, song.audio_id) == []
 
+    async def test_the_children_check_names_the_audio_version(
+        self, hold_world: HoldWorld, db_engine: AsyncEngine, song: Song
+    ) -> None:
+        """``parent_id`` is only the second column of its index: without the first, the check reads
+        every timeline the user has."""
+        _root, leaf = await _chain(hold_world, song, 2)
+        statements: list[str] = []
+
+        def on_execute(_conn: object, _cursor: object, statement: str, *_: object) -> None:
+            statements.append(" ".join(statement.split()))
+
+        event.listen(db_engine.sync_engine, "before_cursor_execute", on_execute)
+        try:
+            await _delete(hold_world, song, leaf.id)
+        finally:
+            event.remove(db_engine.sync_engine, "before_cursor_execute", on_execute)
+
+        (check,) = [s for s in statements if s.startswith("SELECT EXISTS")]
+        assert "studio_audio_timelines.audio_version_id = " in check
+        assert "studio_audio_timelines.parent_id = " in check
+
     @pytest.mark.parametrize("case", ["unknown", "foreign_user", "other_product"])
     async def test_a_timeline_that_is_not_the_caller_s_is_not_found(
         self, hold_world: HoldWorld, song: Song, case: str

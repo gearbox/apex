@@ -385,7 +385,12 @@ class TimelineService:
             raise TimelineNotFound
         if audio.current_timeline_id == timeline_id:
             raise TimelineIsCurrent
-        if await self._timelines.has_children(timeline_id, user_id=user_id, product_id=product_id):
+        if await self._timelines.has_children(
+            timeline_id,
+            audio_version_id=found.audio_version_id,
+            user_id=user_id,
+            product_id=product_id,
+        ):
             raise TimelineHasChildren
         try:
             async with self._session.begin_nested():

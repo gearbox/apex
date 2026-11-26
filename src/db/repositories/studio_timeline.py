@@ -313,10 +313,21 @@ class StudioAudioTimelineRepository:
         )
         return result.scalar_one()
 
-    async def has_children(self, timeline_id: UUID, *, user_id: UUID, product_id: str) -> bool:
+    async def has_children(
+        self, timeline_id: UUID, *, audio_version_id: UUID, user_id: UUID, product_id: str
+    ) -> bool:
+        """Whether another timeline names this one as its parent.
+
+        Args:
+            timeline_id: The possible parent.
+            audio_version_id: The audio version of ``timeline_id``. The composite parent foreign
+                key gives a child the same one, so filtering on it changes no answer; it is what
+                lets the query use the index that leads with ``(audio_version_id, parent_id)``.
+        """
         result = await self._session.execute(
             select(
                 exists().where(
+                    StudioAudioTimeline.audio_version_id == audio_version_id,
                     StudioAudioTimeline.parent_id == timeline_id,
                     *self._scope(user_id, product_id),
                 )
