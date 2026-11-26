@@ -142,8 +142,13 @@ async def committed_song(
     with_plan: bool = True,
     with_lyrics: bool = True,
     duration_ms: int = DURATION_MS,
+    lyrics_sections_reversed: bool = False,
 ) -> Song:
-    """A committed track, plan, lyrics and one audio version linking what was asked for."""
+    """A committed track, plan, lyrics and one audio version linking what was asked for.
+
+    ``lyrics_sections_reversed`` lists the lyrics' chorus ahead of the verse; the plan keeps the
+    verse first, and so does the song (:meth:`Song.line_spans`).
+    """
     verse, chorus, solo = new_id(), new_id(), new_id()
     plan = make_plan(
         make_section(K.VERSE, section_id=verse, label=f"{MARK}-label", notes=f"{MARK}-notes"),
@@ -153,10 +158,13 @@ async def committed_song(
         idea=f"{MARK}-idea",
         references=(f"{MARK}-reference",),
     )
-    lyrics = make_lyrics(
+    lyric_sections = [
         (verse, [f"{MARK}-lyric verse one", f"{MARK}-lyric verse two"]),
         (chorus, [f"{MARK}-lyric hook one", f"{MARK}-lyric hook two"]),
-    )
+    ]
+    if lyrics_sections_reversed:
+        lyric_sections.reverse()
+    lyrics = make_lyrics(*lyric_sections)
     track_id = await committed_track(world, user)
     async with world.factory() as session:
         plan_version_id = await _document_version(

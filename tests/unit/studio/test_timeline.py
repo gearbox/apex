@@ -300,19 +300,14 @@ class TestEveryCode:
 
         assert check(document) == [("lines[1]", "line_order")]
 
-    def test_line_order_follows_the_lyrics_document_s_section_order(self) -> None:
-        """ "Lyrics order" is the lyrics document's own order, then ``line_index``."""
-        reversed_lyrics = make_lyrics((CHORUS, ["hook"]), (VERSE, ["first"]))
+    def test_line_order_counts_line_index_even_when_the_starts_ascend(self) -> None:
+        """Listed by time, but line 1 is sung before line 0."""
         document = TimelineDocument(
-            sections=(span(VERSE, 0, 20_000), span(CHORUS, 20_000, 40_000)),
-            lines=(line(VERSE, 0, 1_000, 2_000), line(CHORUS, 0, 21_000, 22_000)),
+            sections=(span(VERSE, 0, 20_000),),
+            lines=(line(VERSE, 1, 1_000, 5_000), line(VERSE, 0, 5_000, 9_000)),
         )
 
-        issues = validate_timeline(
-            document, duration_ms=DURATION_MS, plan=plan(), lyrics=reversed_lyrics
-        )
-
-        assert pairs(issues) == [("lines[1]", "line_order")]
+        assert check(document) == [("lines[1]", "line_order")]
 
     def test_line_overlap(self) -> None:
         document = complete_timeline(lines=replaced(LINES, 1, line(VERSE, 1, 4_999, 9_000)))
@@ -345,6 +340,36 @@ class TestEveryCode:
         assert check(complete_timeline(lines=replaced(LINES, 0, first))) == [
             ("lines[0].words[1]", "word_overlap")
         ]
+
+
+def reordered_lyrics() -> LyricsDocument:
+    """:func:`lyrics` with the chorus listed ahead of the verse; the plan has the verse first."""
+    return make_lyrics((CHORUS, ["hook one", "hook two"]), (VERSE, ["first line", "second line"]))
+
+
+class TestLineOrderFollowsThePlan:
+    """S3-4a: line order is the position of each line's section in the **plan**, then its
+    ``line_index``. The lyrics document's own section order plays no part."""
+
+    def test_lyrics_in_another_section_order_can_be_fully_timed(self) -> None:
+        document = complete_timeline()  # listed in plan order, which is also time order
+
+        issues = validate_timeline(
+            document, duration_ms=DURATION_MS, plan=plan(), lyrics=reordered_lyrics()
+        )
+
+        assert pairs(issues) == []
+        assert is_complete(document, plan=plan(), lyrics=reordered_lyrics()) is True
+
+    def test_listing_in_the_lyrics_document_s_order_is_line_order(self) -> None:
+        """The chorus lines first: the first line out of place is the verse line after them."""
+        document = complete_timeline(lines=(*LINES[2:], *LINES[:2]))
+
+        issues = validate_timeline(
+            document, duration_ms=DURATION_MS, plan=plan(), lyrics=reordered_lyrics()
+        )
+
+        assert pairs(issues) == [("lines[2]", "line_order")]
 
 
 class TestAllIssuesAtOnce:

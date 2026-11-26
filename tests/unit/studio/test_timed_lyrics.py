@@ -238,7 +238,7 @@ class TestText:
 
         assert rendered.text == "[00:01.00]Other words\n[00:05.50]More\n[00:21.25]Else\n"
 
-    def test_lines_come_out_in_lyrics_order_whatever_order_the_timeline_lists(self) -> None:
+    def test_lines_come_out_in_time_order_whatever_order_the_timeline_lists(self) -> None:
         shuffled = _timeline(*reversed(PLAIN.lines))
 
         assert project_timed_lyrics(shuffled, LYRICS) == project_timed_lyrics(PLAIN, LYRICS)
@@ -253,6 +253,62 @@ class TestText:
 
         assert text == "[00:01.00]<00:01.00>a [00:00.00]forged b\n"
         assert len(text.splitlines()) == 1
+
+
+class TestLyricsInAnotherSectionOrder:
+    """S3-4a: exports are chronological, even when the lyrics document lists the chorus (sung
+    second) ahead of the verse. Cue numbers follow time; each cue keeps its own line's text."""
+
+    REORDERED = make_lyrics(
+        (CHORUS, ["Carry me home"]),
+        (VERSE, ["Night falls on the harbour", "Lanterns on the water"]),
+    )
+
+    def test_lrc_lines_are_chronological(self) -> None:
+        rendered = LrcRenderer().render(project_timed_lyrics(PLAIN, self.REORDERED))
+
+        assert rendered.text == (
+            "[00:01.00]Night falls on the harbour\n"
+            "[00:05.50]Lanterns on the water\n"
+            "[00:21.25]Carry me home\n"
+        )
+        assert rendered.warnings == ()
+
+    def test_srt_numbers_follow_time_and_each_cue_keeps_its_own_line_s_text(self) -> None:
+        texts = {
+            (section.section_id, line_index): lyric_line.text
+            for section in self.REORDERED.sections
+            for line_index, lyric_line in enumerate(section.lines)
+        }
+        # PLAIN lists its spans in time order; the text is looked up by identity, not position.
+        expected = [
+            (str(number), texts[(span.section_id, span.line_index)], span.start_ms)
+            for number, span in enumerate(PLAIN.lines, start=1)
+        ]
+
+        rendered = SrtRenderer().render(project_timed_lyrics(PLAIN, self.REORDERED))
+
+        cues = [cue.split("\n") for cue in rendered.text.removesuffix("\n\n").split("\n\n")]
+        assert [(number, text) for number, _times, text in cues] == [
+            (number, text) for number, text, _start in expected
+        ]
+        assert [times.split(" --> ")[0] for _number, times, _text in cues] == [
+            "00:00:01,000",
+            "00:00:05,509",
+            "00:00:21,250",
+        ]
+        assert [start for _number, _text, start in expected] == [1_000, 5_509, 21_250]
+
+    @pytest.mark.parametrize("export_format", list(StudioTimedLyricsFormat))
+    def test_untimed_lines_are_still_counted(self, export_format: StudioTimedLyricsFormat) -> None:
+        timeline = _timeline(_line(VERSE, 1, 5_000, 6_000), _line(CHORUS, 0, 21_000, 22_000))
+
+        rendered = TIMED_LYRICS_RENDERERS[export_format].render(
+            project_timed_lyrics(timeline, self.REORDERED)
+        )
+
+        assert rendered.warnings == (TimedLyricsWarning("untimed_lines", 1),)
+        assert rendered.text.index("Lanterns") < rendered.text.index("Carry me home")
 
 
 class TestTheProjection:

@@ -1330,7 +1330,7 @@ A timeline is checked against the audio version's `duration_ms`, its linked **pl
 | `duplicate_line` | the same line is timed twice |
 | `line_section_untimed` | the line's section has no span |
 | `line_outside_section` | the line is not inside its section's span |
-| `line_order` | lines are not in **lyrics order** (the lyrics document's section order, then `line_index`): listed out of it, or one starts before the line listed ahead of it |
+| `line_order` | lines are not in **line order** (their section's position in the **plan**, then `line_index`): listed out of it, or one starts before the line listed ahead of it |
 | `line_overlap` | two line spans overlap |
 | `word_outside_line` | a word is not inside its line |
 | `word_order` | a word starts before the word listed ahead of it |
@@ -1338,7 +1338,7 @@ A timeline is checked against the audio version's `duration_ms`, its linked **pl
 | `too_long_after_normalization` | a word's text is over 100 characters after NFC (path `lines[j].words[k].text`) |
 | `document_too_large` | the compact JSON is over 131,072 bytes (path `""`) |
 
-**Gaps are allowed** (silence, a count-in, an effect). **"Lyrics order" is the lyrics document's own order**: lyrics saved with their sections in a different order than the plan cannot have all their lines timed (the sections must follow plan order and the lines lyrics order at once). `lyrics` runs and the Suno import write lyrics in plan order; a `revise_lyrics` run keeps the order of the lyrics it revises. So only lyrics saved by hand with another order are affected: keep your editor's lyrics sections in plan order.
+**Gaps are allowed** (silence, a count-in, an effect). **Line order follows the plan:** the order in which the lyrics document lists its own sections does not matter to a timeline.
 
 ### Partial and complete
 
@@ -1402,7 +1402,7 @@ interface TimelineExport {
 }
 ```
 
-A pure `GET` that always renders. **Line text comes only from the audio's lyrics version** (never from the plan: no labels, notes or idea can appear) and **every time comes only from the timeline**; lines are in lyrics order. Line delivery tags are not part of a lyric file.
+A pure `GET` that always renders. **Line text comes only from the audio's lyrics version** (never from the plan: no labels, notes or idea can appear) and **every time comes only from the timeline**; lines are in time order. Line delivery tags are not part of a lyric file.
 
 | Warning | `count` | When |
 |---|---|---|

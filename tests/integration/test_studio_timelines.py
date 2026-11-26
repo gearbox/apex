@@ -18,7 +18,12 @@ from structlog.testing import capture_logs
 
 from src.api.schemas.studio import TimelineCreate, TrackAudioPatch
 from src.core.enums import StudioTimelineOrigin
-from src.db.models.studio import StudioAudioTimeline, StudioTrack, StudioTrackAudio
+from src.db.models.studio import (
+    StudioAudioTimeline,
+    StudioDocumentVersion,
+    StudioTrack,
+    StudioTrackAudio,
+)
 from src.db.models.user import User
 from src.db.repositories.studio_timeline import StudioAudioTimelineRepository
 from src.studio.constraints import MAX_TIMELINES_PER_AUDIO
@@ -35,6 +40,7 @@ from src.studio.errors import (
     TimelineNotFound,
     TimelineUnchanged,
 )
+from src.studio.services.mappers import decode_lyrics
 from src.studio.services.timeline import TimelineService
 from src.studio.services.track import TrackService
 from src.studio.services.version import DocumentVersionService
@@ -1076,6 +1082,42 @@ class TestExports:
         assert statements[0].startswith("SELECT")
         assert "STUDIO_DOCUMENT_VERSIONS" in statements[0]
         assert "FOR UPDATE" not in statements[0]
+
+
+# -- S3-4a: line order follows the plan ----------------------------------------------------------
+
+
+class TestLyricsInAnotherSectionOrder:
+    """The plan is verse, chorus; the stored lyrics list the chorus first."""
+
+    async def test_it_can_be_fully_timed_and_exports_in_time_order(
+        self, hold_world: HoldWorld, user: UserModel
+    ) -> None:
+        song = await committed_song(hold_world, user, lyrics_sections_reversed=True)
+
+        out, created = await create_timeline(hold_world, song, song.complete())
+
+        async with hold_world.factory() as session:
+            stored = await session.get_one(StudioDocumentVersion, song.lyrics_version_id)
+            service = timeline_service(session)
+            lrc = await service.export(out.id, "lrc", user.id, PRODUCT)
+            srt = await service.export(out.id, "srt", user.id, PRODUCT)
+        # the premise: the stored document kept its own section order
+        assert [s.section_id for s in decode_lyrics(stored).sections] == [song.chorus, song.verse]
+        assert (created, out.is_complete) == (True, True)
+        assert lrc.text.splitlines() == [
+            f"[00:01.00]<00:01.00>{MARK}-w1 <00:02.00>{MARK}-w2",
+            f"[00:05.00]{MARK}-lyric verse two",
+            f"[00:21.00]{MARK}-lyric hook one",
+            f"[00:25.00]{MARK}-lyric hook two",
+        ]
+        assert srt.text == (
+            f"1\n00:00:01,000 --> 00:00:05,000\n{MARK}-lyric verse one\n\n"
+            f"2\n00:00:05,000 --> 00:00:09,000\n{MARK}-lyric verse two\n\n"
+            f"3\n00:00:21,000 --> 00:00:25,000\n{MARK}-lyric hook one\n\n"
+            f"4\n00:00:25,000 --> 00:00:30,000\n{MARK}-lyric hook two\n\n"
+        )
+        assert srt.warnings == []
 
 
 # -- invariant 8: logs ---------------------------------------------------------------------------

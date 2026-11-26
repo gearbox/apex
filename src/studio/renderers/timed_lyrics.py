@@ -5,9 +5,14 @@ text and word stamps only, so a plan's notes, idea, references or labels cannot 
 because there is no way to carry them (P1-12, as for the Suno renderer).
 
 **Where the text comes from.** A line's text comes only from the **lyrics version**; every time
-comes only from the **timeline**. Lines are in lyrics order. The one thing a lyrics version does not
-have is a division into words, so enhanced LRC writes each word as the timeline stored it
-(``WordSpan.text``, display data) next to its stamp; SRT and plain LRC never use it.
+comes only from the **timeline**. The one thing a lyrics version does not have is a division into
+words, so enhanced LRC writes each word as the timeline stored it (``WordSpan.text``, display data)
+next to its stamp; SRT and plain LRC never use it.
+
+**Lines are in time order**, by their start in the timeline: a subtitle file's cues must be
+chronological, and the lyrics document may list its sections in another order than the song has them
+(S3-4a). The lines of a valid timeline are non-empty and do not overlap, so their starts are
+distinct and the order is total.
 
 **No time is ever invented.** A lyric line the timeline does not time is left out and counted
 (``untimed_lines``). Words whose span an aligner inferred are exported as stored and counted
@@ -72,7 +77,7 @@ class TimedLyricsProjection:
     """Everything a lyric-file renderer may see."""
 
     lines: tuple[TimedLine, ...]
-    """The timed lines, in lyrics order."""
+    """The timed lines, in time order."""
     untimed: int
     """Lyric lines the timeline does not time (left out of ``lines``)."""
 
@@ -87,7 +92,7 @@ def project_timed_lyrics(
         lyrics: The lyrics version its audio version links.
 
     Returns:
-        The timed lines in lyrics order and the number of lyric lines without a span.
+        The timed lines in time order and the number of lyric lines without a span.
     """
     spans = {(span.section_id, span.line_index): span for span in timeline.lines}
     lines: list[TimedLine] = []
@@ -109,6 +114,7 @@ def project_timed_lyrics(
                     ),
                 )
             )
+    lines.sort(key=lambda line: line.start_ms)
     return TimedLyricsProjection(lines=tuple(lines), untimed=untimed)
 
 

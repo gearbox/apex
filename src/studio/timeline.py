@@ -9,6 +9,11 @@ touch do not overlap. A timeline names no plan or lyrics version: those are its 
 links, which freeze once the audio version has a timeline (S3-5). Together with immutable versions
 and an immutable audio duration, that is why a stored timeline stays valid for as long as it exists.
 
+**Line order follows the plan (S3-4a).** Lines are ordered by their section's position in the
+**plan**, then by ``line_index``. The order in which the lyrics document lists its sections plays no
+part: lines lie inside their section's span and the spans follow plan order, so any other line order
+could never be satisfied by lyrics whose sections are listed differently.
+
 **All four Structs set ``omit_defaults=True`` (S3-14).** The content hash is computed over
 ``msgspec.json.encode(document)`` and the stored JSONB is that same encoding, so a field added
 later with a default changes neither the encoding nor the hash of a row already stored: replay
@@ -237,18 +242,20 @@ def validate_timeline(
         document: A normalized timeline.
         duration_ms: The audio version's duration.
         plan: The plan the audio version links.
-        lyrics: The lyrics it links, or ``None`` (then no line is known).
+        lyrics: The lyrics it links, compatible with ``plan``, or ``None`` (then no line is
+            known).
 
     Returns:
         All issues (empty when the timeline is valid). Paths are ``sections[i]``, ``lines[j]`` and
         ``lines[j].words[k]``; they never contain text. Gaps are fine, and a partial timeline is
-        valid. "Plan order" is the order of the plan's sections; "lyrics order" is the order of
-        the lyrics document's sections, then ``line_index``. A sequence is in order when it is
-        listed in that order **and** no span starts before the one listed ahead of it.
+        valid. "Plan order" is the order of the plan's sections. "Line order" is the position of
+        each line's section in the **plan**, then its ``line_index`` (S3-4a); the lyrics
+        document's own section order plays no part. A sequence is in order when it is listed in
+        that order **and** no span starts before the one listed ahead of it.
     """
     issues: list[DocumentIssue] = []
     timed_sections = _check_sections(document.sections, plan, duration_ms, issues)
-    _check_lines(document.lines, lyrics, timed_sections, duration_ms, issues)
+    _check_lines(document.lines, plan, lyrics, timed_sections, duration_ms, issues)
     return issues
 
 
@@ -283,6 +290,11 @@ def _check_sequence(
         latest_end = max(latest_end, item.end_ms)
 
 
+def _plan_positions(plan: PlanDocument) -> dict[UUID, int]:
+    """Where each section comes in the plan."""
+    return {section.id: index for index, section in enumerate(plan.sections)}
+
+
 def _check_sections(
     spans: Sequence[SectionSpan],
     plan: PlanDocument,
@@ -290,7 +302,7 @@ def _check_sections(
     issues: list[DocumentIssue],
 ) -> dict[UUID, SectionSpan]:
     """Check the section spans; returns the first span of each section id (what lines sit in)."""
-    plan_rank = {section.id: index for index, section in enumerate(plan.sections)}
+    plan_rank = _plan_positions(plan)
     timed: dict[UUID, SectionSpan] = {}
     placed: list[_Placed] = []
     for index, span in enumerate(spans):
@@ -310,7 +322,8 @@ def _check_sections(
 
 
 def _line_keys(lyrics: LyricsDocument | None) -> list[tuple[UUID, int]]:
-    """Every ``(section_id, line_index)`` of the lyrics, in lyrics order."""
+    """Every ``(section_id, line_index)`` of the lyrics: **which** lines exist. The order of this
+    list means nothing; line order comes from :func:`_line_ranks`."""
     if lyrics is None:
         return []
     return [
@@ -320,14 +333,24 @@ def _line_keys(lyrics: LyricsDocument | None) -> list[tuple[UUID, int]]:
     ]
 
 
+def _line_ranks(plan: PlanDocument, lyrics: LyricsDocument | None) -> dict[tuple[UUID, int], int]:
+    """Each lyric line's place in line order (S3-4a): the position of its section in the plan, then
+    ``line_index``. ``lyrics`` is compatible with ``plan`` (an audio version's links always are), so
+    every lyrics section has a position."""
+    positions = _plan_positions(plan)
+    ordered = sorted(_line_keys(lyrics), key=lambda key: (positions[key[0]], key[1]))
+    return {key: rank for rank, key in enumerate(ordered)}
+
+
 def _check_lines(
     spans: Sequence[LineSpan],
+    plan: PlanDocument,
     lyrics: LyricsDocument | None,
     timed_sections: Mapping[UUID, SectionSpan],
     duration_ms: int,
     issues: list[DocumentIssue],
 ) -> None:
-    line_rank = {key: rank for rank, key in enumerate(_line_keys(lyrics))}
+    line_rank = _line_ranks(plan, lyrics)
     seen: set[tuple[UUID, int]] = set()
     placed: list[_Placed] = []
     for index, line in enumerate(spans):
