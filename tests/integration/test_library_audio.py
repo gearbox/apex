@@ -335,7 +335,8 @@ class TestPeaksEndpoint:
 
         assert response.status_code == 200
         body = response.json()
-        assert set(body) == {"version", "buckets", "peaks"}
+        assert set(body) == {"level", "version", "buckets", "peaks"}
+        assert body["level"] == "overview"  # additive (S3a)
         assert body["version"] == 1
         assert body["buckets"] == 1024
         assert len(body["peaks"]) == 2048

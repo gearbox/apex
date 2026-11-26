@@ -469,14 +469,31 @@ class LibraryLineageGraph(msgspec.Struct, kw_only=True):
     """True if either descendant relation was clipped by its per-relation cap."""
 
 
-class AudioPeaksResponse(msgspec.Struct, kw_only=True):
-    """Waveform peaks of an audio asset (``GET /v1/library/assets/{asset_ref}/peaks``).
+class AudioPeaksResponse(msgspec.Struct, tag="overview", tag_field="level", kw_only=True):
+    """Overview peaks of an audio asset (``GET /v1/library/assets/{asset_ref}/peaks``).
 
     ``peaks`` is ``2 * buckets`` signed integers in ``[-128, 127]``, interleaved
     ``[min0, max0, min1, max1, ...]`` over equal slices of the mono decode; ``0`` is silence and
-    ``±127`` is full scale. ``version`` names the layout, so a finer zoom can be added later.
+    ``±127`` is full scale. ``version`` names the layout. The wire carries ``level: "overview"``
+    (the tag that tells this response from a detail window).
     """
 
     version: int
     buckets: int
+    peaks: list[int]
+
+
+class AudioDetailPeaksResponse(msgspec.Struct, tag="detail", tag_field="level", kw_only=True):
+    """A window of the 20 ms detail peaks (``?level=detail``, S3a).
+
+    Bucket ``from_bucket + i`` covers ``bucket_ms`` milliseconds from
+    ``(from_bucket + i) * bucket_ms``; ``peaks`` holds that window's ``[min, max]`` pairs, encoded
+    as in the overview. ``total_buckets`` is the whole file's count; a window past the end is
+    clamped (empty ``peaks`` with ``from_bucket == total_buckets``).
+    """
+
+    version: int
+    bucket_ms: int
+    total_buckets: int
+    from_bucket: int
     peaks: list[int]

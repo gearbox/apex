@@ -121,7 +121,7 @@ ingest runs and ingest re-checks it.
 Pipeline: write a temp file → `ffprobe` (never the client MIME) → clean the
 container → `ffprobe` of the **prepared** file (the stored bytes are what is
 described and gated) → decoded-sample verification where required → bounded
-peaks pass → read the prepared bytes.
+peaks pass (one decode, two levels) → read the prepared bytes.
 
 * **Policy** (`media_ingest/audio.py::parse_audio_probe`, pure), in this order:
   format not mp3 / ISO-BMFF / wav / flac → `audio_format_not_supported`; any
@@ -153,6 +153,23 @@ peaks pass → read the prepared bytes.
   read into a numpy `int16` array, split by `np.array_split` into exactly 1,024
   buckets; per bucket min and max `>> 8`, clipped to `[-128, 127]`, stored as
   interleaved `int8` (2,048 bytes, `PEAKS_VERSION = 1`).
+* **Detail peaks (S3a):** computed from the **same** PCM (never decoded twice):
+  one min/max pair per **20 ms** (`DETAIL_BUCKET_MS`), same `int8` encoding.
+  20 ms is 220.5 samples at 11,025 Hz, so bucket `b` covers
+  `[b * 441 // 2, (b + 1) * 441 // 2)`: whole-number arithmetic that alternates
+  220 and 221 samples and never drifts. There are `ceil(n * 2 / 441)` buckets
+  (the last may be short); an empty decode is `invalid_audio`. At most 90,100
+  bytes (901 s x 50 x 2), held by a CHECK. `DETAIL_PEAKS_VERSION = 1`.
+  `library_audio_profiles.detail_peaks` is `STORAGE EXTERNAL`, so the windowed
+  read (`substring()` in SQL) fetches only the chunks it needs.
+  Audio stored before S3a has NULL detail (`409 peaks_not_ready`) until
+  **`python -m src.cli.backfill_audio_peaks [--dry-run] [--batch-size N]`**
+  fills it: it reads only NULL rows, downloads each object from R2, runs
+  `compute_audio_detail_peaks` (this same decode, under a video slot) and writes
+  with `UPDATE ... WHERE detail_peaks IS NULL`, one short transaction per row, so
+  it is idempotent and safe to run twice at once. A failing row is counted by
+  error type (`missing` for an object R2 does not have) and the scan goes on;
+  overview peaks are never touched. Run it once after migration 063.
 * **Nothing private is logged:** the audio stages log the stage name only (never
   stderr: decoder warnings can quote tag values), and `media.audio_profile`
   (`profile_log.log_audio_profile`) carries format, codec, sample rate, channels,

@@ -4,7 +4,7 @@ Endpoints:
   GET    /v1/library                          — paginated library grid
   GET    /v1/library/assets/{asset_ref}        — asset detail
   GET    /v1/library/assets/{asset_ref}/lineage — bounded ancestor/descendant lineage graph
-  GET    /v1/library/assets/{asset_ref}/peaks   — waveform peaks of an audio asset
+  GET    /v1/library/assets/{asset_ref}/peaks   — waveform peaks of an audio asset (?level=detail)
   GET    /v1/library/groups/{job_id}           — generation group detail
   PATCH  /v1/library/assets/{asset_ref}        — update mutable metadata
   PUT    /v1/library/assets/{asset_ref}/favorite    — mark favorite
@@ -16,7 +16,7 @@ Endpoints:
 from __future__ import annotations
 
 from datetime import datetime
-from typing import TYPE_CHECKING, Annotated
+from typing import TYPE_CHECKING, Annotated, Any, Literal
 from uuid import UUID
 
 import structlog
@@ -28,6 +28,7 @@ from litestar.status_codes import (
     HTTP_204_NO_CONTENT,
     HTTP_400_BAD_REQUEST,
     HTTP_404_NOT_FOUND,
+    HTTP_409_CONFLICT,
     HTTP_422_UNPROCESSABLE_ENTITY,
 )
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -35,6 +36,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from src.api.dependencies.auth import get_current_user_id
 from src.api.schemas.errors import ErrorEnvelope
 from src.api.schemas.library import (
+    AudioDetailPeaksResponse,
     AudioPeaksResponse,
     BulkOperation,
     BulkOperationResult,
@@ -50,6 +52,8 @@ from src.api.services.content_proxy import ContentProxyService
 from src.api.services.library import (
     LibraryBulkValidationError,
     LibraryMediaKindNotSupportedError,
+    LibraryPeaksNotReadyError,
+    LibraryPeaksWindowError,
     LibraryProjectNotFoundError,
     LibraryService,
     LibraryTagNotFoundError,
@@ -69,6 +73,23 @@ _ASSET_NOT_FOUND = "Library asset not found"
 _GROUP_NOT_FOUND = "Generation group not found"
 _PROJECT_NOT_FOUND = "Library project not found"
 _TAG_NOT_FOUND = "Library tag not found"
+
+
+def _error_response(error: str, message: str, status_code: int) -> Response[Any]:
+    """An ``ErrorEnvelope`` response; ``Any`` because ``Response`` is invariant in its type."""
+    return Response(
+        content=ErrorEnvelope(error=error, message=message, status_code=status_code),
+        status_code=status_code,
+    )
+
+
+def _invalid_peaks_window() -> Response[Any]:
+    return _error_response(
+        "invalid_peaks_window",
+        "from_ms and to_ms apply to level=detail, go together, satisfy "
+        "0 <= from_ms < to_ms and span at most 600000 ms",
+        HTTP_422_UNPROCESSABLE_ENTITY,
+    )
 
 
 class LibraryController(Controller):
@@ -203,34 +224,54 @@ class LibraryController(Controller):
         asset_ref: str,
         session: AsyncSession,
         library_service: LibraryService,
-    ) -> Response[AudioPeaksResponse | ErrorEnvelope]:
-        """Waveform peaks of an audio asset: ``1,024`` buckets of signed ``int8`` min/max.
+        level: Literal["overview", "detail"] = "overview",
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+    ) -> Response[AudioPeaksResponse | AudioDetailPeaksResponse | ErrorEnvelope]:
+        """Waveform peaks of an audio asset: signed ``int8`` min/max pairs.
+
+        ``level=overview`` (default) is ``1,024`` buckets over the whole file.
+        ``level=detail`` is one bucket per 20 ms; ``from_ms`` and ``to_ms`` (both or neither, at
+        most 10 minutes apart) return a window of it.
 
         ``404 asset_not_found`` for a missing, foreign or other-product asset (one answer);
-        ``422 media_kind_not_supported`` for an asset that is not audio.
+        ``422 media_kind_not_supported`` for an asset that is not audio;
+        ``422 invalid_peaks_window`` for a bad window, or one on the overview;
+        ``409 peaks_not_ready`` when the detail level is not computed yet.
         """
+        if level == "overview" and (from_ms is not None or to_ms is not None):
+            return _invalid_peaks_window()  # a window is a property of the detail level
         try:
-            peaks = await library_service.get_audio_peaks(
-                asset_ref, current_user_id, product_id, session=session
-            )
+            peaks: AudioPeaksResponse | AudioDetailPeaksResponse | None
+            if level == "detail":
+                peaks = await library_service.get_audio_detail_peaks(
+                    asset_ref,
+                    current_user_id,
+                    product_id,
+                    session=session,
+                    from_ms=from_ms,
+                    to_ms=to_ms,
+                )
+            else:
+                peaks = await library_service.get_audio_peaks(
+                    asset_ref, current_user_id, product_id, session=session
+                )
         except LibraryMediaKindNotSupportedError:
-            return Response(
-                content=ErrorEnvelope(
-                    error="media_kind_not_supported",
-                    message="Peaks are only available for audio assets",
-                    status_code=HTTP_422_UNPROCESSABLE_ENTITY,
-                ),
-                status_code=HTTP_422_UNPROCESSABLE_ENTITY,
+            return _error_response(
+                "media_kind_not_supported",
+                "Peaks are only available for audio assets",
+                HTTP_422_UNPROCESSABLE_ENTITY,
+            )
+        except LibraryPeaksWindowError:
+            return _invalid_peaks_window()
+        except LibraryPeaksNotReadyError:
+            return _error_response(
+                "peaks_not_ready",
+                "The detail peaks of this audio have not been computed yet",
+                HTTP_409_CONFLICT,
             )
         if peaks is None:
-            return Response(
-                content=ErrorEnvelope(
-                    error="asset_not_found",
-                    message=_ASSET_NOT_FOUND,
-                    status_code=HTTP_404_NOT_FOUND,
-                ),
-                status_code=HTTP_404_NOT_FOUND,
-            )
+            return _error_response("asset_not_found", _ASSET_NOT_FOUND, HTTP_404_NOT_FOUND)
         return Response(content=peaks)
 
     @get("/groups/{job_id:uuid}")

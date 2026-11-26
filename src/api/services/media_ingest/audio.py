@@ -1,4 +1,4 @@
-"""Audio ingest policy: probe parsing, container cleanup and waveform peaks (S2a).
+"""Audio ingest policy: probe parsing, container cleanup and waveform peaks (S2a, S3a).
 
 Everything here is pure (no I/O, no subprocess): ``MediaIngestService.prepare_audio`` runs
 ffprobe / ffmpeg and feeds their output through these functions, so the policy is testable
@@ -28,12 +28,17 @@ from src.core.media_limits import AUDIO_MAX_SECONDS
 
 __all__ = [
     "AUDIO_MIN_SECONDS",
+    "DETAIL_BUCKET_MS",
+    "DETAIL_PEAKS_VERSION",
+    "MAX_DETAIL_BUCKETS",
+    "MAX_DETAIL_PEAKS_BYTES",
     "MAX_PEAKS_SAMPLES",
     "PEAKS_BUCKETS",
     "PEAKS_BYTES",
     "PEAKS_SAMPLE_RATE_HZ",
     "PEAKS_VERSION",
     "AudioProbe",
+    "compute_detail_peaks",
     "compute_peaks",
     "parse_audio_probe",
     "remux_arguments",
@@ -52,6 +57,16 @@ PEAKS_SAMPLE_RATE_HZ: Final = 11025
 """The mono rate the peaks are decoded at (``-ac 1 -ar 11025 -f s16le``)."""
 MAX_PEAKS_SAMPLES: Final = (AUDIO_MAX_SECONDS + 1) * PEAKS_SAMPLE_RATE_HZ
 """Hard upper bound for the peaks decoder, including its one-second duration slack."""
+
+DETAIL_PEAKS_VERSION: Final = 1
+DETAIL_BUCKET_MS: Final = 20
+"""One detail bucket covers 20 ms: 220.5 samples at 11,025 Hz."""
+_SAMPLES_PER_TWO_BUCKETS: Final = 2 * PEAKS_SAMPLE_RATE_HZ * DETAIL_BUCKET_MS // 1000
+"""441: the bucket arithmetic in whole numbers, so no bucket boundary drifts."""
+MAX_DETAIL_PEAKS_BYTES: Final = (AUDIO_MAX_SECONDS + 1) * (1000 // DETAIL_BUCKET_MS) * 2
+"""90,100: an ``int8`` min and max per bucket, for the longest decode (the one-second slack
+included). The ``library_audio_profiles`` CHECK enforces the same number."""
+MAX_DETAIL_BUCKETS: Final = MAX_DETAIL_PEAKS_BYTES // 2
 
 _MAX_CHANNELS: Final = 8
 """The ``library_audio_profiles.channels`` CHECK is ``BETWEEN 1 AND 8``."""
@@ -266,6 +281,40 @@ def remux_arguments(media_format: MediaFormat, *, sample_fmt: str | None = None)
     ]
 
 
+def _mono_samples(pcm: bytes) -> np.ndarray[tuple[int], np.dtype[np.int16]]:
+    """The decoder's mono signed 16-bit little-endian PCM as samples, within the length bound."""
+    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2")
+    if samples.size > MAX_PEAKS_SAMPLES:
+        raise InvalidAudioError(AudioCode.INVALID, "the audio decodes longer than allowed")
+    return samples
+
+
+def compute_detail_peaks(pcm: bytes) -> bytes:
+    """The zoom level of the same PCM: one min/max pair per 20 ms (S3a).
+
+    Bucket ``b`` covers the samples ``[b * 441 // 2, (b + 1) * 441 // 2)`` - 220.5 samples per
+    bucket, rounded down at both ends, so buckets alternate between 220 and 221 samples and never
+    drift. There are ``ceil(n * 2 / 441)`` buckets; the last may be short. Each stores its min
+    and max like :func:`compute_peaks`: shifted right by 8, as interleaved ``int8``
+    ``[min0, max0, min1, max1, ...]``. Deterministic.
+
+    Raises:
+        InvalidAudioError: Nothing was decoded, or more than the decoder's bound.
+    """
+    samples = _mono_samples(pcm)
+    if samples.size == 0:
+        raise InvalidAudioError(AudioCode.INVALID, "the audio decoded to too few samples")
+    buckets = -(-samples.size * 2 // _SAMPLES_PER_TWO_BUCKETS)
+    # Every start is inside the samples and they strictly increase, so ``reduceat`` reduces
+    # exactly each bucket's slice (the last one runs to the end).
+    starts = np.arange(buckets, dtype=np.int64) * _SAMPLES_PER_TWO_BUCKETS // 2
+    peaks = np.empty(buckets * 2, dtype=np.int8)
+    # int16 >> 8 lies in [-128, 127]: no clipping is needed.
+    peaks[0::2] = np.minimum.reduceat(samples, starts) >> 8
+    peaks[1::2] = np.maximum.reduceat(samples, starts) >> 8
+    return peaks.tobytes()
+
+
 def compute_peaks(pcm: bytes) -> bytes:
     """Reduce mono signed 16-bit little-endian PCM to ``PEAKS_BUCKETS`` min/max pairs.
 
@@ -276,9 +325,7 @@ def compute_peaks(pcm: bytes) -> bytes:
     Raises:
         InvalidAudioError: Fewer samples than buckets (an empty or near-empty decode).
     """
-    samples = np.frombuffer(pcm[: len(pcm) - len(pcm) % 2], dtype="<i2")
-    if samples.size > MAX_PEAKS_SAMPLES:
-        raise InvalidAudioError(AudioCode.INVALID, "the audio decodes longer than allowed")
+    samples = _mono_samples(pcm)
     if samples.size < PEAKS_BUCKETS:
         raise InvalidAudioError(AudioCode.INVALID, "the audio decoded to too few samples")
     peaks = np.empty(PEAKS_BUCKETS * 2, dtype=np.int8)

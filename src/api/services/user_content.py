@@ -638,6 +638,8 @@ class UserContentService:
                 bit_rate=prepared.bit_rate,
                 peaks=prepared.peaks,
                 peaks_version=prepared.peaks_version,
+                detail_peaks=prepared.detail_peaks,
+                detail_peaks_version=prepared.detail_peaks_version,
             )
             await self._session.flush()
         except Exception:

@@ -8,13 +8,14 @@ GalleryService).
 from __future__ import annotations
 
 from collections import defaultdict
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Final
 
 import msgspec
 import structlog
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.library import (
+    AudioDetailPeaksResponse,
     AudioPeaksResponse,
     BulkAddTags,
     BulkDelete,
@@ -43,6 +44,7 @@ from src.api.services.content_proxy import ContentNotFoundError
 from src.api.services.library_capabilities import resolve_library_actions
 from src.api.services.library_holds import HolderCount, holder_counts_for_ref
 from src.api.services.library_media import build_media_object
+from src.api.services.media_ingest.audio import DETAIL_BUCKET_MS, MAX_DETAIL_BUCKETS
 from src.core.enums import (
     AssetDeleteOutcome,
     GenerationType,
@@ -148,6 +150,49 @@ class LibraryBulkValidationError(Exception):
 
 class LibraryMediaKindNotSupportedError(Exception):
     """The asset exists but is not of the kind the endpoint serves (peaks of a non-audio asset). → 422"""
+
+
+class LibraryPeaksNotReadyError(Exception):
+    """The audio's detail peaks are not computed yet (uploaded before S3a, not backfilled). → 409"""
+
+
+class LibraryPeaksWindowError(Exception):
+    """A peaks window that is not one: see :func:`detail_peaks_window`. → 422"""
+
+
+MAX_PEAKS_WINDOW_MS: Final = 600_000
+"""The widest ``from_ms`` / ``to_ms`` window of detail peaks (10 minutes)."""
+
+
+def detail_peaks_window(from_ms: int | None, to_ms: int | None) -> tuple[int, int]:
+    """The ``(first_bucket, bucket_count)`` a detail request asks for.
+
+    With neither bound: the whole file. With both (a window needs both): the buckets
+    ``[from_ms // 20, ceil(to_ms / 20))``, kept within the largest possible bucket count (so an
+    absurd bound can never overflow the query); the file's own end clamps it further.
+
+    Raises:
+        LibraryPeaksWindowError: Only one bound, a negative ``from_ms``, ``to_ms <= from_ms``
+            or a window wider than :data:`MAX_PEAKS_WINDOW_MS`.
+    """
+    if from_ms is None and to_ms is None:
+        return 0, MAX_DETAIL_BUCKETS
+    if (
+        from_ms is None
+        or to_ms is None
+        or from_ms < 0
+        or to_ms <= from_ms
+        or to_ms - from_ms > MAX_PEAKS_WINDOW_MS
+    ):
+        raise LibraryPeaksWindowError
+    first = min(from_ms // DETAIL_BUCKET_MS, MAX_DETAIL_BUCKETS)
+    end = min(-(-to_ms // DETAIL_BUCKET_MS), MAX_DETAIL_BUCKETS)
+    return first, end - first
+
+
+def _signed(peaks: bytes) -> list[int]:
+    """The stored ``int8`` bytes as signed integers."""
+    return [b - 256 if b > 127 else b for b in peaks]
 
 
 class LibraryBulkTagCapError(Exception):
@@ -947,7 +992,57 @@ class LibraryService:
         return AudioPeaksResponse(
             version=row.peaks_version,
             buckets=len(row.peaks) // 2,
-            peaks=[b - 256 if b > 127 else b for b in row.peaks],
+            peaks=_signed(row.peaks),
+        )
+
+    async def get_audio_detail_peaks(
+        self,
+        asset_ref: str,
+        user_id: UUID,
+        product_id: str,
+        *,
+        session: AsyncSession,
+        from_ms: int | None = None,
+        to_ms: int | None = None,
+    ) -> AudioDetailPeaksResponse | None:
+        """A window (or all) of an audio asset's 20 ms detail peaks, in one SELECT that slices
+        in SQL, so it never loads more than the window.
+
+        Returns:
+            ``None`` for a malformed reference and for a missing, foreign or cross-product asset.
+
+        Raises:
+            LibraryPeaksWindowError: ``from_ms`` / ``to_ms`` do not describe a window.
+            LibraryMediaKindNotSupportedError: The asset is not audio.
+            LibraryPeaksNotReadyError: Its detail peaks are not computed yet.
+        """
+        first_bucket, bucket_count = detail_peaks_window(from_ms, to_ms)
+        try:
+            ref = parse_asset_ref(asset_ref)
+        except ValueError:
+            return None
+        row = await LibraryAudioProfileRepository(session).get_detail_peaks_window(
+            ref,
+            user_id=user_id,
+            product_id=product_id,
+            first_bucket=first_bucket,
+            bucket_count=bucket_count,
+        )
+        if row is None:
+            return None
+        if media_kind_from_content_type(row.content_type) is not MediaKind.AUDIO:
+            raise LibraryMediaKindNotSupportedError
+        if row.profile_id is None:
+            raise RuntimeError("An audio asset has no audio profile.")
+        if row.detail_version is None or row.total_bytes is None or row.window is None:
+            raise LibraryPeaksNotReadyError
+        total_buckets = row.total_bytes // 2
+        return AudioDetailPeaksResponse(
+            version=row.detail_version,
+            bucket_ms=DETAIL_BUCKET_MS,
+            total_buckets=total_buckets,
+            from_bucket=min(first_bucket, total_buckets),
+            peaks=_signed(row.window),
         )
 
     async def holders_of(self, asset_ref: str, *, session: AsyncSession) -> tuple[HolderCount, ...]:

@@ -383,6 +383,8 @@ class TestPreparedAudio:
             "duration_ms": 6000,
             "peaks": bytes(2048),
             "peaks_version": 1,
+            "detail_peaks": bytes(600),
+            "detail_peaks_version": 1,
         }
         values.update(overrides)
         return PreparedAudio(**values)  # type: ignore[arg-type]

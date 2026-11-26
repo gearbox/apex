@@ -26,6 +26,7 @@ from src.api.middleware.product import ProductMiddleware
 from src.api.routes.auth import AuthController
 from src.api.routes.storage import StorageController
 from src.api.security.jwt import JWTConfig, JWTService
+from src.api.services.library import LibraryService
 from src.api.services.media_ingest import MediaIngestService
 from src.api.services.media_ingest.types import PreparedAudio
 from src.api.services.token_revocation import TokenRevocationService
@@ -312,6 +313,55 @@ async def _rows(engine: AsyncEngine, user_id: UUID) -> tuple[int, int]:
     return uploads, profiles
 
 
+class TestDetailPeaksOnUpload:
+    async def test_an_8_second_sine_gets_exactly_400_buckets(
+        self, harness: _Harness, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "sine8.wav"
+        run(
+            [
+                require_ffmpeg(),
+                "-v",
+                "error",
+                "-y",
+                "-f",
+                "lavfi",
+                "-i",
+                "sine=frequency=440:duration=8:sample_rate=44100",
+                "-c:a",
+                "pcm_s16le",
+                str(path),
+            ]
+        )
+
+        response = await _upload(harness, path.read_bytes(), content_type="audio/wav")
+
+        assert response.status_code == 201, response.text
+        async with AsyncSession(bind=harness.engine) as session:
+            profile = (
+                await session.execute(
+                    select(LibraryAudioProfile).where(
+                        LibraryAudioProfile.upload_id == UUID(response.json()["id"])
+                    )
+                )
+            ).scalar_one()
+            window = await LibraryService(session=session).get_audio_detail_peaks(
+                f"upload:{response.json()['id']}",
+                harness.user_id,
+                _PRODUCT_ID,
+                session=session,
+                from_ms=7_000,
+                to_ms=9_000,
+            )
+        assert profile.detail_peaks is not None
+        assert len(profile.detail_peaks) == 400 * 2
+        assert profile.detail_peaks_version == 1
+        assert window is not None
+        assert (window.total_buckets, window.from_bucket) == (400, 350)
+        assert [v & 0xFF for v in window.peaks] == list(profile.detail_peaks[700:])
+        assert max(window.peaks) > 0 > min(window.peaks)
+
+
 class TestEachContainer:
     @pytest.mark.parametrize("container", list(CONTAINERS))
     async def test_it_is_stored_as_the_input_s_stream_without_tags_or_picture(
@@ -376,6 +426,10 @@ class TestEachContainer:
         assert hashes == 0, "audio has no perceptual hash ledger row"
         assert len(profile.peaks) == 2048
         assert profile.peaks_version == 1
+        # the 20 ms level: one min/max pair per bucket of the same decode (6 s ~ 300 buckets)
+        assert profile.detail_peaks is not None
+        assert profile.detail_peaks_version == 1
+        assert abs(len(profile.detail_peaks) // 2 - row.duration_ms / 20) <= 3
         assert profile.sample_rate_hz == 44100
         assert profile.channels == 1
         assert profile.output_id is None
@@ -881,6 +935,8 @@ class TestPerKindSizeLimits:
                 duration_ms=6000,
                 peaks=bytes(2048),
                 peaks_version=1,
+                detail_peaks=bytes(600),
+                detail_peaks_version=1,
             )
         )
         settings = hermetic_settings(max_upload_size_mb=1, audio_upload_max_mb=2)

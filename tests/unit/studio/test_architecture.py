@@ -22,6 +22,8 @@ LIBRARY_FILES = sorted(
         SRC / "db/models/library.py",
         SRC / "core/library_ref.py",
         SRC / "core/library_limits.py",
+        # the library's maintenance commands (S3a: the detail peaks backfill)
+        SRC / "cli/backfill_audio_peaks.py",
     }
 )
 STUDIO_FILES = sorted(
