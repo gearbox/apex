@@ -9,7 +9,6 @@ from pydantic import ValidationError
 
 from src.core.config import Settings
 from src.core.llm_models import LlmModelEntry, LlmRegistryError, validate_streaming_keys
-from tests.unit.helpers import COMPOSE_FORWARDED_LLM_ENV
 
 pytestmark = pytest.mark.unit
 
@@ -44,17 +43,6 @@ def _settings(**overrides: Any) -> Settings:
         "llm_default_model": "grok",
     }
     return Settings(_env_file=None, **base | overrides)  # type: ignore[call-arg]
-
-
-@pytest.fixture(autouse=True)
-def _no_chat_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_env_file=None`` skips ``.env`` but not the process env, which the dev compose fills.
-
-    The ``api`` service forwards these (``STUDIO_CHAT_MODEL`` defaults to ``grok`` there), so
-    inside that container a test that leaves one unset would silently inherit it.
-    """
-    for name in COMPOSE_FORWARDED_LLM_ENV:
-        monkeypatch.delenv(name, raising=False)
 
 
 class TestDefaults:

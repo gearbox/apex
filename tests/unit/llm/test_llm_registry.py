@@ -18,7 +18,6 @@ from src.core.llm_models import (
     validate_model_keys,
 )
 from src.llm.registry import LlmModelRegistry
-from tests.unit.helpers import COMPOSE_FORWARDED_LLM_ENV
 
 pytestmark = pytest.mark.unit
 
@@ -74,17 +73,6 @@ def _no_tracing(monkeypatch: pytest.MonkeyPatch) -> None:
         "LANGSMITH_API_KEY",
         "LANGCHAIN_API_KEY",
     ):
-        monkeypatch.delenv(name, raising=False)
-
-
-@pytest.fixture(autouse=True)
-def _no_registry_env(monkeypatch: pytest.MonkeyPatch) -> None:
-    """``_env_file=None`` skips ``.env`` but not the process env, which the dev compose fills.
-
-    The ``api`` service forwards these (interpolated from the developer's ``.env``), so inside
-    that container a bare ``Settings(...)`` would otherwise start from a real registry.
-    """
-    for name in COMPOSE_FORWARDED_LLM_ENV:
         monkeypatch.delenv(name, raising=False)
 
 

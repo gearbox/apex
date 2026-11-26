@@ -22,6 +22,7 @@ import pytest
 from pydantic import ValidationError
 
 from src.core.enums import StudioRunKind
+from tests.env_isolation import compose_defaults
 from tests.unit.helpers import hermetic_settings
 
 _REPO_ROOT = Path(__file__).parent.parent.parent
@@ -52,16 +53,10 @@ _STUDIO_VARS = (
 _JSON_VARS = ("LLM_MODELS", "STUDIO_LLM_MODEL_BY_KIND", "STUDIO_CHAT_MODEL_BY_PRODUCT")
 _KILL_SWITCHES = ("STUDIO_ENABLED", "STUDIO_RUNS_ENABLED", "STUDIO_CHAT_ENABLED")
 
-# `      NAME: ${NAME:-default}` - the default may itself be `${OTHER:-value}`.
-_ENTRY = re.compile(r"^ +([A-Z][A-Z0-9_]*): \$\{\1:-(.*)\}\s*$", re.MULTILINE)
 _NESTED = re.compile(r"^\$\{([A-Z][A-Z0-9_]*):-(.*)\}$")
 # An innermost `${NAME}` / `${NAME:-x}` / `${NAME-x}` / `${NAME:?x}` with no braces inside.
 _INNER_REFERENCE = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*(?::?[-?+][^{}]*)?\}")
 _DEFAULT_START = re.compile(r"\$\{[A-Za-z_][A-Za-z0-9_]*:?-")
-
-
-def _compose_defaults(path: Path) -> dict[str, str]:
-    return dict(_ENTRY.findall(path.read_text()))
 
 
 def _resolve(value: str, defaults: dict[str, str]) -> str:
@@ -137,7 +132,7 @@ def test_the_brace_check_catches_the_staging_failure() -> None:
 
 @pytest.mark.parametrize("compose_path", _COMPOSE_FILES, ids=lambda p: p.name)
 def test_every_studio_var_is_forwarded(compose_path: Path) -> None:
-    defaults = _compose_defaults(compose_path)
+    defaults = compose_defaults(compose_path)
 
     missing = [name for name in _STUDIO_VARS if name not in defaults]
 
@@ -146,7 +141,7 @@ def test_every_studio_var_is_forwarded(compose_path: Path) -> None:
 
 @pytest.mark.parametrize("compose_path", _COMPOSE_FILES, ids=lambda p: p.name)
 def test_kill_switches_default_off_and_json_settings_default_blank(compose_path: Path) -> None:
-    defaults = _compose_defaults(compose_path)
+    defaults = compose_defaults(compose_path)
 
     assert {name: defaults[name] for name in _KILL_SWITCHES} == dict.fromkeys(
         _KILL_SWITCHES, "false"
@@ -158,7 +153,7 @@ def test_kill_switches_default_off_and_json_settings_default_blank(compose_path:
 def test_compose_defaults_load_and_keep_the_chat_on_grok(
     compose_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    defaults = _compose_defaults(compose_path)
+    defaults = compose_defaults(compose_path)
     for name in _STUDIO_VARS:
         monkeypatch.setenv(name, _resolve(defaults[name], defaults))
 
@@ -174,7 +169,7 @@ def test_compose_defaults_load_and_keep_the_chat_on_grok(
 
 
 def test_memory_draft_model_follows_the_chat_model() -> None:
-    defaults = _compose_defaults(_COMPOSE_FILES[0])
+    defaults = compose_defaults(_COMPOSE_FILES[0])
     switched = {**defaults, "STUDIO_CHAT_MODEL": "qwen"}
 
     assert _resolve(defaults["STUDIO_MEMORY_DRAFT_MODEL"], defaults) == "grok"
@@ -183,7 +178,7 @@ def test_memory_draft_model_follows_the_chat_model() -> None:
 
 @pytest.mark.parametrize("template", _ENV_TEMPLATES, ids=lambda p: p.name)
 def test_env_templates_route_plan_to_qwen_and_chat_like_compose(template: Path) -> None:
-    compose = _compose_defaults(_COMPOSE_FILES[0])
+    compose = compose_defaults(_COMPOSE_FILES[0])
     values = _template_values(template)
 
     assert json.loads(values["STUDIO_LLM_MODEL_BY_KIND"]) == {"plan": "qwen"}
@@ -238,4 +233,4 @@ def test_init_kwargs_bypass_the_env_decoding() -> None:
 def test_the_entry_pattern_matches_something() -> None:
     """Guards against the pattern silently matching nothing after a syntax change."""
     for compose_path in _COMPOSE_FILES:
-        assert len(_compose_defaults(compose_path)) > 20, compose_path.name
+        assert len(compose_defaults(compose_path)) > 20, compose_path.name

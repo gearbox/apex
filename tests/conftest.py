@@ -1,4 +1,4 @@
-"""Shared media ingest fixture for writer tests."""
+"""Fixtures every test tree shares: the environment scrub and the media ingest writer fixture."""
 
 import os
 from pathlib import Path
@@ -12,7 +12,14 @@ os.environ.setdefault("LEGAL_DOCUMENTS_DIR", str(Path(__file__).parent / "fixtur
 
 from src.api.services.media_ingest import MediaIngestService
 from tests.audio_support import audio_files  # noqa: F401 - session fixture of the audio tests
+from tests.env_isolation import scrub_compose_forwarded_env
 from tests.media_ingest_support import make_media_ingestor
+
+
+@pytest.fixture(autouse=True)
+def _no_compose_forwarded_env(monkeypatch: pytest.MonkeyPatch) -> None:
+    """No test sees the developer's studio / LLM settings (see tests/env_isolation.py)."""
+    scrub_compose_forwarded_env(monkeypatch)
 
 
 @pytest.fixture
