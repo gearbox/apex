@@ -1303,7 +1303,7 @@ interface LineSpan {
   words?: WordSpan[];                   // 0..64; OMITTED when empty
 }
 interface WordSpan {
-  text: string;                         // 1..100 (NFC, re-checked after normalization); display only
+  text: string;                         // 1..100 (NFC, re-checked after normalization), no U+0000 (400); display only
   start_ms: number; end_ms: number;
   inferred?: boolean;                   // true = an aligner could not place this word and inferred its span; OMITTED when false
 }

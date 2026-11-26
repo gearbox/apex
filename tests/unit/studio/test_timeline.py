@@ -610,6 +610,14 @@ class TestLimits:
                 id="empty-word",
             ),
             pytest.param(
+                {"sections": [], "lines": [_line_payload(words=[_word_payload(text="a\x00b")])]},
+                id="nul-in-word",
+            ),
+            pytest.param(
+                {"sections": [], "lines": [_line_payload(words=[_word_payload(text="a\n\x00")])]},
+                id="nul-after-a-newline",
+            ),
+            pytest.param(
                 {"sections": [{"section_id": str(VERSE), "start_ms": -1, "end_ms": 1}]},
                 id="negative-time",
             ),
@@ -632,6 +640,11 @@ class TestLimits:
     def test_one_past_the_limit_is_refused_on_the_wire(self, payload: dict[str, Any]) -> None:
         with pytest.raises(msgspec.ValidationError):
             _decode(payload)
+
+    @pytest.mark.parametrize("text", ["a\nb", "a\n", "\t", "\u2028", "\U0001f3b5"])
+    def test_any_other_character_is_a_legal_word(self, text: str) -> None:
+        """Only NUL is refused: it is the one character PostgreSQL JSONB cannot store."""
+        assert _decode(_one_word(text)).lines[0].words[0].text == text
 
     def test_the_time_cap_is_the_shared_audio_cap(self) -> None:
         assert (AUDIO_MAX_SECONDS, AUDIO_MAX_MS) == (900, 900_000)

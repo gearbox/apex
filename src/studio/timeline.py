@@ -97,7 +97,9 @@ class WordSpan(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True, om
     """When one word of a line is sung. ``text`` is display data: it is not compared with the
     line's text (an aligner tokenizes its own way)."""
 
-    text: Annotated[str, Meta(min_length=1, max_length=100)]
+    # No NUL: PostgreSQL JSONB cannot store U+0000, and the resulting 500 would put the whole
+    # statement - every word of the timeline - into the error log.
+    text: Annotated[str, Meta(min_length=1, max_length=100, pattern=r"\A[^\x00]*\Z")]
     start_ms: Ms
     end_ms: Ms
     inferred: bool = False

@@ -16,6 +16,7 @@ import pytest
 import pytest_asyncio
 from litestar.testing import AsyncTestClient
 from sqlalchemy.ext.asyncio import async_sessionmaker
+from structlog.testing import capture_logs
 
 from src.api.routes.studio_timelines import StudioTimelineController
 from src.api.routes.studio_track_audio import StudioTrackAudioController
@@ -372,6 +373,24 @@ class TestErrorsOverHttp:
         )
 
         assert response.status_code == 400, response.text
+
+    async def test_a_nul_in_a_word_is_400_never_a_500_that_logs_the_words(
+        self, client: AsyncTestClient[Litestar], song: Song
+    ) -> None:
+        """PostgreSQL cannot store U+0000. Refused on the wire, so the statement (with every
+        word in it) never reaches the database or the error log."""
+        content = to_json(song.complete())
+        content["lines"][0]["words"][0]["text"] = f"{MARK}\x00"
+
+        with capture_logs() as logs:
+            response = await client.post(
+                f"/v1/studio/audio/{song.audio_id}/timelines",
+                headers=bearer(song.user.id),
+                json={"content": content},
+            )
+
+        assert response.status_code == 400, response.text
+        assert not [log for log in logs if MARK in repr(log)]
 
     @pytest.mark.parametrize("body", [{}, {"timeline_id": "x"}, {"timeline_id": None, "y": 1}])
     async def test_the_current_timeline_body_needs_exactly_timeline_id(
