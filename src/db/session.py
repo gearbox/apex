@@ -52,6 +52,11 @@ class DatabaseManager:
             pool_timeout=pool_timeout,
             pool_recycle=pool_recycle,
             echo=echo,
+            # Always, with no flag to turn it off: without it ``str(DBAPIError)`` carries
+            # ``[parameters: (...)]`` - the whole row, lyrics and prompts included - and every
+            # unhandled one is logged with its traceback. ``echo`` still prints statements,
+            # just without their values.
+            hide_parameters=True,
         )
         self._session_factory = async_sessionmaker(
             bind=self._engine,

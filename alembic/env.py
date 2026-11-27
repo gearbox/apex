@@ -112,6 +112,9 @@ async def run_async_migrations() -> None:
         config.get_section(config.config_ini_section, {}),
         prefix="sqlalchemy.",
         poolclass=pool.NullPool,
+        # Data migrations (056's rehash, 060's backfill) bind user content: a failing one
+        # must not print it.
+        hide_parameters=True,
     )
 
     async with connectable.connect() as connection:
