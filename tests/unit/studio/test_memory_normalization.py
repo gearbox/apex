@@ -1,7 +1,7 @@
 """Artist-memory fields: the wire limits, the one source of limits, and RD6 after NFC.
 
 The service normalizes (NFC, single-line title, block body, tokens) and then re-checks every length
-on the normalized values with ``collect_length_issues`` - the limits declared on ``MemoryCreate`` /
+on the normalized values with ``collect_text_issues`` - the limits declared on ``MemoryCreate`` /
 ``MemoryPatch`` are the only source. Varchar arrays truncate silently on the asyncpg bind cast, so
 this re-check is the only guard for ``themes`` / ``imagery``.
 """
@@ -24,7 +24,7 @@ from src.studio.constraints import (
     MEMORY_THEMES_MAX,
     MEMORY_TITLE_MAX,
     TOO_LONG,
-    collect_length_issues,
+    collect_text_issues,
 )
 from src.studio.validation import normalize_block, normalize_text, normalize_tokens
 
@@ -110,7 +110,7 @@ def test_a_patch_is_tri_state() -> None:
 
 def _issues(value: msgspec.Struct) -> list[tuple[str, str]]:
     issues: list[DocumentIssue] = []
-    collect_length_issues(value, issues)
+    collect_text_issues(value, issues)
     return [(issue.path, issue.code) for issue in issues]
 
 

@@ -19,7 +19,7 @@ from src.api.schemas.pagination import decode_version_number_cursor, encode_vers
 from src.api.schemas.studio import CurrentPut, TrackAudioCreate, TrackAudioPatch, TrackDetail
 from src.core.enums import StudioTrackAudioOrigin
 from src.studio import constraints
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.services.track import TrackService
 from src.studio.services.track_audio import TrackAudioService, _tidy
 
@@ -155,7 +155,7 @@ class TestLabelLimit:
         )
         issues: list[DocumentIssue] = []
 
-        collect_length_issues(normalized, issues)
+        collect_text_issues(normalized, issues)
 
         assert [(i.path, i.code) for i in issues] == [("label", "too_long_after_normalization")]
 

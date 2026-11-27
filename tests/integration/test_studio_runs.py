@@ -738,6 +738,21 @@ class TestExecution:
         assert await run_world.versions(track_id) == []
         assert await run_world.refunds_and_debits(actor) == (1, 1)
 
+    async def test_a_plan_with_a_nul_fails_as_plan_invalid_not_as_a_500_at_save(
+        self, run_world: RunWorld
+    ) -> None:
+        """N3: PostgreSQL would refuse the INSERT; the walker refuses the reply first."""
+        actor = await run_world.add_actor()
+        track_id = await run_world.new_track(actor)
+        bad = make_draft(title="SECRET-TITLE\x00TEXT")
+
+        run = await _submit_and_drive(run_world, actor, track_id, FakeLlm(bad, bad, bad))
+
+        assert (run.status, run.error_code, run.llm_calls) == ("failed", "plan_invalid", 3)
+        assert run.error_detail == {"issues": [{"path": "title", "code": "invalid_character"}]}
+        assert await run_world.versions(track_id) == []
+        assert await run_world.refunds_and_debits(actor) == (1, 1)
+
     async def test_a_save_step_refusal_keeps_its_own_code_and_refunds(
         self, run_world: RunWorld, monkeypatch: pytest.MonkeyPatch
     ) -> None:

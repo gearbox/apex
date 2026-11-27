@@ -14,7 +14,7 @@ from src.db.repositories.studio import (
     StudioTrackRepository,
 )
 from src.db.repositories.studio_track_audio import StudioTrackAudioRepository
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.errors import (
     DocumentIssue,
     RunInProgress,
@@ -58,7 +58,7 @@ def _normalize_title(raw: str, request_type: type[TrackCreate] | type[TrackPatch
     if not title:
         issues.append(DocumentIssue("title", "empty_after_normalization"))
     else:
-        collect_length_issues(request_type(title=title), issues)
+        collect_text_issues(request_type(title=title), issues)
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
     return title

@@ -69,7 +69,7 @@ from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTr
 from src.db.repositories.studio_timeline import StudioAudioTimelineRepository
 from src.db.repositories.studio_track_audio import StudioTrackAudioRepository, TrackAudioRow
 from src.db.repositories.user_image import UserImageRepository
-from src.studio.constraints import MAX_AUDIO_VERSIONS_PER_TRACK, collect_length_issues
+from src.studio.constraints import MAX_AUDIO_VERSIONS_PER_TRACK, collect_text_issues
 from src.studio.errors import (
     AssetNotEligible,
     AssetNotFound,
@@ -256,7 +256,7 @@ class TrackAudioService:
         issues: list[DocumentIssue] = []
         asset = self._asset(data.asset, "asset", issues)
         label = self._label(data.label, issues)
-        collect_length_issues(msgspec.structs.replace(data, label=label), issues)
+        collect_text_issues(msgspec.structs.replace(data, label=label), issues)
         if issues or asset is None:
             raise StudioDocumentInvalid(tuple(issues))
 
@@ -323,7 +323,7 @@ class TrackAudioService:
         label: str | msgspec.UnsetType | None = data.label
         if isinstance(label, str):
             label = self._label(label, issues)
-            collect_length_issues(msgspec.structs.replace(data, label=label), issues)
+            collect_text_issues(msgspec.structs.replace(data, label=label), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 

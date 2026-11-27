@@ -17,7 +17,7 @@ from uuid import UUID
 import msgspec
 from msgspec import Meta, Struct
 
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.documents import LanguageTag, SyllableRange
 from src.studio.errors import DocumentIssue, StudioDocumentInvalid
 from src.studio.validation import normalize_block, normalize_tokens
@@ -207,7 +207,7 @@ def normalize_run_request[R: RunRequest](request: R) -> R:
         normalized = _normalized_lyrics(request, issues)
     else:
         normalized = _normalized_revision(request, issues)
-    collect_length_issues(normalized, issues)
+    collect_text_issues(normalized, issues)
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
     return cast("R", normalized)

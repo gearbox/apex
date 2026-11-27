@@ -42,7 +42,7 @@ from src.studio.chat.prompts.chat_v1 import PROMPT_VERSION
 from src.studio.constraints import (
     MAX_CHATS_PER_ARTIST,
     MAX_MESSAGES_PER_CHAT,
-    collect_length_issues,
+    collect_text_issues,
 )
 from src.studio.errors import (
     ArtistNotFound,
@@ -149,7 +149,7 @@ class ChatService:
         title = normalize_text(data.title)
         if not title:
             issues.append(DocumentIssue("title", _EMPTY))
-        collect_length_issues(msgspec.structs.replace(data, title=title), issues)
+        collect_text_issues(msgspec.structs.replace(data, title=title), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
         if (
@@ -236,7 +236,7 @@ class ChatService:
         title = normalize_text(data.title)
         if not title:
             issues.append(DocumentIssue("title", _EMPTY))
-        collect_length_issues(msgspec.structs.replace(data, title=title), issues)
+        collect_text_issues(msgspec.structs.replace(data, title=title), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
         chat = await self._chats.update_title(
@@ -419,7 +419,7 @@ class ChatService:
         if content is None:
             issues.append(DocumentIssue("content", _EMPTY))
             raise StudioDocumentInvalid(tuple(issues))
-        collect_length_issues(msgspec.structs.replace(data, content=content), issues)
+        collect_text_issues(msgspec.structs.replace(data, content=content), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
         return content

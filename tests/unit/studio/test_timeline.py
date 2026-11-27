@@ -635,14 +635,6 @@ class TestLimits:
                 id="empty-word",
             ),
             pytest.param(
-                {"sections": [], "lines": [_line_payload(words=[_word_payload(text="a\x00b")])]},
-                id="nul-in-word",
-            ),
-            pytest.param(
-                {"sections": [], "lines": [_line_payload(words=[_word_payload(text="a\n\x00")])]},
-                id="nul-after-a-newline",
-            ),
-            pytest.param(
                 {"sections": [{"section_id": str(VERSE), "start_ms": -1, "end_ms": 1}]},
                 id="negative-time",
             ),
@@ -668,8 +660,35 @@ class TestLimits:
 
     @pytest.mark.parametrize("text", ["a\nb", "a\n", "\t", "\u2028", "\U0001f3b5"])
     def test_any_other_character_is_a_legal_word(self, text: str) -> None:
-        """Only NUL is refused: it is the one character PostgreSQL JSONB cannot store."""
-        assert _decode(_one_word(text)).lines[0].words[0].text == text
+        """Only NUL is refused (after decoding, below): it is the one character PostgreSQL
+        JSONB cannot store."""
+        document = _decode(_one_word(text))
+
+        assert document.lines[0].words[0].text == text
+        assert check_timeline_limits(normalize_timeline(document)) == []
+
+    @pytest.mark.parametrize("text", ["a\x00b", "a\n\x00", "\x00"])
+    def test_a_nul_in_a_word_built_in_code_is_an_invalid_character(self, text: str) -> None:
+        """The aligner's path (S3b): a document that never was a request."""
+        document = TimelineDocument(
+            sections=(),
+            lines=(
+                LineSpan(
+                    section_id=VERSE,
+                    line_index=0,
+                    start_ms=0,
+                    end_ms=2,
+                    words=(
+                        WordSpan(text="fine", start_ms=0, end_ms=1),
+                        WordSpan(text=text, start_ms=1, end_ms=2),
+                    ),
+                ),
+            ),
+        )
+
+        issues = check_timeline_limits(normalize_timeline(document))
+
+        assert pairs(issues) == [("lines[0].words[1].text", "invalid_character")]
 
     def test_the_time_cap_is_the_shared_audio_cap(self) -> None:
         assert (AUDIO_MAX_SECONDS, AUDIO_MAX_MS) == (900, 900_000)

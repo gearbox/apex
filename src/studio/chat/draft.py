@@ -26,7 +26,7 @@ from src.studio.constraints import (
     MEMORY_THEMES_MAX,
     MEMORY_TITLE_MAX,
     collect_count_issues,
-    collect_length_issues,
+    collect_text_issues,
 )
 from src.studio.errors import DocumentIssue
 from src.studio.validation import normalize_block, normalize_text, normalize_tokens
@@ -65,7 +65,7 @@ class MemoryContent(Struct, frozen=True, kw_only=True):
     """A normalized memory draft: the fields of a memory, with the limits of ``MemoryCreate``.
 
     Built without validation (``Struct(...)`` skips the declared ``Meta``); the limits are applied
-    by ``collect_length_issues`` / ``collect_count_issues``, exactly as the memory service does.
+    by ``collect_text_issues`` / ``collect_count_issues``, exactly as the memory service does.
     """
 
     title: Annotated[str, Meta(min_length=1, max_length=MEMORY_TITLE_MAX)]
@@ -111,6 +111,6 @@ def check_memory_draft(
         title=title, body=body or "", themes=list(themes), imagery=list(imagery)
     )
     # RD6: NFC can expand a value past its limit, and the model does not count characters.
-    collect_length_issues(content, issues)
+    collect_text_issues(content, issues)
     collect_count_issues(content, issues)
     return (None, tuple(issues)) if issues else (content, ())

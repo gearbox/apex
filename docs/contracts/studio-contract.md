@@ -270,6 +270,7 @@ CORS: studio uses `PUT`; it is included in the API's allowed methods.
    | `lyrics_too_long` | the lyrics' line text totals more than 20,000 characters (path `sections`) |
    | `document_too_large` | the normalized document is larger than 131,072 bytes as compact JSON (path `""`, the root) |
    | `too_long_after_normalization` | a value is longer than its documented limit once normalized (NFC can expand characters); path is the value's own, e.g. `title`, `sections[2].style.tags[1]`, `style_tags[0]` |
+   | `invalid_character` | a value holds U+0000; path is the value's own. A request carrying one never gets this far (`400 invalid_character`, §7), so you see this issue code only for text the server built: in the `error_detail.issues` of a run that failed `plan_invalid` / `lyrics_invalid` (§11) |
    | `requires_make_current` | `incompatible_lyrics: "detach"` was sent with `make_current: false` (path `incompatible_lyrics`); checked first, before anything else is read |
 
    The size codes and `too_long_after_normalization` are collected together with every other issue; they never short-circuit validation.

@@ -20,7 +20,7 @@ from src.db.repositories.studio_chat import (
     StudioChatRepository,
     StudioMemoryDraftRepository,
 )
-from src.studio.constraints import TOO_LONG, collect_length_issues
+from src.studio.constraints import TOO_LONG, collect_text_issues
 from src.studio.errors import (
     ArtistBusy,
     ArtistInUse,
@@ -130,7 +130,7 @@ class ArtistService:
         persona = normalize_block(data.persona)
         voice_notes = normalize_block(data.voice_notes)
         # RD6: NFC can expand a value past the limit the wire already checked.
-        collect_length_issues(
+        collect_text_issues(
             msgspec.structs.replace(
                 data,
                 name=name,
@@ -242,7 +242,7 @@ class ArtistService:
                     sent[column] = list(merged)
 
         # RD6: only the fields the client sent are re-checked; stored values were checked on write.
-        collect_length_issues(msgspec.structs.replace(data, **sent), issues)
+        collect_text_issues(msgspec.structs.replace(data, **sent), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 

@@ -178,7 +178,7 @@ class TestStoredVersionsDecode:
         self, enabled_studio: StudioWorld, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         # Simulate the bug RD7 backstops: the RD6 re-check misses a field.
-        monkeypatch.setattr(validation_module, "collect_length_issues", lambda *_a, **_k: None)
+        monkeypatch.setattr(validation_module, "collect_text_issues", lambda *_a, **_k: None)
         w = enabled_studio
         track = await w.new_track()
         before = await w.track_row(track)
