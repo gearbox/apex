@@ -9,23 +9,28 @@ and a reply that must stay in flight waits on a ``Gate``.
 from __future__ import annotations
 
 import asyncio
+import json
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING
 from uuid import UUID, uuid4
 
+import httpx
 import pytest
+from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import IntegrityError
 
 from src.api.schemas.studio_chat import ChatCreate, ChatPatch, MessageCreate
 from src.api.services.billing_errors import InsufficientBalanceError
 from src.core.enums import StudioChatMessageStatus, StudioChatRole
+from src.core.llm_models import LlmModelEntry
 from src.db.integrity import violated_constraint
 from src.db.models.studio_chat import (
     CHAT_ONE_PENDING_REPLY,
     StudioArtistChat,
     StudioArtistChatMessage,
 )
+from src.llm.openai_compatible import OpenAICompatibleLlmAdapter
 from src.llm.port import LlmUnavailable
 from src.studio.errors import (
     ArtistNotFound,
@@ -58,6 +63,26 @@ def _artist(actor: Actor) -> UUID:
     """The actor's artist (``add_actor(artist=True)``)."""
     assert actor.artist_id is not None
     return actor.artist_id
+
+
+def _adapter_streaming(chunks: list[str]) -> OpenAICompatibleLlmAdapter:
+    """The real adapter over a transport that streams ``chunks`` and ends the reply."""
+    events = [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
+    events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
+    body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
+    return OpenAICompatibleLlmAdapter(
+        LlmModelEntry(
+            base_url="https://llm.example.test/v1",
+            api_key_env="UNUSED",
+            model="test-model",
+            supports_streaming=True,
+        ),
+        SecretStr("test-key"),
+        httpx.AsyncClient(
+            transport=httpx.MockTransport(lambda _request: httpx.Response(200, content=body))
+        ),
+        model_key="test",
+    )
 
 
 @pytest.fixture
@@ -411,6 +436,27 @@ class TestSending:
         stored = (await chat_world.message(write.artist_message.id)).content
         assert "".join(d.text for d in deltas) == stored
         assert stored == "".join(chunks)
+
+    async def test_a_reply_with_nul_characters_is_stored_cleaned_and_charged_once(
+        self, chat_world: ChatWorld, actor: Actor
+    ) -> None:
+        """N4, through the real adapter. PostgreSQL refuses U+0000, so before this the finishing
+        update failed and the row waited for the sweep: a lost reply, refunded."""
+        chunks = ["\x00", *(f"word{i}\x00 " * 12 for i in range(6)), "\x00\x00", "The \x00end."]
+        chat_world.chat_llm = _adapter_streaming(chunks)  # type: ignore[assignment]
+        chat_id = await chat_world.new_chat(actor)
+
+        write = await chat_world.send(actor, chat_id)
+        await chat_world.settle()
+
+        message = await chat_world.message(write.artist_message.id)
+        deltas = chat_world.deltas(write.artist_message.id)
+        assert message.status == StudioChatMessageStatus.COMPLETE.value
+        assert len(deltas) > 2
+        assert "".join(d.text for d in deltas) == message.content
+        assert message.content == "".join(chunks).replace("\x00", "")
+        assert "\x00" not in message.content
+        assert await chat_world.refunds_and_debits(actor) == (1, 0)
 
     async def test_the_message_is_normalized_and_sent_to_the_model_as_the_last_turn(
         self, chat_world: ChatWorld, actor: Actor

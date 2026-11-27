@@ -112,6 +112,65 @@ async def _collect(
     return [c async for c in adapter.stream(MESSAGES, max_output_tokens=max_output_tokens)]
 
 
+class TestNulCharacters:
+    """N4: a streamed reply is stored after it is written, and PostgreSQL cannot store U+0000."""
+
+    async def test_it_is_removed_from_every_delta(self) -> None:
+        recorder = Recorder(
+            _sse(
+                _chunk("He\x00llo, "),
+                _chunk("\x00\x00wor\x00ld\x00"),
+                _chunk(finish="stop"),
+                "data: [DONE]",
+            )
+        )
+
+        chunks = await _collect(_adapter(recorder))
+
+        assert chunks[:-1] == [TextDelta("Hello, "), TextDelta("world")]
+        assert isinstance(chunks[-1], StreamEnd)
+
+    async def test_a_chunk_of_nothing_else_yields_no_delta(self) -> None:
+        recorder = Recorder(
+            _sse(
+                _chunk("\x00"),
+                _chunk("text"),
+                _chunk("\x00\x00"),
+                _chunk(finish="stop"),
+                "data: [DONE]",
+            )
+        )
+
+        chunks = await _collect(_adapter(recorder))
+
+        assert chunks[:-1] == [TextDelta("text")]
+        assert len(chunks) == 2
+
+    async def test_only_real_text_counts_as_delivered_so_the_attempt_may_be_repeated(
+        self,
+    ) -> None:
+        """The first stream breaks off after a chunk of nothing but U+0000: the caller has seen
+        no text, so the one transport retry still applies."""
+        recorder = Recorder(
+            _sse(_chunk("\x00")),  # no finish, no [DONE]: cut off
+            _sse(_chunk("second try"), _chunk(finish="stop"), "data: [DONE]"),
+        )
+
+        chunks = await _collect(_adapter(recorder))
+
+        assert chunks[0] == TextDelta("second try")
+        assert len(recorder.requests) == 2
+
+    async def test_the_six_characters_that_spell_the_escape_are_text(self) -> None:
+        spelled = "type \\u0000 here"
+        recorder = Recorder(_sse(_chunk(spelled), _chunk(finish="stop"), "data: [DONE]"))
+
+        chunks = await _collect(_adapter(recorder))
+
+        assert chunks[0] == TextDelta(spelled)
+        assert len(spelled) == len("type  here") + 6
+
+
 class TestAMultiChunkStream:
     async def test_it_yields_the_deltas_then_exactly_one_end(self) -> None:
         recorder = Recorder(
