@@ -22,6 +22,8 @@ LIBRARY_FILES = sorted(
         SRC / "db/models/library.py",
         SRC / "core/library_ref.py",
         SRC / "core/library_limits.py",
+        # the library's maintenance commands (S3a: the detail peaks backfill)
+        SRC / "cli/backfill_audio_peaks.py",
     }
 )
 STUDIO_FILES = sorted(
@@ -32,6 +34,7 @@ STUDIO_FILES = sorted(
         SRC / "db/repositories/studio.py",
         SRC / "db/repositories/studio_cast.py",
         SRC / "db/repositories/studio_track_audio.py",
+        SRC / "db/repositories/studio_timeline.py",
         *SRC.glob("api/routes/studio_*.py"),
         SRC / "api/schemas/studio.py",
         SRC / "api/schemas/studio_runs.py",
@@ -123,6 +126,16 @@ def test_the_studio_repository_never_flushes_or_commits() -> None:
 
 @pytest.mark.parametrize(
     "path",
+    [SRC / "db/repositories/studio_timeline.py", SRC / "studio/services/timeline.py"],
+    ids=lambda p: str(p.relative_to(SRC)),
+)
+def test_the_timeline_code_never_flushes_or_commits(path: Path) -> None:
+    """Timeline writes belong to the request transaction (S3a)."""
+    assert not re.search(r"session\.(commit|flush|rollback)\(", path.read_text()), path
+
+
+@pytest.mark.parametrize(
+    "path",
     [
         SRC / "db/repositories/studio_cast.py",
         SRC / "db/repositories/library_hold.py",
@@ -186,7 +199,7 @@ def test_versions_are_numbered_from_counters_not_max() -> None:
 
 def test_every_studio_controller_runs_the_feature_guard_first() -> None:
     controllers = sorted(SRC.glob("api/routes/studio_*.py"))
-    assert len(controllers) == 8
+    assert len(controllers) == 9
     for path in controllers:
         text = path.read_text()
         if path.name == "studio_runs.py":  # the run switch sits between the feature guard and auth

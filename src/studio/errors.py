@@ -24,6 +24,8 @@ __all__ = [
     "ArtistNotFound",
     "AssetNotEligible",
     "AssetNotFound",
+    "AudioHasNoPlan",
+    "AudioHasTimelines",
     "AudioVersionIsCurrent",
     "AudioVersionLimitReached",
     "AudioVersionNotFound",
@@ -71,6 +73,11 @@ __all__ = [
     "StudioDocumentSchemaError",
     "StudioError",
     "StudioNotFound",
+    "TimelineHasChildren",
+    "TimelineIsCurrent",
+    "TimelineLimitReached",
+    "TimelineNotFound",
+    "TimelineUnchanged",
     "TrackLimitReached",
     "TrackOrderMismatch",
     "VersionHasAudio",
@@ -210,6 +217,14 @@ class AudioVersionNotFound(StudioError):
     code = "audio_version_not_found"
     status_code = 404
     message = "Audio version not found."
+
+
+class TimelineNotFound(StudioError):
+    """No such timeline for the caller (unknown, another audio version's, user's or product's)."""
+
+    code = "timeline_not_found"
+    status_code = 404
+    message = "Timeline not found."
 
 
 class AssetNotFound(StudioError):
@@ -417,6 +432,60 @@ class AudioVersionIsCurrent(StudioError):
     code = "audio_version_is_current"
     status_code = 409
     message = "The audio version is the track's current audio."
+
+
+# --- realized timelines (S3a) -----------------------------------------------------------------
+
+
+class AudioHasNoPlan(StudioError):
+    """A timeline places the sections of the plan its audio version links; this one links none."""
+
+    code = "audio_has_no_plan"
+    status_code = 409
+    message = "The audio version is not linked to a plan."
+
+
+class TimelineUnchanged(StudioError):
+    """The content equals its parent's: there is nothing new to version."""
+
+    code = "timeline_unchanged"
+    status_code = 409
+    message = "The timeline is identical to the parent timeline."
+
+
+class TimelineLimitReached(StudioError):
+    """An audio version holds at most ``limit`` timelines; ``detail`` is ``{"limit": n}``."""
+
+    code = "timeline_limit_reached"
+    status_code = 409
+    message = "The maximum number of timelines for this audio version has been reached."
+
+    def __init__(self, limit: int) -> None:
+        super().__init__({"limit": limit})
+
+
+class TimelineIsCurrent(StudioError):
+    code = "timeline_is_current"
+    status_code = 409
+    message = "The timeline is the audio version's current timeline."
+
+
+class TimelineHasChildren(StudioError):
+    code = "timeline_has_children"
+    status_code = 409
+    message = "Other timelines were derived from this timeline."
+
+
+class AudioHasTimelines(StudioError):
+    """The plan / lyrics links of an audio version are frozen once it has a timeline (S3-5);
+    ``detail.count`` says how many it has."""
+
+    code = "audio_has_timelines"
+    status_code = 409
+    message = "The audio version has timelines, so its plan and lyrics links cannot change."
+
+    def __init__(self, count: int) -> None:
+        super().__init__({"count": count})
 
 
 class ProjectHasTracks(StudioError):

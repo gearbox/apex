@@ -11,6 +11,9 @@ Graph::
            │                                            └─────────────────┘ composite FK (current_audio) + (plan, lyrics) links
            └─< (every studio table also carries user_id / product_id)
 
+    studio_track_audio ─< studio_audio_timelines   (CASCADE; current_timeline_id and parent_id are
+                                                    composite same-audio FKs, NO ACTION)
+
 Design notes (see ``docs/contracts/studio-contract.md``):
 
 * Versions are **immutable full snapshots** in a per-(track, kind) tree. The table has no
@@ -24,6 +27,8 @@ Design notes (see ``docs/contracts/studio-contract.md``):
 * ``studio_track_audio`` (S2a) is a track's numbered audio versions; each pins its library asset through
   ``hold_id`` (no ``asset_ref`` of its own) and may link the plan / lyrics version it realizes with
   composite ``(version, track_id)`` FKs, so another track's version is unrepresentable.
+* ``studio_audio_timelines`` (S3a) are immutable realized timelines of an audio version, numbered
+  from that version's own counter.
 * ``studio_runs`` (planner runs, P2a) hangs off a track (``ON DELETE CASCADE``) and points at the
   versions it produced with ``ON DELETE SET NULL``. A run is terminal once: the CHECKs tie
   ``finished_at`` to the terminal statuses and a ``failed`` run to its ``error_code``.
@@ -37,6 +42,7 @@ from typing import Any
 from uuid import UUID
 
 from sqlalchemy import (
+    Boolean,
     CheckConstraint,
     Date,
     DateTime,
@@ -64,6 +70,7 @@ from src.core.enums import (
     StudioRunKind,
     StudioRunStage,
     StudioRunStatus,
+    StudioTimelineOrigin,
     StudioTrackAudioOrigin,
 )
 from src.core.uid import new_id
@@ -79,12 +86,15 @@ __all__ = [
     "CAST_PERFORMER_FK",
     "RUN_ONE_ACTIVE_PER_TRACK",
     "RUN_USER_IDEMPOTENCY",
+    "TIMELINE_PARENT_FK",
+    "TRACK_AUDIO_CURRENT_TIMELINE_FK",
     "TRACK_AUDIO_HOLDER_KIND",
     "TRACK_AUDIO_HOLD_FK",
     "TRACK_AUDIO_LYRICS_FK",
     "TRACK_AUDIO_PLAN_FK",
     "StudioArtist",
     "StudioArtistMemory",
+    "StudioAudioTimeline",
     "StudioDocumentVersion",
     "StudioLlmUsage",
     "StudioProjectProfile",
@@ -104,6 +114,11 @@ TRACK_AUDIO_PLAN_FK = "fk_studio_track_audio_plan_version"
 TRACK_AUDIO_LYRICS_FK = "fk_studio_track_audio_lyrics_version"
 """The composite same-track foreign keys of the realized plan / lyrics links (``NO ACTION``): a
 violation on a document-version delete means "an audio version realizes this version"."""
+TRACK_AUDIO_CURRENT_TIMELINE_FK = "fk_studio_track_audio_current_timeline"
+"""The audio version's current-timeline pointer (``NO ACTION``): violated by deleting the current
+timeline, or by pointing at a timeline of another audio version (or one that is gone)."""
+TIMELINE_PARENT_FK = "fk_studio_audio_timelines_parent"
+"""A timeline's parent (``NO ACTION``): violated by deleting a timeline that has children."""
 RUN_ONE_ACTIVE_PER_TRACK = "uq_studio_runs_one_active_per_track"
 """Partial unique index: at most one queued/running run per track. The authority for 409."""
 RUN_USER_IDEMPOTENCY = "uq_studio_runs_user_idempotency"
@@ -468,6 +483,14 @@ class StudioTrackAudio(Base):
     duration_ms: Mapped[int] = mapped_column(Integer, nullable=False)
     """A snapshot of the asset's duration at attach time (the asset is immutable)."""
 
+    next_timeline_number: Mapped[int] = mapped_column(
+        Integer, nullable=False, server_default=text("1")
+    )
+    """The counter of this audio version's timeline numbers (never reused; S3a)."""
+    current_timeline_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    """The current timeline: a composite ``(current_timeline_id, id)`` FK, so it can only name a
+    timeline of **this** audio version."""
+
     created_at: Mapped[datetime] = _created_at()
     updated_at: Mapped[datetime] = _updated_at()
 
@@ -510,10 +533,105 @@ class StudioTrackAudio(Base):
             "lyrics_version_id",
             postgresql_where=text("lyrics_version_id IS NOT NULL"),
         ),
+        ForeignKeyConstraint(
+            ["current_timeline_id", "id"],
+            ["studio_audio_timelines.id", "studio_audio_timelines.audio_version_id"],
+            name=TRACK_AUDIO_CURRENT_TIMELINE_FK,
+            use_alter=True,
+        ),
     )
 
     def __repr__(self) -> str:
         return f"<StudioTrackAudio {self.id} track={self.track_id} v{self.version_number}>"
+
+
+class StudioAudioTimeline(Base):
+    """An immutable snapshot of one audio version's realized timeline (S3a).
+
+    Numbered per **audio version** from ``studio_track_audio.next_timeline_number`` and arranged in
+    a parent tree, like document versions; the only mutation is deletion. ``content`` is the
+    ``TimelineDocument`` JSONB (``src/studio/timeline.py``); it names no plan or lyrics version,
+    because those are the audio version's links, which freeze once it has a timeline.
+    ``is_complete`` is computed once at write time: all of its inputs are immutable from then on.
+
+    The composite owner FK ties the row's ``user_id`` / ``product_id`` to its track, and
+    ``(audio_version_id, track_id)`` to an audio version of that track (``CASCADE``: an audio
+    delete takes its timelines with it). The parent FK is ``NO ACTION`` (checked at the end of the
+    statement), so one parent cannot be deleted on its own while a whole cascade can.
+    """
+
+    __tablename__ = "studio_audio_timelines"
+
+    id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), primary_key=True, default=new_id)
+    product_id: Mapped[str] = mapped_column(String(32), nullable=False, index=True)
+    # Indexed: the users ON DELETE CASCADE finds this table's rows by user_id.
+    user_id: Mapped[UUID] = mapped_column(
+        PG_UUID(as_uuid=True),
+        ForeignKey("users.id", ondelete="CASCADE"),
+        nullable=False,
+        index=True,
+    )
+    # Indexed: the studio_tracks cascade of the composite owner FK finds rows by track_id.
+    track_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False, index=True)
+    """The FKs are composite (see ``__table_args__``)."""
+    audio_version_id: Mapped[UUID] = mapped_column(PG_UUID(as_uuid=True), nullable=False)
+    version_number: Mapped[int] = mapped_column(Integer, nullable=False)
+    parent_id: Mapped[UUID | None] = mapped_column(PG_UUID(as_uuid=True), nullable=True)
+    origin: Mapped[str] = mapped_column(String(10), nullable=False)
+    schema_version: Mapped[int] = mapped_column(SmallInteger, nullable=False)
+    content: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    content_hash: Mapped[str] = mapped_column(String(64), nullable=False)
+    is_complete: Mapped[bool] = mapped_column(Boolean, nullable=False)
+
+    created_at: Mapped[datetime] = _created_at()
+
+    __table_args__ = (
+        ForeignKeyConstraint(
+            ["track_id", "user_id", "product_id"],
+            ["studio_tracks.id", "studio_tracks.user_id", "studio_tracks.product_id"],
+            name="fk_studio_audio_timelines_track_owner",
+            ondelete="CASCADE",
+        ),
+        ForeignKeyConstraint(
+            ["audio_version_id", "track_id"],
+            ["studio_track_audio.id", "studio_track_audio.track_id"],
+            name="fk_studio_audio_timelines_audio",
+            ondelete="CASCADE",
+        ),
+        # The target of the parent FK and of the audio version's current pointer.
+        UniqueConstraint("id", "audio_version_id", name="uq_studio_audio_timelines_id_audio"),
+        ForeignKeyConstraint(
+            ["parent_id", "audio_version_id"],
+            ["studio_audio_timelines.id", "studio_audio_timelines.audio_version_id"],
+            name=TIMELINE_PARENT_FK,
+        ),
+        UniqueConstraint(
+            "audio_version_id", "version_number", name="uq_studio_audio_timelines_number"
+        ),
+        # Natural idempotency: an identical sibling is the same version. NULLS NOT DISTINCT makes
+        # root versions (parent NULL) collide too.
+        UniqueConstraint(
+            "audio_version_id",
+            "parent_id",
+            "content_hash",
+            name="uq_studio_audio_timelines_content",
+            postgresql_nulls_not_distinct=True,
+        ),
+        CheckConstraint("version_number >= 1", name="ck_studio_audio_timelines_number"),
+        CheckConstraint(
+            _in_list("origin", StudioTimelineOrigin), name="ck_studio_audio_timelines_origin"
+        ),
+        Index(
+            "ix_studio_audio_timelines_list",
+            "audio_version_id",
+            text("version_number DESC"),
+        ),
+    )
+
+    def __repr__(self) -> str:
+        return (
+            f"<StudioAudioTimeline {self.id} audio={self.audio_version_id} v{self.version_number}>"
+        )
 
 
 class StudioDocumentVersion(Base):

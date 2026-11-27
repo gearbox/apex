@@ -52,6 +52,8 @@ def _prepared(format_: MediaFormat = MediaFormat.FLAC) -> PreparedAudio:
         duration_ms=61_000,
         peaks=bytes(2048),
         peaks_version=1,
+        detail_peaks=bytes(6_100),
+        detail_peaks_version=1,
     )
 
 
@@ -175,6 +177,8 @@ class TestSuccess:
         assert profile["bit_rate"] == 900000
         assert profile["peaks"] == bytes(2048)
         assert profile["peaks_version"] == 1
+        assert profile["detail_peaks"] == bytes(6_100)
+        assert profile["detail_peaks_version"] == 1
         assert storage.upload.await_args.kwargs["data"] == b"stored-audio"
         assert storage.upload.await_args.kwargs["content_type"] == "audio/flac"
         assert result.media.variants == []  # type: ignore[attr-defined]

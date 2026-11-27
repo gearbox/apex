@@ -17,7 +17,6 @@ from src.api.services.media_ingest import (
     UnsupportedAudioError,
 )
 from src.api.services.media_ingest.audio import (
-    AUDIO_MAX_SECONDS,
     AUDIO_MIN_SECONDS,
     MAX_PEAKS_SAMPLES,
     PEAKS_BUCKETS,
@@ -28,6 +27,7 @@ from src.api.services.media_ingest.audio import (
     remux_arguments,
 )
 from src.core.enums import MediaFormat
+from src.core.media_limits import AUDIO_MAX_SECONDS
 
 pytestmark = pytest.mark.unit
 
@@ -383,6 +383,8 @@ class TestPreparedAudio:
             "duration_ms": 6000,
             "peaks": bytes(2048),
             "peaks_version": 1,
+            "detail_peaks": bytes(600),
+            "detail_peaks_version": 1,
         }
         values.update(overrides)
         return PreparedAudio(**values)  # type: ignore[arg-type]

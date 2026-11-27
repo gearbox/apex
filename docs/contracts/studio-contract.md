@@ -1,9 +1,9 @@
-# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b / S1-P2c / S1-P3 / S2a: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories, Artist chat, Cast, Track audio)
+# Frontend Contract — Media Project Studio (S1-P1 / S1-P1b / S1-P2a / S1-P2b / S1-P2c / S1-P3 / S2a / S3a: Studio Foundation, Suno import, Planner and lyrics runs, Artist memories, Artist chat, Cast, Track audio, Timelines)
 
 > **Audience:** `gearbox/apex-frontend` (artists, studio projects, track editor, version history, Suno export and import).
-> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`), `feat/studio-artist-memories` (migration `059_studio_artist_memories`) and `feat/studio-artist-chat` (migration `060_studio_artist_chat`) and `feat/studio-cast` (migration `061_studio_cast_asset_holds`) and `feat/studio-track-audio` (migration `062_studio_track_audio`).
+> **Backend source:** branches `feat/studio-foundation` (migration `055_studio_foundation`), `feat/studio-suno-import` (migration `056_studio_plan_schema_v2`, plan **schema v2**) `feat/studio-planner-runs` (migration `057_studio_runs`), `feat/studio-lyrics-runs` (migration `058_studio_run_inputs`), `feat/studio-artist-memories` (migration `059_studio_artist_memories`) and `feat/studio-artist-chat` (migration `060_studio_artist_chat`) and `feat/studio-cast` (migration `061_studio_cast_asset_holds`) and `feat/studio-track-audio` (migration `062_studio_track_audio`) and `feat/studio-timelines` (migration `063_studio_audio_timelines`).
 > **Authority:** `gen:api` (OpenAPI `schema.json`) is authoritative for **types**. This document is authoritative for **semantics**: limits, normalization, error codes, idempotency, the "current pair" rules and what the Suno export does and does not contain.
-> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12) — and, behind its own switch, an **artist chat** (§13): "interview your artist", whose answers you can turn into new memories. and a **cast** (§14): people and characters with labelled reference images that the library keeps for as long as they are used. and **track audio** (§15): your own finished tracks, uploaded as audio files and attached to a track as numbered versions. **No audio generation, no fan channels** — those arrive in later phases and will extend, not break, this contract.
+> **Scope of this phase:** artists, a studio profile on a library project, tracks, versioned Plan / Lyrics documents, a deterministic Suno export and its inverse, a deterministic Suno-text import (§10). and — behind a separate switch — LLM **planner runs** that draft a plan, write lyrics or revise them (§11), grounded in an artist's **memories** (§12) — and, behind its own switch, an **artist chat** (§13): "interview your artist", whose answers you can turn into new memories. and a **cast** (§14): people and characters with labelled reference images that the library keeps for as long as they are used. and **track audio** (§15): your own finished tracks, uploaded as audio files and attached to a track as numbered versions, and **timelines** (§16): where each section and lyric line happens in an audio version, with LRC / SRT lyric files. **No audio generation, no automatic alignment, no fan channels** — those arrive in later phases and will extend, not break, this contract.
 
 ---
 
@@ -20,6 +20,7 @@
 - You can **interview an artist** (§13): chats, with replies that stream in over the same SSE stream as everything else, a few tokens per message. Nothing said in a chat is canon until you save it: "turn this into a memory" drafts a memory from any message, and you edit and save it (`origin: "chat"`).
 - You can keep a **cast** (§14): up to 50 members per user, each with up to 12 labelled reference images from your library and up to 12 named looks. A reference **pins** its library asset: it is not swept by retention and cannot be deleted while a reference uses it (`409 asset_held`).
 - You can attach **your own audio** to a track (§15): upload the file to the library, then attach it as a numbered, labelled **audio version** (up to 20 per track). Like a cast reference it **pins** its library asset. Nothing costs tokens.
+- You can **time** an audio version (§16): mark when each plan section and, optionally, each lyric line happens, save it as immutable **timeline** versions, and export **LRC / SRT**. The server never invents a time. Free.
 - A plan has a track-level **`instrumental`** flag (independent of its sections and of the lyrics) and may have **no sections** at all (plan **schema v2**, §2.1).
 - Everything sits behind a feature flag: when studio is off for the product (or globally) **every** `/v1/studio/*` route answers `404`, even before authentication.
 
@@ -230,7 +231,11 @@ All paths are under `/v1/studio`; all need a bearer token and answer `404` when 
 | DELETE | `/versions/{id}` | 204 | see §6 |
 | PUT | `/tracks/{id}/current` | 200 `Track` | body `{plan_version_id?, lyrics_version_id?, audio_version_id?}` — see §5 and §15 |
 | GET / POST | `/tracks/{id}/audio` | 200 page of `TrackAudio` / **201** `TrackAudio` | the track's audio versions, newest first / attach an uploaded audio file — see §15 |
-| GET / PATCH / DELETE | `/audio/{id}` | 200 / 200 / 204 | see §15 |
+| GET / PATCH / DELETE | `/audio/{id}` | 200 / 200 / 204 | see §15; deleting an audio version deletes its timelines (§16) |
+| GET / POST | `/audio/{id}/timelines` | 200 page of `TimelineSummary` / **201** created / **200** replay (`Timeline`) | see §16 |
+| GET / DELETE | `/timelines/{id}` | 200 `Timeline` / 204 | see §16 |
+| PUT | `/audio/{id}/current-timeline` | 200 `TrackAudio` | body `{timeline_id}` (`null` clears), §16 |
+| GET | `/timelines/{id}/exports/{lrc\|srt}` | 200 `TimelineExport` | see §16 |
 | GET | `/tracks/{id}/exports/suno` | 200 `SunoExport` | `?plan_version_id=&lyrics_version_id=` — see §8 |
 | POST | `/tracks/{id}/imports/suno` | **201** written / **200** not | paste Suno's boxes back, `dry_run` to preview — see §10 |
 
@@ -340,6 +345,7 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 404 | `asset_not_found` | the library asset is missing, or someone else's, or another product's (never distinguishable, §14, §15) |
 | 404 | `audio_version_not_found` | the audio version is unknown, or belongs to another track, user or product (never distinguishable, §15) — also an `audio_version_id` of `PUT …/current` that is not this track's |
 | 404 | `version_not_found` | the plan / lyrics version an audio version is linked to is not a version of this track (§15) |
+| 404 | `timeline_not_found` | the timeline is unknown, or belongs to another audio version, user or product (never distinguishable, §16) — also a `parent_id` or a current `timeline_id` that is not this audio version's |
 | 409 | `artist_name_conflict` | name already used (case-insensitive) |
 | 409 | `artist_limit_reached` | 50 artists |
 | 409 | `artist_busy` | a chat reply or a memory draft of the artist is still `pending` (it has been paid for and is about to be written): retry in a few seconds (§13) |
@@ -356,6 +362,11 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | 409 | `audio_version_limit_reached` | the track already has 20 audio versions; `detail: {limit: 20}` (§15) |
 | 409 | `audio_version_is_current` | deleting the track's current audio (§15) |
 | 409 | `version_has_audio` | deleting a plan / lyrics version that audio versions realize; `detail: {count}` (§6, §15) |
+| 409 | `audio_has_no_plan` | saving a timeline of an audio version that links no plan (§16) |
+| 409 | `timeline_unchanged` | the timeline is identical to its parent (§16) |
+| 409 | `timeline_limit_reached` | the audio version already has 50 timelines; `detail: {limit: 50}` (§16) |
+| 409 | `timeline_is_current` / `timeline_has_children` | deleting the current timeline, or one other timelines were derived from (§16) |
+| 409 | `audio_has_timelines` | changing the plan / lyrics link of an audio version that has timelines; `detail: {count}` (§15, §16) |
 | 422 | `asset_not_eligible` | `detail.reason`: `derivative` \| `media_kind_not_accepted` \| `job_not_available` (§14, §15) |
 | 422 | `version_kind_mismatch` | an audio version's `plan_version_id` names a lyrics version, or `lyrics_version_id` a plan version; `detail: {field, expected}` (§15) |
 | 422 | `invalid_order` | `reference_ids` is not exactly the member's references, each once (§14) |
@@ -1168,7 +1179,27 @@ interface AudioPeaks {
 }
 ```
 
-The decode is mono at 11,025 Hz, split into 1,024 equal slices; `0` is silence and `±127` is full scale (divide by 128 to draw). `404 asset_not_found` for a missing, someone else's or another product's asset (the same answer); `422 media_kind_not_supported` for an asset that is not audio. It needs no studio, and costs nothing.
+The decode is mono at 11,025 Hz, split into 1,024 equal slices; `0` is silence and `±127` is full scale (divide by 128 to draw). `404 asset_not_found` for a missing, someone else's or another product's asset (the same answer); `422 media_kind_not_supported` for an asset that is not audio. It needs no studio, and costs nothing. The overview response also carries `level: "overview"`.
+
+**Zooming in (`?level=detail`).** For editing a timeline the overview is too coarse (about 0.23 s per bucket on a 4-minute song). The **detail** level has one `[min, max]` pair per **20 ms**:
+
+```ts
+interface AudioDetailPeaks {
+  level: "detail";
+  version: 1;
+  bucket_ms: 20;
+  total_buckets: number;   // ceil(duration / 20 ms) of the decode (at most 45050)
+  from_bucket: number;     // the first bucket in `peaks`; it starts at from_bucket * 20 ms
+  peaks: number[];         // 2 integers per bucket in [-128, 127], same scale as the overview
+}
+```
+
+| Query | Meaning |
+|---|---|
+| `level` | `overview` (default) or `detail`; anything else is `400` |
+| `from_ms`, `to_ms` | detail only, **both or neither**. Integers with `0 ≤ from_ms < to_ms` and `to_ms − from_ms ≤ 600000` (10 minutes). The window is the buckets `[floor(from_ms / 20), ceil(to_ms / 20))`, clamped to `total_buckets` (a window past the end answers `peaks: []` with `from_bucket = total_buckets`). Without them the whole level is returned |
+
+`422 invalid_peaks_window` for a bad window (one bound only, negative, empty or inverted, wider than 10 minutes) **or** any `from_ms` / `to_ms` with `level=overview`. **`409 peaks_not_ready`** when the detail level has not been computed yet: audio uploaded before timelines existed, until the operator's one-time backfill runs (`python -m src.cli.backfill_audio_peaks`); the overview works meanwhile. A window is read as one query that slices in the database, so zooming is cheap: fetch what you draw.
 
 ### What an audio version does to its asset
 
@@ -1199,6 +1230,9 @@ interface TrackAudio {
   duration_ms: number;                  // a snapshot taken when it was attached
   plan_version_id: UUID | null; lyrics_version_id: UUID | null;
   is_current: boolean;                  // this is the track's current audio
+  current_timeline_id: UUID | null;     // §16
+  timeline_count: number;               // §16; deleting this audio version deletes them
+  timeline_complete: boolean | null;    // is_complete of the CURRENT timeline; null without one
   created_at: ISODateTime; updated_at: ISODateTime;
 }
 ```
@@ -1227,11 +1261,13 @@ All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced
 
 ### Links to the plan and lyrics
 
-An audio version may name the plan and / or lyrics version it realizes ("this take is the one with the bridge"). A link must be a version **of the same track** (`404 version_not_found` otherwise, also for an unknown id) **of the right kind** (`422 version_kind_mismatch`, `detail: {field, expected}`). Lyrics require a plan (`422 plan_required`), and when both are linked they must be a compatible pair (`409 lyrics_incompatible_with_plan`, `detail.issues`), checked after merging PATCH values with the stored links. These are the same pair rules as the track's current plan and lyrics. The database enforces the same-track keys and the lyrics-needs-plan rule. A linked version **cannot be deleted** while any audio version names it (`409 version_has_audio`, `detail.count`, §6): clear the link (`PATCH {plan_version_id: null}`) or delete the audio version first. A later phase may freeze the link; today it is editable.
+An audio version may name the plan and / or lyrics version it realizes ("this take is the one with the bridge"). A link must be a version **of the same track** (`404 version_not_found` otherwise, also for an unknown id) **of the right kind** (`422 version_kind_mismatch`, `detail: {field, expected}`). Lyrics require a plan (`422 plan_required`), and when both are linked they must be a compatible pair (`409 lyrics_incompatible_with_plan`, `detail.issues`), checked after merging PATCH values with the stored links. These are the same pair rules as the track's current plan and lyrics. The database enforces the same-track keys and the lyrics-needs-plan rule. A linked version **cannot be deleted** while any audio version names it (`409 version_has_audio`, `detail.count`, §6): clear the link (`PATCH {plan_version_id: null}`) or delete the audio version first.
+
+**The links freeze once the audio version has a timeline** (§16). A `PATCH` that would **change** `plan_version_id` or `lyrics_version_id` is then `409 audio_has_timelines` (`detail: {count}`), whatever the new value. Re-sending the stored values and editing `label` still work. To use other lyrics, delete the timelines first, or attach the same file again as a new audio version (free).
 
 ### Deleting
 
-- **An audio version**: refused while it is the track's current audio (`409 audio_version_is_current`); otherwise it is deleted and its hold released in one step.
+- **An audio version**: refused while it is the track's current audio (`409 audio_version_is_current`); otherwise it is deleted and its hold released in one step. **Its timelines are deleted with it** (§16): show `timeline_count` in the confirmation.
 - **A track**: every audio version goes with it and every hold is released in the same transaction; no hold outlives its track.
 - A **library asset** that an audio version holds cannot be deleted from the library (`409 asset_held`): delete the audio version first.
 
@@ -1241,4 +1277,171 @@ An audio version may name the plan and / or lyrics version it realizes ("this ta
 - Audio versions are a per-track history: show them newest first, mark `is_current`, and let the user label them ("Mix 2", "Radio edit").
 - Attach is two requests; if the second fails the file is still in the library (and will expire normally): offer to retry the attach rather than re-uploading.
 - The studio's `PUT …/current` response carries `current_audio_version_id`; refetch `GET /tracks/{id}` for the item.
+
+---
+
+## 16. Timelines
+
+*When* do the plan's sections and the lyric lines happen in a real audio file? A **timeline** records that for one **audio version**: a span per plan section and, optionally, per lyric line. It is what a lyric video or a video director cuts to, and it exports as **LRC** or **SRT**. Today you write timelines yourself (`origin: "user"`); automatic alignment comes later and will save its result as one more timeline version (`origin: "aligner"`) that never becomes current on its own. Free: nothing here costs tokens, and nothing is sent to any provider.
+
+**The server never invents a time.** There is no server-side seeding: an editor that wants a starting point lays the sections out end to end from the plan's `duration_seconds` (scaled to the audio's length) **in the client**, and saves that like any other timeline. Exports leave untimed lines out; they never guess.
+
+### The document
+
+```ts
+// All times are INTEGER MILLISECONDS from the start of the audio. Every span is half-open [start_ms, end_ms):
+// two spans that touch (end of one == start of the next) do not overlap.
+interface TimelineDocument {
+  sections: SectionSpan[];              // 0..64
+  lines?: LineSpan[];                   // 0..4096; OMITTED when empty
+}
+interface SectionSpan { section_id: UUID; start_ms: number; end_ms: number }       // a PlanSection.id
+interface LineSpan {
+  section_id: UUID;
+  line_index: number;                   // 0..63: the line's 0-based position in that lyrics section
+  start_ms: number; end_ms: number;
+  words?: WordSpan[];                   // 0..64; OMITTED when empty
+}
+interface WordSpan {
+  text: string;                         // 1..100 (NFC, re-checked after normalization), no U+0000 (400); display only
+  start_ms: number; end_ms: number;
+  inferred?: boolean;                   // true = an aligner could not place this word and inferred its span; OMITTED when false
+}
+```
+
+- Every time is within `0..900000` (the 15-minute audio cap); floats and unknown fields are `400`.
+- **Defaults are omitted** from stored and returned documents (`lines`, `words`, `inferred: false`): treat a missing field as its default. Sending them explicitly is fine and means the same content.
+- Word text is **display data**: it is never compared with the line's text (an aligner tokenizes in its own way). It is stored as sent, apart from Unicode NFC.
+- `inferred` is for display and quality only; validation treats the word like any other. When the user corrects a word in your editor, send it **without** `inferred`: it becomes a measured word.
+- The document does **not** name a plan or lyrics version: those are the audio version's links (§15), which freeze once a timeline exists.
+
+### Validation
+
+A timeline is checked against the audio version's `duration_ms`, its linked **plan** and, if any, its linked **lyrics**. All problems come back together as `422 document_invalid` with `detail.issues = [{path, code}]`; paths are `sections[i]`, `lines[j]` and `lines[j].words[k]` (a path never contains text).
+
+| `code` | When |
+|---|---|
+| `span_out_of_range` | not `0 ≤ start_ms < end_ms ≤ audio duration` (sections, lines and words alike) |
+| `unknown_section` | the section id is not a section of the plan |
+| `duplicate_section` | the same section is timed twice |
+| `section_order` | sections are not in **plan order**: listed out of it, or one starts before the section listed ahead of it |
+| `section_overlap` | two section spans overlap |
+| `unknown_line` | `(section_id, line_index)` is not a line of the lyrics, or the audio links **no lyrics** at all |
+| `duplicate_line` | the same line is timed twice |
+| `line_section_untimed` | the line's section has no span |
+| `line_outside_section` | the line is not inside its section's span |
+| `line_order` | lines are not in **line order** (their section's position in the **plan**, then `line_index`): listed out of it, or one starts before the line listed ahead of it |
+| `line_overlap` | two line spans overlap |
+| `word_outside_line` | a word is not inside its line |
+| `word_order` | a word starts before the word listed ahead of it |
+| `word_overlap` | two words overlap |
+| `too_long_after_normalization` | a word's text is over 100 characters after NFC (path `lines[j].words[k].text`) |
+| `document_too_large` | the compact JSON is over 131,072 bytes (path `""`) |
+
+**Gaps are allowed** (silence, a count-in, an effect). **Line order follows the plan:** the order in which the lyrics document lists its own sections does not matter to a timeline.
+
+### Partial and complete
+
+**A partial timeline is valid** — time as much as you like and save. `is_complete` is true when **every plan section** has a span and, if the audio links lyrics, **every lyric line** has one (an instrumental section has no lines, so its span is enough). The server computes it when the version is saved; never send it. It stays true to its version because nothing it depends on can change. A later video phase accepts only a complete timeline.
+
+### Versions
+
+Like plan and lyrics documents, timelines are **immutable, numbered versions** in a tree. Editing = saving a new version with `parent_id` = the one you edited.
+
+```ts
+interface TimelineCreate { content: TimelineDocument; parent_id?: UUID; make_current?: boolean }  // make_current default FALSE
+interface TimelineSummary {             // an item of the list: the version history, without documents
+  id: UUID; audio_version_id: UUID; track_id: UUID;
+  version_number: number;               // per audio version, 1, 2, 3 …, never reused after a delete
+  parent_id: UUID | null;
+  origin: "user" | "aligner";           // only "user" is written today
+  is_complete: boolean;
+  is_current: boolean;                  // the audio version's current timeline
+  created_at: ISODateTime;
+}
+interface Timeline extends TimelineSummary {  // one timeline: POST (201 / 200) and GET /timelines/{id}
+  content: TimelineDocument;
+}
+```
+
+- **Create is idempotent by content.** The same content under the same parent returns the existing version with `200` (no new row, no number), and `make_current: true` still applies. Retry freely.
+- Content equal to the **parent's** is `409 timeline_unchanged`.
+- The audio version must link a plan: `409 audio_has_no_plan` otherwise.
+- `parent_id` must be a timeline of **this** audio version (`404 timeline_not_found`).
+- At most **50** timelines per audio version (`409 timeline_limit_reached`, `{limit: 50}`; exact under concurrency). A replay still works at the cap; deleting one makes room.
+- `make_current` defaults to **false**: saving never moves the current pointer unless asked.
+
+### Endpoints
+
+All under `/v1/studio` (§1: `404` when studio is off; legal-acceptance enforced on every mutation).
+
+| Method | Path | Success | Notes |
+|---|---|---|---|
+| `POST` | `/audio/{id}/timelines` | `201` `Timeline` / `200` replay | body `TimelineCreate` |
+| `GET` | `/audio/{id}/timelines` | `200` page of `TimelineSummary` (**no `content`**), **highest `version_number` first** | `?limit=1..50` (30), `?cursor=` |
+| `GET` | `/timelines/{id}` | `200` `Timeline` | |
+| `DELETE` | `/timelines/{id}` | `204` | `409 timeline_is_current` / `409 timeline_has_children` |
+| `PUT` | `/audio/{id}/current-timeline` | `200` `TrackAudio` | body `{"timeline_id": UUID \| null}` (required; `null` clears); another audio's timeline is `404 timeline_not_found` |
+| `GET` | `/timelines/{id}/exports/{format}` | `200` `TimelineExport` | `format` = `lrc` or `srt`; anything else is `404 not_found` |
+
+An audio version or timeline of another user or product, and an unknown one, are the same `404` (`audio_version_not_found`, `timeline_not_found`). `TrackAudio` (§15) carries `current_timeline_id`, `timeline_count` and `timeline_complete`.
+
+### Deleting
+
+- A **timeline**: refused while it is current (`409 timeline_is_current`: switch or clear the pointer first) or while other timelines name it as their parent (`409 timeline_has_children`: delete the leaves first). Version numbers are never reused.
+- An **audio version** (§15) takes **all** its timelines with it, current one included; so does deleting its track. Warn using `timeline_count`.
+- A plan or lyrics version cannot be deleted while an audio version links it (`409 version_has_audio`), so a timeline never loses its documents.
+- The audio version's **plan / lyrics links are frozen** while it has any timeline (`409 audio_has_timelines`, §15). Delete every timeline to change them, or attach the file again.
+
+### Exports
+
+```ts
+interface TimelineExport {
+  timeline_id: UUID;
+  format: "lrc" | "srt";
+  text: string;                          // the whole file; "" when there is nothing to time
+  warnings: { code: "untimed_lines" | "no_lyrics" | "inferred_word_timings"; count: number | null }[];
+}
+```
+
+A pure `GET` that always renders. **Line text comes only from the audio's lyrics version** (never from the plan: no labels, notes or idea can appear) and **every time comes only from the timeline**; lines are in time order. Line delivery tags are not part of a lyric file.
+
+| Warning | `count` | When |
+|---|---|---|
+| `untimed_lines` | lines left out | the lyrics have lines the timeline does not time. They are **omitted**, never given guessed times |
+| `no_lyrics` | `null` | the audio links no lyrics: `text` is `""` (still `200`) |
+| `inferred_word_timings` | words | **LRC only**: some exported words have `inferred: true`. They are exported as stored; tell the user to check them |
+
+**LRC.** One line per timed lyric line, `[mm:ss.xx]text`, centiseconds truncated (`ms // 10`), lines ending in `\n` (an empty export is `""`). No header tags (no title, artist or length). A line that has `words` uses the enhanced form, `[mm:ss.xx]<mm:ss.xx>word <mm:ss.xx>word`, with each word as the timeline stored it (a lyrics version has no word division); any whitespace run inside a word is written as one space.
+
+```
+[00:01.00]<00:01.00>Night <00:01.80>falls <00:02.40>on <00:02.60>the <00:02.90>harbour
+[00:05.50]Lanterns on the water
+[00:21.25]Carry me home
+```
+
+**SRT.** One cue per timed lyric line, numbered from 1, `HH:MM:SS,mmm --> HH:MM:SS,mmm`, the line text, then a blank line. Word spans are not used. The same timeline:
+
+```
+1
+00:00:01,000 --> 00:00:05,500
+Night falls on the harbour
+
+2
+00:00:05,509 --> 00:00:09,999
+Lanterns on the water
+
+3
+00:00:21,250 --> 00:00:25,000
+Carry me home
+
+```
+
+### Notes for the UI
+
+- Save explicitly (a version per save), not on every drag; the 50-version cap is per audio version.
+- The list is the version history and carries no `content` (a document can be 128 KiB). Open a version with `GET /timelines/{id}`.
+- Draw the editor from the **detail** peaks (§15), one window at a time; fall back to the overview on `409 peaks_not_ready`.
+- Keep `parent_id` = the version being edited, so the history reads as a tree and a mistaken save can be walked back.
+- Mark `inferred` words visibly; clearing the flag (omit it) when the user moves the word.
 

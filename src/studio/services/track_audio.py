@@ -6,7 +6,9 @@ retention and cannot be deleted for as long as the version exists, and its reten
 when the last hold goes. The version stores no ``asset_ref`` of its own - the asset lives on the
 hold row (one source of truth) and is read through a join. A version may name the plan and lyrics
 versions it *realizes*; those links are validated here (typed ``404`` / ``422``) and enforced by
-composite foreign keys (the backstop).
+composite foreign keys (the backstop). Once the version has a realized timeline (S3a) its two
+links are **frozen** (S3-5): a timeline's line indexes mean nothing against other lyrics. The label
+stays editable, and a deleted version takes its timelines with it.
 
 The studio reaches assets only through ``AssetHoldService`` and the library's read builders. It
 never calls ingest, R2 or the upload service: the file is uploaded first
@@ -16,7 +18,8 @@ Transactions and locks
 ----------------------
 The service never commits or flushes; it runs inside the request transaction and calls the
 library's ``AssetHoldService`` in the same one. **Lock order: track → audio version → (assets,
-inside the hold service).** Nothing takes them the other way round.
+inside the hold service).** Nothing takes them the other way round. (``TimelineService`` extends
+it: track → audio version → timeline.)
 
 * Every mutation first locks the track ``FOR UPDATE``. The 20-version cap and the version number
   (``next_audio_version_number``, never ``max()+1``) are taken under that lock, so two parallel
@@ -63,12 +66,14 @@ from src.db.models.studio import (
 )
 from src.db.repositories.output import OutputRepository
 from src.db.repositories.studio import StudioDocumentVersionRepository, StudioTrackRepository
+from src.db.repositories.studio_timeline import StudioAudioTimelineRepository
 from src.db.repositories.studio_track_audio import StudioTrackAudioRepository, TrackAudioRow
 from src.db.repositories.user_image import UserImageRepository
 from src.studio.constraints import MAX_AUDIO_VERSIONS_PER_TRACK, collect_length_issues
 from src.studio.errors import (
     AssetNotEligible,
     AssetNotFound,
+    AudioHasTimelines,
     AudioVersionIsCurrent,
     AudioVersionLimitReached,
     AudioVersionNotFound,
@@ -168,6 +173,9 @@ async def build_audio_outs(
             plan_version_id=row.plan_version_id,
             lyrics_version_id=row.lyrics_version_id,
             is_current=row.is_current,
+            current_timeline_id=row.current_timeline_id,
+            timeline_count=row.timeline_count,
+            timeline_complete=row.timeline_complete,
             created_at=row.created_at,
             updated_at=row.updated_at,
         )
@@ -184,6 +192,7 @@ class TrackAudioService:
         self._tracks = StudioTrackRepository(session)
         self._audio = StudioTrackAudioRepository(session)
         self._versions = StudioDocumentVersionRepository(session)
+        self._timelines = StudioAudioTimelineRepository(session)
 
     # ----------------------------------------------------------------------------------------
     # Reads
@@ -306,6 +315,7 @@ class TrackAudioService:
         Raises:
             AudioVersionNotFound: No such audio version for the caller.
             StudioDocumentInvalid: The label is empty or too long after normalization.
+            AudioHasTimelines: A link would change, and the version has timelines (S3-5).
             VersionNotFound: A link is not a version of this track.
             VersionKindMismatch: A link names a version of the other kind.
         """
@@ -336,6 +346,17 @@ class TrackAudioService:
             if isinstance(data.lyrics_version_id, msgspec.UnsetType)
             else data.lyrics_version_id
         )
+        # Re-sending the stored links changes nothing and stays allowed. The count is taken
+        # under the track lock, which creating a timeline needs too.
+        if (plan_version_id, lyrics_version_id) != (
+            locked.plan_version_id,
+            locked.lyrics_version_id,
+        ):
+            timelines = await self._timelines.count_for_audio(
+                audio_id, user_id=user_id, product_id=product_id
+            )
+            if timelines:
+                raise AudioHasTimelines(timelines)
         await self._check_links(
             current.track_id,
             user_id,
@@ -373,7 +394,8 @@ class TrackAudioService:
         """Delete a version that is not the track's current audio, and release its hold.
 
         The row and its hold go in one savepoint; the last release of an asset re-arms its
-        retention clock (inside ``AssetHoldService``).
+        retention clock (inside ``AssetHoldService``). Its timelines go with it (``ON DELETE
+        CASCADE``, S3a).
 
         Raises:
             AudioVersionNotFound: No such audio version for the caller.

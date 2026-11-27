@@ -45,6 +45,7 @@ from .storage import (
 from .studio import (
     StudioArtist,
     StudioArtistMemory,
+    StudioAudioTimeline,
     StudioDocumentVersion,
     StudioLlmUsage,
     StudioProjectProfile,
@@ -104,6 +105,7 @@ __all__ = [
     "StudioArtistChat",
     "StudioArtistChatMessage",
     "StudioArtistMemory",
+    "StudioAudioTimeline",
     "StudioCastLook",
     "StudioCastLookReference",
     "StudioCastMember",

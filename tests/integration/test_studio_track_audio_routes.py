@@ -100,9 +100,16 @@ class TestLifecycleOverHttp:
             "plan_version_id",
             "lyrics_version_id",
             "is_current",
+            # S3a: the realized-timeline facts
+            "current_timeline_id",
+            "timeline_count",
+            "timeline_complete",
             "created_at",
             "updated_at",
         }
+        assert created["current_timeline_id"] is None
+        assert created["timeline_count"] == 0
+        assert created["timeline_complete"] is None
         assert created["label"] == "Demo 1"
         assert created["origin"] == "upload"
         assert created["duration_ms"] == 120_000

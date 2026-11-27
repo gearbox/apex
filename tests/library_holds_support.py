@@ -54,6 +54,7 @@ from src.db.models.storage import GenerationJob, GenerationOutput, UserImage
 from src.db.models.user import User
 from src.studio.errors import StudioError
 from src.studio.services.cast import CastService
+from src.studio.services.timeline import TimelineService
 from src.studio.services.track import TrackService
 from src.studio.services.track_audio import TrackAudioService
 from src.studio.services.version import DocumentVersionService
@@ -154,11 +155,13 @@ async def make_audio_upload(
     product_id: str | None = None,
     peaks: bytes | None = None,
     with_profile: bool = True,
+    detail_peaks: bytes | None = None,
 ) -> UserImage:
     """Insert and flush an audio upload and its ``library_audio_profiles`` row.
 
     What the upload service writes for audio: a ``user_images`` row with no width / height and a
-    ``duration_ms``, plus the profile (probed facts and the 2,048-byte peaks).
+    ``duration_ms``, plus the profile (probed facts and the 2,048-byte peaks). ``detail_peaks``
+    is the 20 ms level; left out, it is NULL, as for audio stored before S3a (not backfilled).
     """
     image_id = uuid4()
     extension = AUDIO_FORMATS[content_type]
@@ -190,6 +193,8 @@ async def make_audio_upload(
                 bit_rate=900000,
                 peaks=peaks if peaks is not None else bytes(range(256)) * 8,
                 peaks_version=1,
+                detail_peaks=detail_peaks,
+                detail_peaks_version=None if detail_peaks is None else 1,
             )
         )
         await session.flush()
@@ -402,6 +407,11 @@ def provide_track_audio_service(session: AsyncSession) -> TrackAudioService:
     return TrackAudioService(session, make_holds(session))
 
 
+def provide_timeline_service(session: AsyncSession) -> TimelineService:
+    """``get_studio_timeline_service`` (a plain function: Litestar resolves its hints)."""
+    return TimelineService(session)
+
+
 def _unused_job_service() -> MagicMock:
     """Stands in for ``UnifiedJobService`` (only the delete route is exercised)."""
     return MagicMock()
@@ -455,6 +465,7 @@ def build_app(
             "studio_track_service": dep(provide_track_service),
             "studio_version_service": dep(provide_version_service),
             "studio_track_audio_service": dep(provide_track_audio_service),
+            "studio_timeline_service": dep(provide_timeline_service),
         },
         exception_handlers={
             HTTPException: http_exception_handler,

@@ -6,7 +6,7 @@ from dataclasses import dataclass
 from enum import StrEnum
 from typing import Protocol
 
-from src.api.services.media_ingest.audio import PEAKS_BYTES
+from src.api.services.media_ingest.audio import MAX_DETAIL_PEAKS_BYTES, PEAKS_BYTES
 from src.core.enums import MediaFormat  # noqa: TC001 - used for runtime validation
 from src.core.media_hash import HashSet  # noqa: TC001 - carried by runtime values
 
@@ -110,12 +110,24 @@ class PreparedAudio:
     duration_ms: int
     peaks: bytes
     peaks_version: int
+    detail_peaks: bytes
+    """One min/max pair per 20 ms of the same decode as ``peaks`` (S3a)."""
+    detail_peaks_version: int
 
     def __post_init__(self) -> None:
         if not self.format.is_audio:
             raise ValueError("PreparedAudio requires an audio format")
         if len(self.peaks) != PEAKS_BYTES:
             raise ValueError(f"prepared audio peaks must be {PEAKS_BYTES} bytes")
+        if (
+            not self.detail_peaks
+            or len(self.detail_peaks) % 2
+            or len(self.detail_peaks) > MAX_DETAIL_PEAKS_BYTES
+        ):
+            raise ValueError(
+                "prepared audio detail peaks must be min/max pairs of at most "
+                f"{MAX_DETAIL_PEAKS_BYTES} bytes"
+            )
         if not self.codec:
             raise ValueError("prepared audio requires a codec")
         if (
@@ -123,6 +135,7 @@ class PreparedAudio:
             or self.channels <= 0
             or self.duration_ms <= 0
             or self.peaks_version <= 0
+            or self.detail_peaks_version <= 0
             or not self.data
         ):
             raise ValueError("prepared audio numbers must be positive")

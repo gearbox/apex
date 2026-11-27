@@ -9,6 +9,9 @@ Conventions (those of ``studio.py``, P1-9, and ``studio_cast.py``):
 * A version's asset lives only on its hold row: the reads here **join** ``library_asset_holds`` to
   learn it (the row stores no copy). The join is the only place the studio touches the library's
   table; the studio never writes it (that is ``AssetHoldService``'s job).
+* A version's timeline facts (S3a: the current pointer, how many timelines it has and whether the
+  current one is complete) come from the **same statement** - one counted subquery and one outer
+  join, so a page of versions is one SELECT, with no per-item query.
 * Callers that need atomicity lock the **track** first (``StudioTrackRepository.lock``): the
   20-version cap, the numbering and every mutation hang off that one lock.
 """
@@ -21,10 +24,11 @@ from typing import TYPE_CHECKING, Any
 import msgspec
 from sqlalchemy import delete, func, select, update
 from sqlalchemy.dialects.postgresql import insert as pg_insert
+from sqlalchemy.orm import aliased
 
 from src.core.library_ref import LibraryAssetSource
 from src.db.models.library import LibraryAssetHold
-from src.db.models.studio import StudioTrack, StudioTrackAudio
+from src.db.models.studio import StudioAudioTimeline, StudioTrack, StudioTrackAudio
 
 if TYPE_CHECKING:
     from collections.abc import Sequence
@@ -54,6 +58,10 @@ class TrackAudioRow:
     updated_at: datetime
     is_current: bool
     """Whether the track's current-audio pointer names this version (read in the same statement)."""
+    current_timeline_id: UUID | None
+    timeline_count: int
+    timeline_complete: bool | None
+    """``is_complete`` of the current timeline; ``None`` when there is no current timeline."""
     source: LibraryAssetSource
     asset_id: UUID
 
@@ -74,10 +82,27 @@ def _row(row: object) -> TrackAudioRow:
         created_at=row.created_at,  # type: ignore[attr-defined]
         updated_at=row.updated_at,  # type: ignore[attr-defined]
         is_current=bool(row.is_current),  # type: ignore[attr-defined]
+        current_timeline_id=row.current_timeline_id,  # type: ignore[attr-defined]
+        timeline_count=row.timeline_count,  # type: ignore[attr-defined]
+        timeline_complete=row.timeline_complete,  # type: ignore[attr-defined]
         source=LibraryAssetSource.UPLOAD if upload_id is not None else LibraryAssetSource.OUTPUT,
         asset_id=upload_id if upload_id is not None else row.output_id,  # type: ignore[attr-defined]
     )
 
+
+_CURRENT_TIMELINE = aliased(StudioAudioTimeline, name="current_timeline")
+
+_TIMELINE_COUNT = (
+    select(func.count())
+    .select_from(StudioAudioTimeline)
+    .where(
+        StudioAudioTimeline.audio_version_id == StudioTrackAudio.id,
+        StudioAudioTimeline.user_id == StudioTrackAudio.user_id,
+        StudioAudioTimeline.product_id == StudioTrackAudio.product_id,
+    )
+    .correlate(StudioTrackAudio)
+    .scalar_subquery()
+)
 
 _COLUMNS = (
     StudioTrackAudio.id,
@@ -95,18 +120,23 @@ _COLUMNS = (
     StudioTrack.current_audio_version_id.is_not_distinct_from(StudioTrackAudio.id).label(
         "is_current"
     ),
+    StudioTrackAudio.current_timeline_id,
+    _TIMELINE_COUNT.label("timeline_count"),
+    _CURRENT_TIMELINE.is_complete.label("timeline_complete"),
     LibraryAssetHold.upload_id,
     LibraryAssetHold.output_id,
 )
 
 
 def _select_rows() -> Select[*tuple[Any, ...]]:
-    """The rows' SELECT: the version, its track (for ``is_current``) and its hold (the asset)."""
+    """The rows' SELECT: the version, its track (for ``is_current``), its hold (the asset) and
+    its current timeline, if any (for ``timeline_complete``)."""
     return (
         select(*_COLUMNS)
         .select_from(StudioTrackAudio)
         .join(StudioTrack, StudioTrack.id == StudioTrackAudio.track_id)
         .join(LibraryAssetHold, LibraryAssetHold.id == StudioTrackAudio.hold_id)
+        .outerjoin(_CURRENT_TIMELINE, _CURRENT_TIMELINE.id == StudioTrackAudio.current_timeline_id)
     )
 
 

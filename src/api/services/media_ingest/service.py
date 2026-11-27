@@ -27,11 +27,12 @@ from src.api.services.image_normalization import (
     sniff_format,
 )
 from src.api.services.media_ingest.audio import (
-    AUDIO_MAX_SECONDS,
+    DETAIL_PEAKS_VERSION,
     PEAKS_SAMPLE_RATE_HZ,
     PEAKS_VERSION,
     PROBE_SHOW_ENTRIES,
     AudioProbe,
+    compute_detail_peaks,
     compute_peaks,
     parse_audio_probe,
     remux_arguments,
@@ -65,6 +66,7 @@ from src.api.services.media_tools import (
 )
 from src.core.enums import MediaFormat
 from src.core.media_hash import HashSample, HashSet
+from src.core.media_limits import AUDIO_MAX_SECONDS
 
 # Docker installs these at /usr/bin.  The explicit lookup also supports local
 # development installations without ever accepting an executable from input.
@@ -258,6 +260,22 @@ class MediaIngestService:
             raise InvalidMediaError("audio input exceeds the configured byte limit")
         return await self._in_video_slot(
             self._prepare_audio(data), busy_message="audio preparation capacity is exhausted"
+        )
+
+    async def compute_audio_detail_peaks(self, data: bytes) -> bytes:
+        """The detail peaks of an **already stored** audio object (the backfill, S3a).
+
+        The same PCM decode as ingest, under a video slot and the audio deadline, so for the
+        stored bytes it yields exactly what ingest would have. The upload byte limits are not
+        re-checked: the object was accepted when it was stored.
+
+        Raises:
+            InvalidAudioError: The object does not decode.
+            MediaProcessingError: Out of capacity, or a local failure.
+        """
+        return await self._in_video_slot(
+            self._compute_audio_detail_peaks(data),
+            busy_message="audio preparation capacity is exhausted",
         )
 
     async def _in_video_slot[T](self, work: Coroutine[Any, Any, T], *, busy_message: str) -> T:
@@ -535,7 +553,8 @@ class MediaIngestService:
             if source.format is MediaFormat.FLAC:
                 self._require_same_flac_sample_format(source, prepared)
                 await self._assert_decoded_audio_equal(input_path, output_path, deadline)
-            peaks = await self._audio_peaks(output_path, deadline)
+            pcm = await self._audio_pcm(output_path, deadline)
+            peaks, detail_peaks = await asyncio.to_thread(_peak_levels, pcm)
             prepared_bytes = await asyncio.to_thread(output_path.read_bytes)
             self._validate_prepared_audio_size(prepared_bytes)
             return PreparedAudio(
@@ -548,7 +567,26 @@ class MediaIngestService:
                 duration_ms=prepared.duration_ms,
                 peaks=peaks,
                 peaks_version=PEAKS_VERSION,
+                detail_peaks=detail_peaks,
+                detail_peaks_version=DETAIL_PEAKS_VERSION,
             )
+        except (InvalidMediaError, UnsupportedMediaError, MediaProcessingError):
+            raise
+        except (MediaToolError, TimeoutError, OSError) as exc:
+            raise MediaProcessingError("audio preparation failed operationally") from exc
+        finally:
+            if temp_dir is not None:
+                await asyncio.to_thread(shutil.rmtree, temp_dir, ignore_errors=True)
+
+    async def _compute_audio_detail_peaks(self, data: bytes) -> bytes:
+        deadline = asyncio.get_running_loop().time() + self._video_deadline_seconds
+        temp_dir: Path | None = None
+        try:
+            temp_dir = Path(await asyncio.to_thread(tempfile.mkdtemp, prefix="apex-media-ingest-"))
+            input_path = temp_dir / "input.bin"
+            await asyncio.to_thread(input_path.write_bytes, data)
+            pcm = await self._audio_pcm(input_path, deadline)
+            return await asyncio.to_thread(compute_detail_peaks, pcm)
         except (InvalidMediaError, UnsupportedMediaError, MediaProcessingError):
             raise
         except (MediaToolError, TimeoutError, OSError) as exc:
@@ -669,8 +707,8 @@ class MediaIngestService:
         if not source_md5 or source_md5 != prepared_md5:
             raise MediaProcessingError("audio cleanup changed decoded samples")
 
-    async def _audio_peaks(self, path: Path, deadline: float) -> bytes:
-        """Decode the stored file to mono 11,025 Hz PCM and reduce it to the peaks."""
+    async def _audio_pcm(self, path: Path, deadline: float) -> bytes:
+        """Decode the stored file to mono 11,025 Hz PCM, the input of both peak levels."""
         result = await self._run_audio_stage(
             "peaks",
             [
@@ -697,7 +735,7 @@ class MediaIngestService:
             ],
             deadline,
         )
-        return await asyncio.to_thread(compute_peaks, result.stdout)
+        return result.stdout
 
     def _remaining(self, deadline: float) -> float:
         remaining = deadline - asyncio.get_running_loop().time()
@@ -1054,6 +1092,11 @@ class MediaIngestService:
         samples = await asyncio.to_thread(_hash_frames_sync, files, timestamps)
         profile = "uniform-pts-keyframes-v1" if keyframes_only else "uniform-pts-v1"
         return samples, profile
+
+
+def _peak_levels(pcm: bytes) -> tuple[bytes, bytes]:
+    """Both peak levels from **one** decode; runs in a worker thread."""
+    return compute_peaks(pcm), compute_detail_peaks(pcm)
 
 
 def _read_header(path: Path, limit: int = 65_536) -> bytes:
