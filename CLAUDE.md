@@ -749,6 +749,7 @@ All exception handlers live in `src/api/app.py` and produce a unified `ErrorEnve
 | `http_exception_handler` — 4xx | `logger.warning` | Expected client errors, tracked for pattern analysis |
 | `http_exception_handler` — 5xx | `logger.error` with `exc_info=` | Server errors, needs investigation |
 | Billing / moderation / org handlers | `logger.warning` | Domain errors, expected in normal operation |
+| `nul_character_handler` | `logger.warning` | A client bug; path, method and location only |
 | `idempotency_conflict_handler` | `logger.info` | Normal race condition, not an error |
 | `global_exception_handler` | `logger.error` with `exc_info=` | Fully unhandled exception, always critical |
 
@@ -757,6 +758,13 @@ All exception handlers live in `src/api/app.py` and produce a unified `ErrorEnve
 `global_exception_handler` is registered as `Exception: global_exception_handler` (last in the `exception_handlers` dict — must stay last due to MRO resolution). It:
 - Returns a hardcoded `"An unexpected error occurred."` message — never leaks `str(exc)` to the client
 - Logs `exc_type`, `path`, `method`, and full traceback via `exc_info=exc`
+
+### U+0000 and SQL parameters
+
+PostgreSQL cannot store U+0000 (`text`, `varchar` or `jsonb`), and a failing statement's exception ends up in the error log.
+
+- **The API refuses U+0000 at the boundary:** `400 invalid_character` (`detail.location` = `body` | `query` | `path`), logged `http.invalid_character` with path, method and location only. One app-level `before_request`, `refuse_nul_characters` (`src/api/security/nul_characters.py`), covers every route; it runs after guards and before dependencies. A JSON body is checked on its raw bytes whenever Litestar would JSON-decode it (a handler's `data` argument is decoded **whatever the Content-Type**) or the Content-Type is JSON; multipart and other bodies are not scanned. **Never declare a `before_request` on a router, controller or handler:** Litestar runs only the innermost one, so it would switch the check off (a test pins every route, and pins the storage upload as the only form handler).
+- **Every engine sets `hide_parameters=True`** (`DatabaseManager`, `alembic/env.py`; a test finds every construction site), so no SQL parameter reaches an exception message or a log. It does **not** cover PostgreSQL's `DETAIL` on a constraint violation (`Failing row contains (...)`, `Key (...)=(...) already exists`), which the chained driver exception prints in a traceback: do not rely on it for those.
 
 ### Log event naming
 
@@ -768,6 +776,7 @@ Dot-separated, structured fields as kwargs — no f-strings:
 - `"organization.permission_denied"`, `"organization.balance_nonzero"` — org errors
 - `"idempotency.conflict"` — idempotency key collision
 - `"unhandled_exception"` — global catch-all
+- `"http.invalid_character"` — a request carried U+0000 (a client bug)
 
 ### Request body size limit
 

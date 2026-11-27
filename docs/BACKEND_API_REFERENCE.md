@@ -1,6 +1,11 @@
 # Backend API Reference — Apex REST API
 
-> _Last updated: 2026-11-24 — **Library `expiring` / `expiring_soon` and holds (semantics fix, no schema change).**
+> _Last updated: 2026-11-27 — **U+0000 is refused (`400 invalid_character`, all routes; §18).** A
+> request whose JSON body, query string or path parameters hold the NUL character is refused before
+> anything is read or written (it used to be a `500`). `POST /v1/feedback` and the admin feedback
+> `PATCH` now answer `invalid_character` for it too, not `validation_error` / `bad_request`._
+>
+> _Prior (2026-11-24): **Library `expiring` / `expiring_soon` and holds (semantics fix, no schema change).**
 > A held asset never expires while it is held, so the `expiring` filter and the `expiring_soon` sort
 > use the **effective expiry**: `9999-12-31T00:00:00Z` for a held asset, its stored `expires_at`
 > otherwise. `expiring=true` never lists a held asset (and `expiring=false` always does);
@@ -2294,7 +2299,7 @@ The in-product reporting function (vex Terms §11.1). The report text stays insi
 ```
 Request:  {
   category: "bug" | "generation" | "billing" | "account" | "content" | "other",
-  message: string,              // 10–4000 Unicode code points after trim; no NUL
+  message: string,              // 10–4000 Unicode code points after trim; no U+0000 (§18)
   job_id?: UUID | null,         // caller-owned, not soft-deleted
   asset_ref?: string | null,    // "upload:<uuid>" | "output:<uuid>", caller-owned
   client_path?: string | null,  // location.pathname only: starts with "/", ≤512, no ? # or control chars
@@ -2302,8 +2307,9 @@ Request:  {
 }
 Response: { id: UUID, status: "open", created_at: datetime }
 Status:   201 Created
-Errors:   400 validation_error (message too short or too long after trim / NUL,
+Errors:   400 validation_error (message too short or too long after trim,
               malformed asset_ref)
+          400 invalid_character (U+0000 in any field — client bug, §18)
           400 bad_request (framework schema violations incl. unknown fields — client bug)
           404 job_not_found | asset_not_found (missing OR not owned — identical body)
           413 (body > 64 KiB, per-handler bound; generic error "error" — client bug)
@@ -2587,7 +2593,7 @@ Errors:   404 feedback_not_found
 #### `PATCH /v1/admin/feedback/{report_id}`
 
 ```
-Request:  { status?: FeedbackStatus, admin_note?: string | null }   // ≤4000 chars, no NUL; null clears
+Request:  { status?: FeedbackStatus, admin_note?: string | null }   // ≤4000 chars, no U+0000 (§18); null clears
 Response: FeedbackReportAdmin
 Errors:   400 validation_error (empty body)
           404 feedback_not_found
@@ -3646,11 +3652,20 @@ interface ApiError {
 }
 ```
 
+**`400 invalid_character` can come from any route.** The API never accepts U+0000 (NUL): a JSON
+body that decodes to one (the escape `\u0000`), a query string with `%00`, or a path parameter
+holding one is refused before anything is read or written. `detail.location` is `body`, `query` or
+`path`; `message` is `"Text must not contain the NUL character (U+0000)."` and the value is never
+echoed. It is a client bug, not a user error: strip NUL from pasted or generated text before sending.
+A literal backslash followed by `u0000` is ordinary text. A route's guards (authentication, feature
+gates) answer first. Multipart upload bodies are not checked by this rule.
+
 The `error` code is always a stable snake_case string — treat it like an enum. Common values:
 
 | HTTP | `error` | `detail` keys |
 |------|---------|---------------|
 | 400 | `bad_request`, `email_exists`, `invalid_token`, `invalid_password`, `validation_error`, `empty_file`, `file_too_large`, `invalid_file_type`, `upload_failed`, `payment_verification_failed`, `model_disabled`, `generation_failed`, `provider_invalid_request`, `unknown_product` | — |
+| 400 | `invalid_character` | `location` |
 | 401 | `unauthorized`, `invalid_credentials`, `account_inactive`, `token_reuse_detected` | — |
 | 402 | `insufficient_balance` | `balance`, `required` |
 | 403 | `forbidden`, `account_inactive`, `permission_denied`, `model_not_allowed`, `age_verification_required` | — |

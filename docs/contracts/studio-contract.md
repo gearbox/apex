@@ -334,6 +334,7 @@ Every error is the unified envelope `{error, message, status_code, detail}`. `me
 | Status | `error` | When |
 |---|---|---|
 | 400 | `invalid_cursor` | malformed `cursor` |
+| 400 | `invalid_character` | U+0000 anywhere in a JSON body, query string or path (any route, not only studio); `detail: {location: "body" \| "query" \| "path"}`. The frontend should never send NUL: this is a client bug, not a user error |
 | 400 | `invalid_asset_ref` | `?holding=` is not an asset ref (`upload:<uuid>` / `output:<uuid>`), §14 |
 | 404 | `not_found` | missing, someone else's, or another product's resource (never distinguishable) |
 | 404 | `artist_not_found` | `artist_id` is not one of the caller's artists |
@@ -1303,7 +1304,7 @@ interface LineSpan {
   words?: WordSpan[];                   // 0..64; OMITTED when empty
 }
 interface WordSpan {
-  text: string;                         // 1..100 (NFC, re-checked after normalization), no U+0000 (400); display only
+  text: string;                         // 1..100 (NFC, re-checked after normalization), no U+0000 (400 invalid_character, §7); display only
   start_ms: number; end_ms: number;
   inferred?: boolean;                   // true = an aligner could not place this word and inferred its span; OMITTED when false
 }

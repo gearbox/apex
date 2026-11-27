@@ -61,7 +61,7 @@ Suggested category labels:
 | Field | Rule | On failure |
 |---|---|---|
 | `category` | One of the six values above. | `400` |
-| `message` | 10–4000 **Unicode code points after trimming**. The backend trims leading/trailing whitespace **before** it checks both bounds, so `"   hi   "` is rejected and a 4000-character message with a trailing newline or surrounding spaces is accepted. Count with `[...text.trim()].length`, not `text.length` (an emoji is 2 UTF-16 units but 1 code point; a `textarea` `maxLength` counts UTF-16 units). Must not contain NUL (`\u0000`). Every message-length and NUL violation returns `400 validation_error`. | `400 validation_error` |
+| `message` | 10–4000 **Unicode code points after trimming**. The backend trims leading/trailing whitespace **before** it checks both bounds, so `"   hi   "` is rejected and a 4000-character message with a trailing newline or surrounding spaces is accepted. Count with `[...text.trim()].length`, not `text.length` (an emoji is 2 UTF-16 units but 1 code point; a `textarea` `maxLength` counts UTF-16 units). Every message-length violation returns `400 validation_error`. Must not contain NUL (`\u0000`): see §3, `invalid_character`. | `400 validation_error` |
 | `job_id` | A UUID of a job the caller owns that is not deleted. | `404 job_not_found` |
 | `asset_ref` | `upload:<uuid>` or `output:<uuid>`, owned by the caller. Pass the `asset_ref` from the library item as-is. | malformed → `400 validation_error`; missing/not owned → `404 asset_not_found` |
 | `client_path` | Must start with `/`. At most 512 characters. No `?`, no `#`, no control characters. | `400` |
@@ -81,7 +81,8 @@ Every error uses the standard envelope: `{ error, message, status_code, detail? 
 
 | Status | `error` | When | UX |
 |---|---|---|---|
-| 400 | `validation_error` | Message too short or too long after trimming, NUL in message, malformed `asset_ref` | Show inline on the message field |
+| 400 | `validation_error` | Message too short or too long after trimming, malformed `asset_ref` | Show inline on the message field |
+| 400 | `invalid_character` | U+0000 in **any** field (checked for every API route, before field validation); `detail.location` | Treat as a client bug: strip NUL from the text before sending |
 | 400 | *(framework validation)* | Schema violation: bad category, bad `client_path`/`app_version`, unknown field | Treat as a client bug; log it |
 | 401 | — | Not signed in / token expired | Normal refresh-then-retry |
 | 404 | `job_not_found` / `asset_not_found` | See §2 | Offer to send without the attachment reference |
@@ -163,7 +164,7 @@ Returns `FeedbackReportAdmin`, or `404 feedback_not_found`.
 ```ts
 interface FeedbackAdminPatch {
   status?: FeedbackStatus;
-  admin_note?: string | null; // ≤ 4000 chars, no NUL; null clears the note
+  admin_note?: string | null; // ≤ 4000 chars, no NUL (400 invalid_character, §3); null clears the note
 }
 ```
 
