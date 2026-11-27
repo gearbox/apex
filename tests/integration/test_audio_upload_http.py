@@ -419,6 +419,7 @@ class TestEachContainer:
         assert row.height is None
         assert row.is_thumbnail is False
         assert row.parent_image_id is None
+        assert row.duration_ms is not None
         assert row.duration_ms == body["media"]["original"]["duration_ms"]
         assert row.expires_at > datetime.now(UTC)
         assert row.display_filename == "My Song.bin"

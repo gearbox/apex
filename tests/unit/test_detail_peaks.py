@@ -9,10 +9,11 @@ from __future__ import annotations
 import importlib.util
 import re
 from pathlib import Path
-from typing import TYPE_CHECKING, Any
+from typing import TYPE_CHECKING, Any, cast
 
 import numpy as np
 import pytest
+from sqlalchemy import CheckConstraint
 
 from src.api.services.library import (
     MAX_PEAKS_WINDOW_MS,
@@ -35,6 +36,8 @@ from src.db.models.library import LibraryAudioProfile
 from tests.audio_support import CONTAINERS, require_ffmpeg, run
 
 if TYPE_CHECKING:
+    from sqlalchemy import Table
+
     from tests.audio_support import AudioFixtures
 
 pytestmark = pytest.mark.unit
@@ -137,10 +140,12 @@ class TestTheNumbers:
         assert MAX_DETAIL_BUCKETS == 45_050
 
     def test_the_model_s_check_holds_the_same_bound(self) -> None:
+        # ``__table__`` is typed as ``FromClause``; a declarative model's is always a ``Table``.
+        table = cast("Table", LibraryAudioProfile.__table__)
         checks = {
-            constraint.name: str(constraint.sqltext)  # type: ignore[attr-defined]
-            for constraint in LibraryAudioProfile.__table__.constraints
-            if hasattr(constraint, "sqltext")
+            constraint.name: str(constraint.sqltext)
+            for constraint in table.constraints
+            if isinstance(constraint, CheckConstraint)
         }
 
         size = checks["ck_library_audio_profiles_detail_peaks_size"]
