@@ -7,7 +7,6 @@ are referred to by name and never written out on a line that raises.
 
 from __future__ import annotations
 
-import sys
 import traceback
 from typing import TYPE_CHECKING
 
@@ -34,11 +33,14 @@ IDENTIFIERS = (
 def _check_violation() -> asyncpg.exceptions.CheckViolationError:
     """What asyncpg raises, with the row in ``DETAIL`` as PostgreSQL reports it."""
     error = asyncpg.exceptions.CheckViolationError(f"new row violates a check constraint {MARKER}")
-    error.detail = f"Failing row contains (7, {MARKER}, null)."
-    error.hint = f"hint {MARKER}"
-    error.constraint_name = CONSTRAINT
-    error.table_name = "studio_artist_chat_messages"
-    error.schema_name = "public"
+    # Into __dict__, as asyncpg's PostgresError.new does: a type checker sees no such attributes.
+    vars(error).update(
+        detail=f"Failing row contains (7, {MARKER}, null).",
+        hint=f"hint {MARKER}",
+        constraint_name=CONSTRAINT,
+        table_name="studio_artist_chat_messages",
+        schema_name="public",
+    )
     return error
 
 
@@ -348,7 +350,9 @@ def _wide_group() -> None:
 def _deep_group() -> None:
     error: Exception = ValueError("bottom")
     for level in range(13):
-        error = ExceptionGroup(f"level {level}", [error])
+        # A list typed by itself: from [error] alone pyright infers an ever deeper group type.
+        members: list[Exception] = [error]
+        error = ExceptionGroup(f"level {level}", members)
     raise error
 
 
@@ -388,16 +392,11 @@ def test_without_a_database_error_the_output_is_the_stdlibs(
 
 def test_the_traceback_given_is_the_one_rendered_for_the_last_exception() -> None:
     """structlog hands over a triple; its traceback wins over the exception's own."""
-    try:
-        _plain()
-    except ValueError:
-        triple = sys.exc_info()
-    exc_type, exc, tb = triple
-    assert exc_type is not None
-    assert exc is not None
+    exc = _raised(_plain)
+    tb = exc.__traceback__
     exc.__traceback__ = None
 
-    assert "in _plain" in format_exception_safely((exc_type, exc, tb))
+    assert "in _plain" in format_exception_safely((type(exc), exc, tb))
 
 
 # ---------------------------------------------------------------------------

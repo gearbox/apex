@@ -67,7 +67,9 @@ def _artist(actor: Actor) -> UUID:
 
 def _adapter_streaming(chunks: list[str]) -> OpenAICompatibleLlmAdapter:
     """The real adapter over a transport that streams ``chunks`` and ends the reply."""
-    events = [{"choices": [{"delta": {"content": chunk}}]} for chunk in chunks]
+    events: list[dict[str, object]] = [
+        {"choices": [{"delta": {"content": chunk}}]} for chunk in chunks
+    ]
     events.append({"choices": [{"delta": {}, "finish_reason": "stop"}]})
     body = "".join(f"data: {json.dumps(event)}\n\n" for event in events) + "data: [DONE]\n\n"
     return OpenAICompatibleLlmAdapter(

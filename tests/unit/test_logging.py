@@ -7,7 +7,7 @@ import importlib
 import json
 import logging
 from pathlib import Path
-from typing import TYPE_CHECKING
+from typing import TYPE_CHECKING, Literal
 from unittest.mock import patch
 
 import asyncpg
@@ -135,8 +135,10 @@ _ROW_TEXT = "SECRET-LYRIC-ROW"
 
 def _database_failure() -> None:
     driver_error = asyncpg.exceptions.NotNullViolationError("null value in column")
-    driver_error.detail = f"Failing row contains (9, {_ROW_TEXT}, null)."
-    driver_error.column_name = "name"
+    # Into __dict__, as asyncpg's PostgresError.new does: a type checker sees no such attributes.
+    vars(driver_error).update(
+        detail=f"Failing row contains (9, {_ROW_TEXT}, null).", column_name="name"
+    )
     try:
         raise driver_error
     except asyncpg.exceptions.NotNullViolationError as raised:
@@ -174,7 +176,7 @@ _LOG_SITES = [
 ]
 
 
-def _settings(log_format: str) -> Settings:
+def _settings(log_format: Literal["json", "console"]) -> Settings:
     return Settings(
         comfyui_host="127.0.0.1",
         comfyui_port=_DEFAULT_COMFYUI_PORT,
