@@ -217,6 +217,53 @@ class TestTracebacksCarryNoDatabaseValues:
         assert "DETAIL" not in output
 
 
+# ---------------------------------------------------------------------------
+# R3: no frame locals in console tracebacks
+# ---------------------------------------------------------------------------
+
+_LOCAL_VALUE = "SECRET-LOCAL-LYRIC"
+
+
+def _raise_holding(value: str) -> None:
+    """The value is a local of the raising frame, and on none of the lines a traceback quotes."""
+    lyrics = value
+    raise RuntimeError(f"render failed after {len(lyrics)} characters")
+
+
+@pytest.mark.usefixtures("_reset_structlog")
+class TestConsoleTracebacksShowNoLocals:
+    """``LOG_FORMAT=console`` is the dev setup, and dev logs get pasted into issues and chats."""
+
+    @pytest.mark.parametrize("source", ["structlog", "stdlib"])
+    def test_a_local_of_the_raising_frame_is_not_printed(
+        self, source: str, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        configure_logging(_settings("console"))
+        name = f"test.locals.{source}"
+        logger = structlog.get_logger(name) if source == "structlog" else logging.getLogger(name)
+
+        try:
+            _raise_holding(_LOCAL_VALUE)
+        except RuntimeError:
+            logger.exception("render.failed")
+
+        output = capsys.readouterr().out
+        assert _LOCAL_VALUE not in output
+        assert "in _raise_holding" in output
+        assert "RuntimeError: render failed after 18 characters" in output
+
+    def test_structlogs_default_console_renderer_does_print_it(self) -> None:
+        """The control: the same failure through ``ConsoleRenderer()``'s own traceback."""
+        with pytest.raises(RuntimeError) as raised:
+            _raise_holding(_LOCAL_VALUE)
+
+        rendered = structlog.dev.ConsoleRenderer(colors=False)(
+            None, "error", {"event": "render.failed", "exc_info": raised.value}
+        )
+
+        assert _LOCAL_VALUE in rendered
+
+
 class TestNothingElseRendersTracebacks:
     """``configure_logging`` is only the one renderer while nothing sets up another."""
 
