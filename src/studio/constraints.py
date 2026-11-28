@@ -1,15 +1,21 @@
-"""Re-check of declared length limits after normalization (RD6).
+"""Re-check of every studio string after normalization (RD6).
 
 msgspec enforces ``max_length`` on the **raw** request. Normalization (NFC) can then *expand* a
 value: composition exclusions such as U+0958 decompose to two code points and U+FB2C to three, and
 never recompose. A value that was within its limit on the wire can therefore leave normalization
 past it — and be stored (unreadable versions, silently truncated array columns, 500s).
 
-:func:`collect_length_issues` closes that gap with **one generic walker** over
+:func:`collect_text_issues` closes that gap with **one generic walker** over
 ``msgspec.inspect.type_info``: the limits already declared on the wire Structs are the *only*
 source, so they cannot drift from a second copy. Every violating value yields one
 :class:`DocumentIssue` (``too_long_after_normalization``) at its wire path, collected together
 with the other validation issues (P1-6). Lengths are counted in code points, like msgspec does.
+
+The same pass refuses U+0000 (``invalid_character``) in **every** string, with or without a
+declared limit: PostgreSQL stores it in neither ``text`` nor ``jsonb``. The API already refuses a
+request that carries one (``src/api/security/nul_characters.py``); this covers the text the
+**server** builds, which never was a request: model output (planner runs, memory drafts) and
+aligner output.
 """
 
 from __future__ import annotations
@@ -40,6 +46,7 @@ __all__ = [
     "CHAT_WINDOW_MESSAGES",
     "DISCOGRAPHY_BUDGET",
     "DISCOGRAPHY_TITLES_MAX",
+    "INVALID_CHARACTER",
     "MAX_ACTIVE_MEMORIES_PER_ARTIST",
     "MAX_AUDIO_VERSIONS_PER_TRACK",
     "MAX_CAST_LOOKS",
@@ -59,12 +66,15 @@ __all__ = [
     "TOO_LONG",
     "TOO_MANY",
     "collect_count_issues",
-    "collect_length_issues",
     "collect_range_issues",
+    "collect_text_issues",
 ]
 
 TOO_LONG: Final = "too_long_after_normalization"
 """Issue code: a value is within its wire limit as sent, but past it once normalized."""
+
+INVALID_CHARACTER: Final = "invalid_character"
+"""Issue code: a string holds U+0000, which PostgreSQL cannot store."""
 
 TOO_MANY: Final = "too_many_items"
 """Issue code: a list or tuple holds more items than its declared ``max_length``."""
@@ -139,7 +149,7 @@ CAST_APPEARANCE_MAX: Final = 320
 CAST_DESCRIPTION_MAX: Final = 2_000
 """Characters in a cast member's free-form description."""
 
-type _Check = Literal["length", "count", "range"]
+type _Check = Literal["text", "count", "range"]
 
 
 @functools.cache
@@ -150,20 +160,21 @@ def _struct_type(cls: type[msgspec.Struct]) -> mi.StructType:
     return info
 
 
-def collect_length_issues(
-    value: msgspec.Struct, issues: list[DocumentIssue], path: str = ""
-) -> None:
-    """Re-check every ``max_length`` declared on ``type(value)`` against the (normalized) values.
+def collect_text_issues(value: msgspec.Struct, issues: list[DocumentIssue], path: str = "") -> None:
+    """Check every string of the (normalized) values: no U+0000, and within the ``max_length``
+    that ``type(value)`` declares for it.
 
     Args:
         value: A Struct holding *normalized* values. It is usually built with
             ``msgspec.structs.replace`` or a plain constructor, neither of which validates —
             which is the point: this is the validation they skipped.
-        issues: Receives one ``DocumentIssue(path, TOO_LONG)`` per violating value, in field
-            order. Nothing is raised, so the caller can report them with all other issues.
+        issues: Receives, in field order, one ``DocumentIssue(path, INVALID_CHARACTER)`` per
+            string holding U+0000 and one ``DocumentIssue(path, TOO_LONG)`` per value past its
+            limit (a value can be both). Paths never carry text. Nothing is raised, so the caller
+            can report them with all other issues.
         path: Prefix of every reported path (the wire path of ``value``; ``""`` for the root).
     """
-    _walk(value, _struct_type(type(value)), path, issues, check="length")
+    _walk(value, _struct_type(type(value)), path, issues, check="text")
 
 
 def collect_count_issues(
@@ -220,9 +231,12 @@ def _walk(
                     issues,
                     check=check,
                 )
-        case mi.StrType(max_length=limit) if limit is not None:
-            if check == "length" and isinstance(value, str) and len(value) > limit:
-                issues.append(DocumentIssue(path, TOO_LONG))
+        case mi.StrType(max_length=limit):
+            if check == "text" and isinstance(value, str):
+                if "\x00" in value:
+                    issues.append(DocumentIssue(path, INVALID_CHARACTER))
+                if limit is not None and len(value) > limit:
+                    issues.append(DocumentIssue(path, TOO_LONG))
         case mi.IntType(ge=ge, le=le, gt=gt, lt=lt):
             if check == "range" and isinstance(value, int) and not isinstance(value, bool):
                 below = (ge is not None and value < ge) or (gt is not None and value <= gt)

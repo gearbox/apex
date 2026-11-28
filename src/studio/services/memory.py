@@ -26,7 +26,7 @@ from src.api.schemas.pagination import CursorPage, decode_memory_cursor, encode_
 from src.core.enums import StudioMemoryDraftStatus, StudioMemoryOrigin, StudioMemoryStatus
 from src.db.repositories.studio import StudioArtistMemoryRepository, StudioArtistRepository
 from src.db.repositories.studio_chat import StudioChatRepository, StudioMemoryDraftRepository
-from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST, collect_length_issues
+from src.studio.constraints import MAX_ACTIVE_MEMORIES_PER_ARTIST, collect_text_issues
 from src.studio.errors import (
     ArtistNotFound,
     DocumentIssue,
@@ -166,7 +166,7 @@ class MemoryService:
         themes = normalize_tokens(data.themes, "themes", issues, check_reserved=True)
         imagery = normalize_tokens(data.imagery, "imagery", issues, check_reserved=True)
         # RD6: NFC can expand a value past the limit the wire already checked.
-        collect_length_issues(
+        collect_text_issues(
             msgspec.structs.replace(
                 data, title=title, body=body, themes=list(themes), imagery=list(imagery)
             ),
@@ -280,7 +280,7 @@ class MemoryService:
 
         # RD6: only what the client sent is re-checked; stored values were checked when written.
         sent = {k: v for k, v in changes.items() if k in {"title", "body", "themes", "imagery"}}
-        collect_length_issues(msgspec.structs.replace(data, **sent), issues)
+        collect_text_issues(msgspec.structs.replace(data, **sent), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 

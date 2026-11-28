@@ -121,7 +121,13 @@ class StructuredLlmPort(Protocol):
 
 @dataclass(frozen=True, slots=True)
 class TextDelta:
-    """A piece of a reply that is being written. User-visible content: never logged."""
+    """A piece of a reply that is being written. User-visible content: never logged.
+
+    Never empty, and never holds U+0000: the adapter removes it. It is not content, and a reply
+    carrying one could not be stored (PostgreSQL has no such character). Structured replies
+    (:meth:`StructuredLlmPort.complete`) are returned as the model wrote them, for the caller's
+    validation to refuse.
+    """
 
     text: str
 

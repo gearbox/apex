@@ -250,7 +250,10 @@ async def db_engine(test_database_url: str) -> AsyncGenerator[AsyncEngine]:
     """Create async engine; run Alembic migrations once; yield; dispose."""
     _run_migrations(test_database_url)
 
-    engine = create_async_engine(test_database_url, echo=False, poolclass=NullPool)
+    # hide_parameters like production (DatabaseManager), so the suite runs what ships.
+    engine = create_async_engine(
+        test_database_url, echo=False, poolclass=NullPool, hide_parameters=True
+    )
     yield engine
     await engine.dispose()
 

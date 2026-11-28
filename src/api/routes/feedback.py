@@ -45,7 +45,8 @@ _ERROR_RESPONSES = {
     HTTP_400_BAD_REQUEST: ResponseSpec(
         data_container=ErrorEnvelope,
         description=(
-            "Invalid message (too short or too long after trimming, or NUL) or malformed asset_ref."
+            "Invalid message (too short or too long after trimming) or malformed asset_ref; "
+            "invalid_character when the request holds U+0000."
         ),
     ),
     HTTP_404_NOT_FOUND: ResponseSpec(

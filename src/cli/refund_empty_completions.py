@@ -46,6 +46,7 @@ from src.api.services.billing_errors import RefundNotEligibleError, RefundNotEli
 from src.api.services.event_bus import EventBus
 from src.api.services.generation.aisha_failures import AishaFailure
 from src.core.config import Settings
+from src.core.logging import configure_logging
 from src.db.repositories.job import EmptyCompletion, JobRepository
 from src.db.session import DatabaseManager
 
@@ -321,6 +322,9 @@ async def _run_impl(
     apply: bool,
 ) -> None:
     settings = Settings()
+    # A failed job is logged with its traceback. Unconfigured structlog would print that with
+    # every frame's locals and the database's own text.
+    configure_logging(settings)
 
     event_bus: EventBus | None = None
     if apply and settings.redis_url:

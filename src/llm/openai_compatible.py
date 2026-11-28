@@ -230,6 +230,9 @@ class OpenAICompatibleLlmAdapter:
     def _read_chunk(self, payload: str, state: _StreamState) -> str:
         """Fold one ``data:`` payload into ``state``; returns the text delta it carried (or ``""``).
 
+        U+0000 is removed from the text (see :class:`TextDelta`), so a chunk of nothing else
+        returns ``""`` and does not count as text delivered.
+
         Raises:
             LlmOutputInvalid: The payload is not a JSON object. No text, no chaining: the payload
                 is reply content.
@@ -262,7 +265,7 @@ class OpenAICompatibleLlmAdapter:
             state.finish_reason = finish
         delta = choice.get("delta")
         content = delta.get("content") if isinstance(delta, dict) else None
-        return content if isinstance(content, str) else ""
+        return content.replace("\x00", "") if isinstance(content, str) else ""
 
     def _log_stream(
         self,

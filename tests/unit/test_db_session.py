@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import ast
+from pathlib import Path
 from typing import TYPE_CHECKING
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -46,6 +48,45 @@ class TestDatabaseManagerProperties:
             mgr = DatabaseManager("postgresql+asyncpg://test:test@localhost/test")
 
         assert mgr.session_factory is mock_factory
+
+
+class TestSqlParametersAreHidden:
+    def test_the_engine_hides_sql_parameters(self) -> None:
+        """Nothing connects: the engine is only built."""
+        mgr = DatabaseManager("postgresql+asyncpg://test:test@localhost/test")
+
+        assert mgr.engine.sync_engine.hide_parameters is True
+
+    def test_echo_does_not_turn_hiding_off(self) -> None:
+        mgr = DatabaseManager("postgresql+asyncpg://test:test@localhost/test", echo=True)
+
+        assert mgr.engine.sync_engine.hide_parameters is True
+
+    def test_every_engine_construction_site_hides_parameters(self) -> None:
+        """``src`` and ``alembic``: a new engine (or an edit of an old one) cannot forget it."""
+        factories = {
+            "create_engine",
+            "create_async_engine",
+            "engine_from_config",
+            "async_engine_from_config",
+        }
+        root = Path(__file__).resolve().parents[2]
+        sites: dict[str, bool] = {}
+        for source in (*(root / "src").rglob("*.py"), *(root / "alembic").rglob("*.py")):
+            for node in ast.walk(ast.parse(source.read_text())):
+                if not isinstance(node, ast.Call):
+                    continue
+                name = getattr(node.func, "id", getattr(node.func, "attr", None))
+                if name in factories:
+                    sites[f"{source.relative_to(root)}:{node.lineno}"] = any(
+                        keyword.arg == "hide_parameters"
+                        and isinstance(keyword.value, ast.Constant)
+                        and keyword.value.value is True
+                        for keyword in node.keywords
+                    )
+
+        assert {site.split(":")[0] for site in sites} == {"src/db/session.py", "alembic/env.py"}
+        assert all(sites.values()), sites
 
 
 class TestHealthCheck:

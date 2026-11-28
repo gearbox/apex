@@ -24,7 +24,7 @@ from uuid import UUID  # noqa: TC003 — runtime: used in type hints evaluated b
 import msgspec
 
 from src.core.enums import StudioDocumentKind, StudioSectionKind
-from src.studio.constraints import collect_count_issues, collect_length_issues, collect_range_issues
+from src.studio.constraints import collect_count_issues, collect_range_issues, collect_text_issues
 from src.studio.documents import (
     LyricLine,
     LyricsDocument,
@@ -288,7 +288,7 @@ def normalize_plan(plan: PlanDocument) -> PlanDocument:
         references=references,
         sections=tuple(sections),
     )
-    collect_length_issues(normalized, issues)
+    collect_text_issues(normalized, issues)
     _check_document_size(normalized, issues)
     if issues:
         raise StudioDocumentInvalid(tuple(issues))
@@ -375,7 +375,7 @@ def normalize_lyrics(lyrics: LyricsDocument, plan: PlanDocument) -> LyricsDocume
     normalized = LyricsDocument(
         language=lyrics.language, line_syllables=lyrics.line_syllables, sections=tuple(sections)
     )
-    collect_length_issues(normalized, issues)
+    collect_text_issues(normalized, issues)
     issues.extend(check_pair_compatible(plan, normalized))
     _check_document_size(normalized, issues)
     if issues:

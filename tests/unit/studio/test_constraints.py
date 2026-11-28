@@ -1,6 +1,6 @@
 """The post-normalization length walker (RD6, invariant 31).
 
-``collect_length_issues`` must visit every ``max_length`` that the wire Structs declare, report
+``collect_text_issues`` must visit every ``max_length`` that the wire Structs declare, report
 one issue per violating value at the wire path, and nothing else.
 """
 
@@ -21,7 +21,7 @@ from src.api.schemas.studio import (
     TrackCreate,
     TrackPatch,
 )
-from src.studio.constraints import TOO_LONG, TOO_MANY, collect_count_issues, collect_length_issues
+from src.studio.constraints import TOO_LONG, TOO_MANY, collect_count_issues, collect_text_issues
 from src.studio.documents import LyricsDocument, PlanDocument
 from src.studio.errors import DocumentIssue
 
@@ -57,7 +57,7 @@ class _Patch(Struct, kw_only=True):
 
 def _issues(value: msgspec.Struct) -> list[DocumentIssue]:
     issues: list[DocumentIssue] = []
-    collect_length_issues(value, issues)
+    collect_text_issues(value, issues)
     return issues
 
 
@@ -124,12 +124,12 @@ class TestWalkerShapes:
 
     def test_a_path_prefix_is_prepended(self) -> None:
         issues: list[DocumentIssue] = []
-        collect_length_issues(_Shape(name="abcdef", words=["abc"]), issues, "content")
+        collect_text_issues(_Shape(name="abcdef", words=["abc"]), issues, "content")
         assert issues == _at("content.name", "content.words[0]")
 
     def test_appends_to_existing_issues(self) -> None:
         issues = [DocumentIssue("other", "duplicate_tag")]
-        collect_length_issues(_Shape(name="abcdef"), issues)
+        collect_text_issues(_Shape(name="abcdef"), issues)
         assert issues == [DocumentIssue("other", "duplicate_tag"), *_at("name")]
 
 

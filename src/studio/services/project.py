@@ -15,7 +15,7 @@ from src.db.repositories.studio import (
     StudioProjectRepository,
     StudioTrackRepository,
 )
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.errors import (
     ArtistNotFound,
     DocumentIssue,
@@ -65,7 +65,7 @@ class StudioProjectService:
         concept = normalize_block(data.concept)
         issues: list[DocumentIssue] = []
         # NFC can expand the concept past the limit the wire already checked.
-        collect_length_issues(msgspec.structs.replace(data, concept=concept), issues)
+        collect_text_issues(msgspec.structs.replace(data, concept=concept), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
         project = await self._library_projects.get(

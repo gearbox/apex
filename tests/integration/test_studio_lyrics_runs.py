@@ -563,6 +563,32 @@ class TestOutcomes:
         )
         assert "oh [no] no" not in str(run.error_detail)
 
+    async def test_lyrics_with_a_nul_fail_as_lyrics_invalid_and_refund(
+        self, run_world: RunWorld
+    ) -> None:
+        """N3: PostgreSQL would refuse the INSERT; the walker refuses the reply first."""
+        actor = await run_world.add_actor()
+        track_id, _ = await _track(run_world, actor)
+        write = await run_world.submit(actor, track_id, request=LyricsRunRequest(language="en"))
+        stubborn = make_lyrics_draft(
+            section_lines("s1", FOUR),
+            section_lines("s2", FOUR, "SECRET-LINE\x00tail"),
+            section_lines("s4", FOUR),
+        )
+        keep = make_lyrics_patch(make_line_patch("s2", 2, "still\x00here"))
+        await run_world.drive(FakeLlm(stubborn, keep, keep, keep))
+
+        run = await run_world.run(write.run.id)
+        assert (run.status, run.error_code) == ("failed", "lyrics_invalid")
+        assert run.error_detail == {
+            "issues": [{"path": "sections[1].lines[1].text", "code": "invalid_character"}]
+        }
+        assert [v for v in await run_world.versions(track_id) if v.kind == "lyrics"] == []
+        assert (await run_world.balance(actor), await run_world.refunds_and_debits(actor)) == (
+            10,
+            (1, 1),
+        )
+
     async def test_soft_misses_after_the_cap_succeed_with_warnings_into_the_result(
         self, run_world: RunWorld
     ) -> None:

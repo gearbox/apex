@@ -389,11 +389,13 @@ class TestErrorsOverHttp:
 
         assert response.status_code == 400, response.text
 
-    async def test_a_nul_in_a_word_is_400_never_a_500_that_logs_the_words(
+    async def test_a_nul_in_a_word_is_a_422_never_a_500_that_logs_the_words(
         self, client: AsyncTestClient[Litestar], song: Song
     ) -> None:
-        """PostgreSQL cannot store U+0000. Refused on the wire, so the statement (with every
-        word in it) never reaches the database or the error log."""
+        """PostgreSQL cannot store U+0000. The real app refuses the request at its boundary
+        (``400 invalid_character``, ``test_nul_characters_http.py``). This app has no such hook,
+        so this is the second line: the studio's walker, which also covers an aligner's output.
+        Either way the statement (with every word in it) never reaches the database or a log."""
         content = to_json(song.complete())
         content["lines"][0]["words"][0]["text"] = f"{MARK}\x00"
 
@@ -404,7 +406,11 @@ class TestErrorsOverHttp:
                 json={"content": content},
             )
 
-        assert response.status_code == 400, response.text
+        assert response.status_code == 422, response.text
+        assert response.json()["detail"]["issues"] == [
+            {"path": "lines[0].words[0].text", "code": "invalid_character"}
+        ]
+        assert MARK not in response.text
         assert not [log for log in logs if MARK in repr(log)]
 
     @pytest.mark.parametrize("body", [{}, {"timeline_id": "x"}, {"timeline_id": None, "y": 1}])

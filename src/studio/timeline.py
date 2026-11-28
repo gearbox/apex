@@ -36,7 +36,7 @@ import msgspec
 from msgspec import Meta, Struct
 
 from src.core.media_limits import AUDIO_MAX_MS
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.errors import DocumentIssue, StudioDocumentSchemaError
 from src.studio.validation import MAX_DOCUMENT_BYTES
 
@@ -102,9 +102,7 @@ class WordSpan(Struct, frozen=True, kw_only=True, forbid_unknown_fields=True, om
     """When one word of a line is sung. ``text`` is display data: it is not compared with the
     line's text (an aligner tokenizes its own way)."""
 
-    # No NUL: PostgreSQL JSONB cannot store U+0000, and the resulting 500 would put the whole
-    # statement - every word of the timeline - into the error log.
-    text: Annotated[str, Meta(min_length=1, max_length=100, pattern=r"\A[^\x00]*\Z")]
+    text: Annotated[str, Meta(min_length=1, max_length=100)]
     start_ms: Ms
     end_ms: Ms
     inferred: bool = False
@@ -169,12 +167,13 @@ def check_timeline_limits(document: TimelineDocument) -> list[DocumentIssue]:
         document: The result of :func:`normalize_timeline`.
 
     Returns:
-        ``too_long_after_normalization`` at each value past its declared length (RD6), and one
-        ``document_too_large`` (path ``""``) when the compact JSON exceeds
+        ``invalid_character`` at each word text holding U+0000 (an aligner's output never passed
+        the API's own check), ``too_long_after_normalization`` at each value past its declared
+        length (RD6), and one ``document_too_large`` (path ``""``) when the compact JSON exceeds
         :data:`~src.studio.validation.MAX_DOCUMENT_BYTES`.
     """
     issues: list[DocumentIssue] = []
-    collect_length_issues(document, issues)
+    collect_text_issues(document, issues)
     if len(msgspec.json.encode(document)) > MAX_DOCUMENT_BYTES:
         issues.append(DocumentIssue("", "document_too_large"))
     return issues

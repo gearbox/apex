@@ -23,7 +23,7 @@ look → (assets, inside the hold service).** Nothing takes them the other way r
   ``studio.cast_reference`` hold has exactly one reference.
 
 Validation follows RD6: text is NFC-normalized, trimmed and (for names and labels) whitespace-
-collapsed, then every length is re-checked **after** normalization by ``collect_length_issues``
+collapsed, then every length is re-checked **after** normalization by ``collect_text_issues``
 against the limits declared on the wire Structs - the only source of the limits, so there are no
 copies here. Logs carry ids and counts only: never names, labels, descriptions or appearance.
 """
@@ -73,7 +73,7 @@ from src.studio.constraints import (
     MAX_CAST_LOOKS,
     MAX_CAST_MEMBERS_PER_OWNER,
     MAX_CAST_REFERENCES,
-    collect_length_issues,
+    collect_text_issues,
 )
 from src.studio.errors import (
     AssetNotEligible,
@@ -239,7 +239,7 @@ class CastService:
             asset = self._asset(reference.asset, f"references[{index}].asset", issues)
             references.append((label, asset))
         # RD6: NFC can expand a value past the limit the wire already checked.
-        collect_length_issues(
+        collect_text_issues(
             msgspec.structs.replace(
                 data,
                 name=name,
@@ -303,7 +303,7 @@ class CastService:
         if data.appearance is not msgspec.UNSET:
             changes["appearance"] = normalize_block(data.appearance)
         # RD6: only the fields the client sent are re-checked; stored values were checked on write.
-        collect_length_issues(msgspec.structs.replace(data, **changes), issues)
+        collect_text_issues(msgspec.structs.replace(data, **changes), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 
@@ -390,7 +390,7 @@ class CastService:
         issues: list[DocumentIssue] = []
         label = self._text(data.label, "label", issues)
         asset = self._asset(data.asset, "asset", issues)
-        collect_length_issues(msgspec.structs.replace(data, label=label), issues)
+        collect_text_issues(msgspec.structs.replace(data, label=label), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 
@@ -438,7 +438,7 @@ class CastService:
             changes["label"] = self._text(data.label, "label", issues)
         if data.asset is not msgspec.UNSET:
             asset = self._asset(data.asset, "asset", issues)
-        collect_length_issues(msgspec.structs.replace(data, **changes), issues)
+        collect_text_issues(msgspec.structs.replace(data, **changes), issues)
         if issues:
             raise StudioDocumentInvalid(tuple(issues))
 
@@ -535,7 +535,7 @@ class CastService:
         """Create a look: a named set of at least one of the member's references."""
         issues: list[DocumentIssue] = []
         name = self._text(data.name, "name", issues)
-        collect_length_issues(msgspec.structs.replace(data, name=name), issues)
+        collect_text_issues(msgspec.structs.replace(data, name=name), issues)
         self._shape_issues(data.reference_ids, issues)
 
         await self._lock_member(member_id, user_id, product_id)
@@ -578,7 +578,7 @@ class CastService:
         changes: dict[str, object] = {}
         if data.name is not msgspec.UNSET:
             changes["name"] = self._text(data.name, "name", issues)
-        collect_length_issues(msgspec.structs.replace(data, **changes), issues)
+        collect_text_issues(msgspec.structs.replace(data, **changes), issues)
         reference_ids = None if data.reference_ids is msgspec.UNSET else list(data.reference_ids)
         if reference_ids is not None:
             self._shape_issues(reference_ids, issues)

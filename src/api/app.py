@@ -73,6 +73,7 @@ from src.api.routes.studio_tracks import StudioTrackController
 from src.api.routes.unified_generation import UnifiedGenerationController
 from src.api.routes.user import UserController
 from src.api.schemas.errors import ErrorEnvelope
+from src.api.security.nul_characters import NulCharacterError, refuse_nul_characters
 from src.api.services.billing_errors import (
     AccountInactiveError,
     AccountNotFoundError,
@@ -445,6 +446,21 @@ def legal_account_inactive_handler(
     return _error("account_inactive", str(exc), HTTP_401_UNAUTHORIZED)
 
 
+def nul_character_handler(
+    request: Request[Any, Any, Any],
+    exc: NulCharacterError,
+) -> Response[Any]:
+    # Not _log_handler_event: path, method and location are the whole of this event. Neither it
+    # nor the response may carry the refused value or any other part of the request.
+    logger.warning(
+        "http.invalid_character",
+        path=request.url.path,
+        method=request.method,
+        location=exc.location,
+    )
+    return _error("invalid_character", str(exc), HTTP_400_BAD_REQUEST, {"location": exc.location})
+
+
 def idempotency_conflict_handler(
     request: Request[Any, Any, Any],
     exc: IdempotencyConflictError,
@@ -648,6 +664,7 @@ def create_app() -> Litestar:
         ],
         exception_handlers={
             HTTPException: http_exception_handler,
+            NulCharacterError: nul_character_handler,
             InsufficientBalanceError: insufficient_balance_handler,
             AccountNotFoundError: account_not_found_handler,
             AccountInactiveError: account_inactive_handler,
@@ -676,6 +693,14 @@ def create_app() -> Litestar:
             Exception: global_exception_handler,
         },
         dependencies=dependencies,
+        # Every route: no U+0000 in a path, a query or a JSON body (400 invalid_character). A
+        # before_request on a router, controller or handler would replace this one, so none may
+        # be declared.
+        before_request=refuse_nul_characters,
+        # None, not Litestar's default LoggingConfig: that one replaces the root handler and gives
+        # the "litestar" logger a plain stdlib handler of its own, which in debug mode prints each
+        # traceback with its database values. configure_logging is the only logging setup.
+        logging_config=None,
         lifespan=[lifespan],
         middleware=[
             ProductMiddleware,

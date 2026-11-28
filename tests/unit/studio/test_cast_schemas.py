@@ -28,7 +28,7 @@ from src.api.schemas.studio import (
 )
 from src.api.services.library_holds import AssetHeldError, HolderCount
 from src.studio import constraints
-from src.studio.constraints import collect_length_issues
+from src.studio.constraints import collect_text_issues
 from src.studio.errors import (
     AssetNotEligible,
     AssetNotFound,
@@ -205,7 +205,7 @@ class TestNormalizationExpandsPastTheWireLimit:
         )
         issues: list[DocumentIssue] = []
 
-        collect_length_issues(normalized, issues)
+        collect_text_issues(normalized, issues)
 
         assert [(i.path, i.code) for i in issues] == [(path, "too_long_after_normalization")]
 

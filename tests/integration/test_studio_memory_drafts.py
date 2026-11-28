@@ -184,6 +184,19 @@ class TestAskingForADraft:
         assert await chat_world.refunds_and_debits(actor) == (2, 1)
         assert (draft.prompt_tokens, draft.completion_tokens) == (200, 100)
 
+    async def test_a_draft_with_a_nul_is_an_invalid_draft_and_refunds(
+        self, chat_world: ChatWorld, actor: Actor
+    ) -> None:
+        """N3: PostgreSQL would refuse to store it; the draft check refuses it first."""
+        _, artist = await _message(chat_world, actor)
+        chat_world.draft_llm = FakeLlm(good(body="SECRET\x00BODY"), good(themes=["a\x00b"]))
+        draft = await chat_world.draft_of(actor, artist.id)
+
+        assert (draft.status, draft.error_code) == ("failed", "memory_draft_invalid")
+        assert draft.draft is None
+        assert chat_world.draft_llm.call_count == 2
+        assert await chat_world.refunds_and_debits(actor) == (2, 1)
+
     async def test_an_undecodable_reply_is_asked_for_again_once(
         self, chat_world: ChatWorld, actor: Actor
     ) -> None:
