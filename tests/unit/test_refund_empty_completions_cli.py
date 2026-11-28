@@ -245,11 +245,13 @@ class _Harness:
         self.print_report = MagicMock()
         self.init_pool = MagicMock()
         self.close_pool = AsyncMock()
-        self._redis_url = redis_url
+        self.configure_logging = MagicMock()
+        self.settings = _settings(redis_url=redis_url)
 
     def patches(self) -> list[object]:
         return [
-            patch.object(cli, "Settings", return_value=_settings(redis_url=self._redis_url)),
+            patch.object(cli, "Settings", return_value=self.settings),
+            patch.object(cli, "configure_logging", new=self.configure_logging),
             patch.object(cli, "DatabaseManager", return_value=self.db),
             patch.object(cli, "run_refund", new=self.run_refund),
             patch.object(cli, "_print_report", new=self.print_report),
@@ -268,6 +270,20 @@ async def _run_impl(harness: _Harness, *, apply: bool) -> None:
 
 
 class TestRunImpl:
+    async def test_logging_is_configured_before_any_job_can_be_logged(self) -> None:
+        """Without it a failed job's traceback prints frame locals and database text."""
+        harness = _Harness(redis_url=None)
+
+        async def run_refund(*_: object, **__: object) -> object:
+            harness.configure_logging.assert_called_once_with(harness.settings)
+            return harness.report
+
+        harness.run_refund.side_effect = run_refund
+
+        await _run_impl(harness, apply=True)
+
+        harness.run_refund.assert_awaited_once()
+
     async def test_dry_run_never_touches_redis(self) -> None:
         harness = _Harness(redis_url="redis://localhost:6379")
 

@@ -697,6 +697,10 @@ def create_app() -> Litestar:
         # before_request on a router, controller or handler would replace this one, so none may
         # be declared.
         before_request=refuse_nul_characters,
+        # None, not Litestar's default LoggingConfig: that one replaces the root handler and gives
+        # the "litestar" logger a plain stdlib handler of its own, which in debug mode prints each
+        # traceback with its database values. configure_logging is the only logging setup.
+        logging_config=None,
         lifespan=[lifespan],
         middleware=[
             ProductMiddleware,

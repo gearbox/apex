@@ -182,6 +182,8 @@ The backend serves two distinct products from the same codebase:
 │   │   ├── product_registry.py # VEX_CONFIG, SYNTHARA_CONFIG, resolve_product_by_domain()
 │   │   ├── library_ref.py      # AssetRef, LibraryAssetSource, parse_asset_ref()/format_asset_ref() —
 │   │   │                       #   pure typed identity for "upload:<uuid>" / "output:<uuid>"
+│   │   ├── logging.py          # configure_logging — the ONE logging setup (JSON / console)
+│   │   ├── exception_format.py # format_exception_safely — the ONE traceback renderer: no database text, no frame locals
 │   │   ├── library_limits.py   # MAX_TAGS_PER_ASSET (shared bound) + PINNED_EXPIRY (a held asset's effective expiry)
 │   │   ├── media_limits.py     # AUDIO_MAX_SECONDS / AUDIO_MAX_MS: the one audio duration cap, shared by media ingest and the studio's timeline bounds
 │   │   ├── llm_models.py       # LlmModelEntry (LLM_MODELS entry), parse_model_entries / validate_model_entries / validate_model_keys — no env, no I/O, no consumer names
@@ -742,6 +744,8 @@ Per-product dashboard config that has no code-side representation — must be se
 
 All exception handlers live in `src/api/app.py` and produce a unified `ErrorEnvelope` response.
 
+**A new log site needs nothing special: `exc_info=` is safe** (see "U+0000 and SQL parameters"). `error=str(exc)` on an exception that may be a database error is not, so never log `str()` of a caught broad exception, and never copy it into a new exception's message, which is rendered like any other.
+
 ### Logging severity by handler type
 
 | Handler | Log level | Rationale |
@@ -764,7 +768,8 @@ All exception handlers live in `src/api/app.py` and produce a unified `ErrorEnve
 PostgreSQL cannot store U+0000 (`text`, `varchar` or `jsonb`), and a failing statement's exception ends up in the error log.
 
 - **The API refuses U+0000 at the boundary:** `400 invalid_character` (`detail.location` = `body` | `query` | `path`), logged `http.invalid_character` with path, method and location only. One app-level `before_request`, `refuse_nul_characters` (`src/api/security/nul_characters.py`), covers every route; it runs after guards and before dependencies. A JSON body is checked on its raw bytes whenever Litestar would JSON-decode it (a handler's `data` argument is decoded **whatever the Content-Type**) or the Content-Type is JSON; multipart and other bodies are not scanned. **Never declare a `before_request` on a router, controller or handler:** Litestar runs only the innermost one, so it would switch the check off (a test pins every route, and pins the storage upload as the only form handler).
-- **Every engine sets `hide_parameters=True`** (`DatabaseManager`, `alembic/env.py`; a test finds every construction site), so no SQL parameter reaches an exception message or a log. It does **not** cover PostgreSQL's `DETAIL` on a constraint violation (`Failing row contains (...)`, `Key (...)=(...) already exists`), which the chained driver exception prints in a traceback: do not rely on it for those.
+- **Every engine sets `hide_parameters=True`** (`DatabaseManager`, `alembic/env.py`; a test finds every construction site), which keeps parameters out of SQLAlchemy's own message. That alone does not keep values out of a traceback: PostgreSQL reports them itself (`DETAIL:  Failing row contains (...)`, `Key (...)=(...) already exists`, a primary message that quotes its input) and asyncpg quotes a parameter it cannot encode.
+- **Every logged traceback shows a database exception as its class and identifiers only** (`format_exception_safely`, `src/core/exception_format.py`: `sqlstate` and the constraint / table / column / schema / data type names, plus a `StatementError`'s statement), so neither parameters nor `DETAIL` reach a log through one. A database exception is a `StatementError` (so every `DBAPIError`), a `PendingRollbackError` (its message repeats the failure's) or anything from an `asyncpg` module; whatever one was raised from is withheld with it (a codec's `ValueError` quotes the parameter). The rule goes by type: **never redact by a pattern over the text.** Frames are shown, frame locals never, in either `LOG_FORMAT`. `configure_logging` is the one renderer, so nothing may set up a second: `create_app()` passes `logging_config=None` (Litestar's default prints plain tracebacks in debug mode through a handler of its own), Granian runs with `log_enabled=False`, and a CLI command that logs a traceback calls `configure_logging` (tests pin all three). This covers logging, not a process that dies on an uncaught exception: Python itself prints that one, as in a failing `alembic upgrade`.
 
 ### Log event naming
 

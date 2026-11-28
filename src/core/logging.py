@@ -8,7 +8,13 @@ from typing import TYPE_CHECKING, Final
 
 import structlog
 
+from src.core.exception_format import format_exception_safely
+
 if TYPE_CHECKING:
+    from typing import TextIO
+
+    from structlog.typing import ExcInfo
+
     from src.core.config import Settings
 
 # Pinned unconditionally, independent of settings.log_level — raising the app
@@ -27,11 +33,19 @@ _THIRD_PARTY_LOGGER_LEVELS: Final[dict[str, int]] = {
 }
 
 
+def _write_exception_safely(sio: TextIO, exc_info: ExcInfo) -> None:
+    """``ConsoleRenderer``'s traceback hook, in place of Rich's with every frame's locals."""
+    sio.write("\n" + format_exception_safely(exc_info))
+
+
 def configure_logging(settings: Settings) -> None:
     """Configure structlog and stdlib logging bridge.
 
     Sets up shared processors, output format (JSON or console), and bridges
     stdlib logging into structlog so all logs appear in a unified format.
+
+    Both formats render a traceback through ``format_exception_safely``: this is the one place a
+    traceback becomes text, so no log call has to take care of database values itself.
 
     Args:
         settings: Application settings containing LOG_LEVEL and LOG_FORMAT.
@@ -62,13 +76,13 @@ def configure_logging(settings: Settings) -> None:
     if use_json:
         formatter_processors: list[structlog.types.Processor] = [
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.processors.format_exc_info,
+            structlog.processors.ExceptionRenderer(format_exception_safely),
             structlog.processors.JSONRenderer(),
         ]
     else:
         formatter_processors = [
             structlog.stdlib.ProcessorFormatter.remove_processors_meta,
-            structlog.dev.ConsoleRenderer(),
+            structlog.dev.ConsoleRenderer(exception_formatter=_write_exception_safely),
         ]
 
     formatter = structlog.stdlib.ProcessorFormatter(
