@@ -14,9 +14,11 @@ from uuid import uuid4
 
 import pytest
 
+from src.api.services.generation.public_errors import LEGACY_FAILED_JOB_MESSAGE
 from src.api.services.job_state_transition import (
     GenerationOutputData,
     JobStateTransitionService,
+    storable_text,
 )
 from src.core.enums import JobStatus
 from src.core.media_hash import HashSample, HashSet, PdqHash
@@ -410,6 +412,72 @@ class TestTransitionToFailed:
         assert payload.previous_status == status
         assert payload.error_message == "The AI provider is temporarily unavailable."
         assert "sentinel-secret" not in payload.error_message
+
+
+# ---------------------------------------------------------------------------
+# storable_text — provider and exception text on its way into generation_jobs
+# ---------------------------------------------------------------------------
+
+
+class TestStorableText:
+    def test_none_passes_through(self) -> None:
+        assert storable_text(None, 10) is None
+
+    def test_u0000_is_removed(self) -> None:
+        assert storable_text("a\x00b\x00\x00c", 10) == "abc"
+
+    def test_the_limit_counts_what_is_left_after_removal(self) -> None:
+        assert storable_text("\x00\x00\x00abcdef", 4) == "abcd"
+
+    def test_the_limit_counts_code_points(self) -> None:
+        assert storable_text("\U0001f3b5" * 5, 3) == "\U0001f3b5" * 3
+
+    def test_a_lone_surrogate_becomes_a_question_mark(self) -> None:
+        stored = storable_text("model \udcff\ud800.bin", 100)
+
+        assert stored == "model ??.bin"
+        assert stored.encode("utf-8") == b"model ??.bin"
+
+    def test_ordinary_text_is_unchanged(self) -> None:
+        text_from_provider = "ошибка: 'x' = y\n\t(\U0001f3b5)"
+
+        assert storable_text(text_from_provider, 100) == text_from_provider
+
+
+async def test_the_events_of_a_failure_carry_what_was_stored() -> None:
+    """The row, the client's event, the log field and the ops event get the same values."""
+    job = _make_job(JobStatus.RUNNING.value)
+    bus = AsyncMock()
+    svc, session, _ = _make_service(job, event_bus=bus)
+
+    await svc.transition_to_failed(
+        job.id,
+        public_error_message="\x00provider\x00 failed",
+        failure_code="bad\x00_node" + "x" * 200,
+        refund=False,
+        product_id="vex",
+        commit=False,
+    )
+
+    publication = svc.deferred_failure
+    assert publication is not None
+    assert publication.public_error_message == "provider failed"
+    assert publication.failure_code == "bad_node" + "x" * 92
+    written = session.execute.await_args.args[0].compile().params
+    assert written["public_error_message"] == publication.public_error_message
+    assert written["failure_code"] == publication.failure_code
+
+
+async def test_a_public_message_with_nothing_left_falls_back_to_the_fixed_one() -> None:
+    job = _make_job(JobStatus.RUNNING.value)
+    svc, session, _ = _make_service(job)
+
+    await svc.transition_to_failed(
+        job.id, public_error_message="\x00", refund=False, product_id="vex"
+    )
+
+    written = session.execute.await_args.args[0].compile().params
+    assert written["public_error_message"] == LEGACY_FAILED_JOB_MESSAGE
 
 
 # ---------------------------------------------------------------------------

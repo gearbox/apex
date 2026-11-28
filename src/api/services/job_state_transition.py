@@ -19,7 +19,7 @@ from __future__ import annotations
 
 import dataclasses
 from datetime import UTC, datetime, timedelta
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING, Any, Final, cast
 
 import structlog
 from sqlalchemy import CursorResult, func, or_
@@ -49,6 +49,26 @@ if TYPE_CHECKING:
     from src.api.services.event_bus import EventBus
 
 logger = structlog.get_logger(__name__)
+
+_DIAGNOSTIC_MAX_CHARS: Final = 2000
+_FAILURE_CODE_MAX_CHARS: Final = 100  # the width of generation_jobs.failure_code
+
+
+def storable_text(value: str | None, limit: int) -> str | None:
+    """Diagnostic text as PostgreSQL can store it, at most ``limit`` code points.
+
+    For strings that come from a provider or an exception, which no request check has seen. A
+    column that refuses one fails the guarded ``UPDATE`` that moves a job to ``failed``, and the
+    refund in the same transaction with it: the job stays charged and in flight. PostgreSQL takes
+    neither U+0000, which is removed, nor a lone surrogate (JSON can carry one, and so can a file
+    name that is not UTF-8), which becomes ``?``. Diagnostics are not content, so neither changes
+    what they mean.
+    """
+    if value is None:
+        return None
+    # U+0000 goes first, so the limit counts what is stored.
+    encodable = value.replace("\x00", "").encode(errors="replace").decode()
+    return encodable[:limit]
 
 
 @dataclasses.dataclass
@@ -418,7 +438,14 @@ class JobStateTransitionService:
         # ``error_message`` remains internal diagnostics for legacy call
         # sites. It is deliberately kept separate from the public column and
         # event payload; new paths pass ``public_error_message`` instead.
-        safe_message = public_error_message or LEGACY_FAILED_JOB_MESSAGE
+        #
+        # All three strings can come from a provider or an exception. The row and the events
+        # below get the same storable values.
+        stored_error = storable_text(error_message, _DIAGNOSTIC_MAX_CHARS)
+        safe_message = (
+            storable_text(public_error_message, _DIAGNOSTIC_MAX_CHARS) or LEGACY_FAILED_JOB_MESSAGE
+        )
+        stored_code = storable_text(failure_code, _FAILURE_CODE_MAX_CHARS)
 
         result = cast(
             "CursorResult[Any]",
@@ -440,9 +467,9 @@ class JobStateTransitionService:
                 .values(
                     status=JobStatus.FAILED.value,
                     completed_at=func.now(),
-                    error_message=error_message[:2000] if error_message is not None else None,
-                    public_error_message=safe_message[:2000],
-                    failure_code=failure_code[:100] if failure_code is not None else None,
+                    error_message=stored_error,
+                    public_error_message=safe_message,
+                    failure_code=stored_code,
                     finalization_claim_token=None,
                     finalization_lease_expires_at=None,
                 )
@@ -488,7 +515,7 @@ class JobStateTransitionService:
                 product_id=product_id,
                 reserve_event=reserve_event,
                 refund_event=refund_event,
-                failure_code=failure_code,
+                failure_code=stored_code,
                 public_error_message=safe_message,
             )
             return job, True
@@ -502,7 +529,7 @@ class JobStateTransitionService:
                 product_id=product_id,
                 reserve_event=reserve_event,
                 refund_event=refund_event,
-                failure_code=failure_code,
+                failure_code=stored_code,
                 public_error_message=safe_message,
             )
         )
@@ -568,7 +595,10 @@ class JobStateTransitionService:
         failure_code: str | None,
         public_error_message: str,
     ) -> _DeferredFailurePublication:
-        """Capture immutable data before the request session can be released."""
+        """Capture immutable data before the request session can be released.
+
+        ``failure_code`` and ``public_error_message`` are the stored values.
+        """
         return _DeferredFailurePublication(
             job_id=job.id,
             user_id=job.user_id,
@@ -576,8 +606,8 @@ class JobStateTransitionService:
             status=JobStatus.FAILED.value,
             generation_type=str(job.generation_type),
             provider=str(job.provider),
-            failure_code=failure_code[:100] if failure_code is not None else None,
-            public_error_message=public_error_message[:2000],
+            failure_code=failure_code,
+            public_error_message=public_error_message,
             product_id=product_id,
             reserve_event=reserve_event,
             refund_event=refund_event,
